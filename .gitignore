@@ -1,0 +1,28 @@
+.venv/
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+
+# Env
+venv/
+.env/
+
+# System
+.DS_Store
+Thumbs.db
+
+# Archives
+*.zip
+*.tar.gz
+
+# Tests cache
+tests/__pycache__/

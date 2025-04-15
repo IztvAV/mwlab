@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mwlab"
+version = "0.1.0"
+description = "Библиотека для проектирования СВЧ-устройств"
+authors = [{ name = "Andrey Izotov", email = "andrey.iztv@gmail.com" }]
+readme = "README.md"
+license = { text = "MIT" }
+dependencies = ["numpy"]
+[tool.setuptools.packages.find]
+where = ["mwlab"]
