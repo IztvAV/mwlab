@@ -1,7 +1,7 @@
 import numpy as np
 from pathlib import Path
 from mwlab.fileio import load_touchstone, save_touchstone
-
+import matplotlib.pyplot as plt
 
 class TouchstoneFile:
     """
@@ -139,7 +139,6 @@ class TouchstoneFile:
 
         Пример: S21, S11, S12
         """
-        import matplotlib.pyplot as plt
 
         if len(element) != 3 or not element[0].upper() == 'S':
             raise ValueError("Неверный формат элемента, ожидается строка вида 'S21'.")
