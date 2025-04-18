@@ -10,11 +10,12 @@ authors = [{ name = "Andrey Izotov", email = "andrey.iztv@gmail.com" }]
 readme = "README.md"
 license = { text = "MIT" }
 dependencies = [
-    "numpy",
-    "matplotlib",
     "scikit-rf",
-    "torch"
+    "numpy >=1.22",
+    "matplotlib >=3.0",
+    "torch >=1.10"
 ]
+
 
 [project.optional-dependencies]
 dev = ["pytest"]
