@@ -13,7 +13,6 @@ dependencies = [
     "scikit-rf",
     "numpy >=1.22",
     "matplotlib >=3.0",
-    "torch >=1.10"
 ]
 
 
