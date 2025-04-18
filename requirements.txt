@@ -1,3 +1,5 @@
 numpy
 pytest
 matplotlib
+scikit-rf
+torch
