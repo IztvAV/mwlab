@@ -1,11 +1,11 @@
 """
 mwlab.io.touchstone
 -------------------
-Мини‑контейнер TouchstoneData (Playground).
+Универсальный контейнер TouchstoneData (play‑ground‑версия).
 
-• TouchstoneData.load(path)            – чтение *.sNp
-• TouchstoneData(network, params, …)   – создание «с нуля»
-• .save(path)                          – запись с заголовком Parameters
+* TouchstoneData.load(path)             – чтение *.sNp
+* TouchstoneData(network, params, ...)  – создание «с нуля»
+* .save(path)                           – запись с корректным заголовком
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ _PARAM_RE = re.compile(r"Parameters\s*=\s*\{([^}]*)\}", re.IGNORECASE)
 
 
 class TouchstoneData:
-    """S‑матрица (`skrf.Network`) + параметры из заголовка."""
+    """Контейнер S‑матрицы (`skrf.Network`) + словаря параметров."""
 
     # ------------------------------------------------------------------ init
     def __init__(
@@ -42,9 +42,9 @@ class TouchstoneData:
         self.path = pathlib.Path(path) if path else None
 
         if self.network.number_of_ports > 9:
-            raise ValueError("> 9 портов не поддерживается.")
+            raise ValueError("> 9 портов не поддерживается.")
 
-    # -------------------------------------------------------------- factories
+    # ------------------------------------------------------------- Uploading file
     @classmethod
     def load(cls, path: Union[str, pathlib.Path]) -> "TouchstoneData":
         path = pathlib.Path(path)
@@ -60,8 +60,8 @@ class TouchstoneData:
     # ------------------------------------------------------------------ save
     def save(self, path: Optional[Union[str, pathlib.Path]] = None) -> None:
         """
-        Записывает Touchstone‑файл и гарантирует,
-        что строка  `! Parameters = {...}`  присутствует и актуальна.
+        Записывает данные в Touchstone‑файл *path*.
+        Если *path* не указан, используется self.path.
         """
         target = pathlib.Path(path) if path else self.path
         if target is None:
