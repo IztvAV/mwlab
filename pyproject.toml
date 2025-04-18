@@ -9,6 +9,16 @@ description = "Библиотека для проектирования СВЧ-�
 authors = [{ name = "Andrey Izotov", email = "andrey.iztv@gmail.com" }]
 readme = "README.md"
 license = { text = "MIT" }
-dependencies = ["numpy"]
+dependencies = [
+    "numpy",
+    "matplotlib",
+    "scikit-rf",
+    "torch"
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
 [tool.setuptools.packages.find]
 where = ["mwlab"]
+
