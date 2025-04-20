@@ -2,7 +2,7 @@
 import torch, numpy as np, pathlib
 from torch.utils.data import Dataset
 from typing import Sequence, Callable, Optional
-from io.touchstone import TouchstoneData
+from mwlab.io.touchstone import TouchstoneData
 
 class TouchstoneDataset(Dataset):
     """Итератор по *.sNp‑файлам в директории.
@@ -37,6 +37,6 @@ class TouchstoneDataset(Dataset):
 
         # -------- S‑параметры --------------------
         net = ts.network  # S‑данные
-        s = self.s_tf(net) if self.s_tf else torch.from_numpy(net.s.astype(np.complex64))
+        s = self.s_tf(net) if self.s_tf else net
 
         return x, s

@@ -3,3 +3,6 @@ pytest
 matplotlib
 scikit-rf
 torch
+seaborn
+pandas
+xarray
