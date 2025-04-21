@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import skrf as rf
 
-from mwlab.io.touchstone import TouchstoneData
+from mwlab import TouchstoneData
 
 
 # ---------- вспомогательное -------------------------------------------------

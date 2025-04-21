@@ -4,10 +4,10 @@ import numpy as np
 import pathlib
 import skrf as rf
 
-from mwlab.datasets import TouchstoneDataset
-from mwlab.io.touchstone import TouchstoneData
+from mwlab import TouchstoneData
+from mwlab import TouchstoneDataset
 from mwlab.transforms import x_transforms, s_transforms
-from mwlab.transforms import Compose
+from mwlab.transforms import TComposite
 
 
 # ---------- Фикстуры -------------------------------------------------------------
@@ -73,15 +73,13 @@ def test_dataset_getitem_raw(dataset_dir):
 # ---------- Трансформы (на основе реальных данных) ------------------------------
 
 def test_dataset_with_transforms(dataset_dir, sample_info):
-    x_tf = Compose([
+    x_tf = TComposite([
         x_transforms.X_SelectKeys(sample_info["selected_keys"]),
-        x_transforms.X_ToTensor()
     ])
-    s_tf = Compose([
+    s_tf = TComposite([
         s_transforms.S_Crop(f_start=sample_info["f_crop_min"],
                             f_stop=sample_info["f_crop_max"]),
         s_transforms.S_Resample(freq_or_n=sample_info["f_interp"]),
-        s_transforms.S_ToTensor()
     ])
 
     ds = TouchstoneDataset(dataset_dir,
@@ -92,17 +90,16 @@ def test_dataset_with_transforms(dataset_dir, sample_info):
     x, s = ds[0]
 
     # Проверка параметров (X)
-    assert isinstance(x, torch.Tensor)
+    assert isinstance(x, np.ndarray)
     assert x.ndim == 1
     assert x.shape[0] == len(sample_info["selected_keys"])
 
-    # Проверка S‑матрицы
-    assert isinstance(s, torch.Tensor)
-    assert s.ndim == 4  # (2, F, P, P)
-    assert s.shape[0] == 2                    # Re/Im
-    assert s.shape[1] == 50                   # F
-    assert s.shape[2] == sample_info["ports"]  # P
-    assert s.shape[3] == sample_info["ports"]  # P
+    # Проверка S‑матрицы (rf.Network)
+    assert isinstance(s, rf.Network)
+    assert s.s.ndim == 3  # (F, P, P)
+    assert s.s.shape[0] == 50                    # F
+    assert s.s.shape[1] == sample_info["ports"]  # P
+    assert s.s.shape[2] == sample_info["ports"]  # P
 
 
 # ---------- Обработка отсутствующих параметров -----------------------------------

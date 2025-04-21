@@ -59,19 +59,3 @@ class S_Resample:
         # Вызываем inplace-интерполяцию
         ntwk.resample(arg, **self.kwargs)
         return ntwk
-
-
-class S_ToTensor:
-    """Преобразует s-матрицу сети в тензор PyTorch с каналами real/imag.
-
-    На вход: Network
-    На выход: тензор формы (2, F, P, P)
-    """
-    def __call__(self, network: skrf.network.Network) -> torch.Tensor:
-        # Получаем комплексную s-матрицу и разделяем на real/imag
-        s = network.s.astype(np.complex64)
-        real = s.real.astype(np.float32)
-        imag = s.imag.astype(np.float32)
-        # Собираем тензор формы (2, F, P, P): [канал real; канал imag]
-        return torch.from_numpy(np.stack([real, imag], axis=0))
-

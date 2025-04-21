@@ -6,8 +6,8 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 from typing import Optional, List, Literal, Dict, Any
-from mwlab.io.touchstone import TouchstoneData
-from mwlab.datasets import TouchstoneDataset
+from mwlab import TouchstoneData
+from mwlab import TouchstoneDataset
 import skrf as rf
 
 
