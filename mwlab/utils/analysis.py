@@ -6,7 +6,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 from typing import Optional, List, Literal, Dict, Any
-from mwlab import TouchstoneData
+#from mwlab import TouchstoneData
 from mwlab import TouchstoneDataset
 import skrf as rf
 
@@ -41,8 +41,8 @@ class TouchstoneDatasetAnalyzer:
             records = []
             for idx in range(len(self.ds)):
                 if idx not in self._cache_params:
-                    ts = TouchstoneData.load(self.ds.paths[idx])
-                    self._cache_params[idx] = ts.params
+                    x, _ = self.ds[idx]
+                    self._cache_params[idx] = x
                 records.append(self._cache_params[idx])
             self._params_df = pd.DataFrame(records)
         return self._params_df
