@@ -83,7 +83,7 @@ def test_get_s_normalization_stats(analyzer):
         assert all(name in v for name in ['mean', 'std', 'min', 'max'])
 
 def test_plot_s_stats(analyzer):
-    fig = analyzer.plot_s_stats(port_out=0, port_in=0)
+    fig = analyzer.plot_s_stats()
     assert hasattr(fig, "savefig")
 
 # ------------------ exportS ------------------

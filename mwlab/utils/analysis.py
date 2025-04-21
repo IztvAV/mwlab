@@ -119,15 +119,20 @@ class TouchstoneDatasetAnalyzer:
         return self._s_xarray
 
     def _get_s_metric(self,
-                      metric: Literal['db','deg'] = 'db') -> xr.DataArray:
+                      metric: Literal['db', 'mag', 'deg'] = 'db') -> xr.DataArray:
         da = self._assemble_s_xarray()
         if metric == 'db':
             mag = np.sqrt(
-                da.sel(real_imag='real')**2 +
-                da.sel(real_imag='imag')**2
+                da.sel(real_imag='real') ** 2 +
+                da.sel(real_imag='imag') ** 2
             )
             return 20 * np.log10(mag)
-        else:
+        elif metric == 'mag':
+            return np.sqrt(
+                da.sel(real_imag='real') ** 2 +
+                da.sel(real_imag='imag') ** 2
+            )
+        elif metric == 'deg':
             phase = np.arctan2(
                 da.sel(real_imag='imag'),
                 da.sel(real_imag='real')
@@ -136,12 +141,14 @@ class TouchstoneDatasetAnalyzer:
             coords = {k: v for k, v in da.coords.items() if k != 'real_imag'}
             return xr.DataArray(
                 unwrapped,
-                dims=('sample','freq','port_out','port_in'),
+                dims=('sample', 'freq', 'port_out', 'port_in'),
                 coords=coords
             )
+        else:
+            raise ValueError(f"Неподдерживаемая метрика: {metric}")
 
     def summarize_s(self,
-                    metric: Literal['db','deg'] = 'db') -> xr.Dataset:
+                    metric: Literal['db', 'mag', 'deg'] = 'db') -> xr.Dataset:
         da = self._get_s_metric(metric)
         return xr.Dataset({
             'mean': da.mean(dim='sample'),
@@ -151,7 +158,7 @@ class TouchstoneDatasetAnalyzer:
         })
 
     def get_s_normalization_stats(self,
-                                  metric: Literal['db','deg'] = 'db'
+                                  metric: Literal['db', 'mag', 'deg'] = 'db'
                                   ) -> Dict[Any, Dict[str, np.ndarray]]:
         ds = self.summarize_s(metric)
         out: Dict = {}
@@ -168,7 +175,7 @@ class TouchstoneDatasetAnalyzer:
     def plot_s_stats(self,
                      port_out: int = 1,
                      port_in:  int = 1,
-                     metric:   Literal['db','deg'] = 'db',
+                     metric:   Literal['db', 'mag', 'deg'] = 'db',
                      stats:    List[str] = ['mean','std','min','max']):
         ds = self.summarize_s(metric)
         freq = ds['freq'].values
@@ -193,7 +200,7 @@ class TouchstoneDatasetAnalyzer:
                              y=ds[nm].sel(port_out=port_out, port_in=port_in),
                              ax=ax, linestyle=style, label=nm)
 
-        unit_label = 'dB' if metric == 'db' else 'deg'
+        unit_label = {'db': 'dB', 'mag': '|S|', 'deg': 'deg'}[metric]
         unit_freq = getattr(self.common_freq, "dtype", "Hz") if self.common_freq is not None else "Hz"
         ax.set_xlabel(f'Frequency ({unit_freq})')
         ax.set_ylabel(f'S{port_out+1}{port_in+1} ({unit_label})')
