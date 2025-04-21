@@ -55,6 +55,9 @@ class DatasetsGenerator:
             s_params_set_complex = CSTResultsWrapper(self.cst_project_path).raw_complex_sparams
 
             #   и сгенерировать тачстоун
+            if not os.path.exists('sparams'):
+                os.makedirs('sparams')
+                        
             ts_file_path = 'sparams\\sparams_'  + get_random_n_bytes_ascii_string(8)
             TouchstoneGenerator(ts_file_path, size_errors_set).convert_and_save_these_sparams(s_params_set_complex)
 
