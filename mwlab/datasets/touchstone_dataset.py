@@ -2,7 +2,7 @@
 import torch, numpy as np, pathlib
 from torch.utils.data import Dataset
 from typing import Sequence, Callable, Optional
-from mwlab.io.touchstone import TouchstoneData
+from mwlab import TouchstoneData
 
 class TouchstoneDataset(Dataset):
     """Итератор по *.sNp‑файлам в директории.
