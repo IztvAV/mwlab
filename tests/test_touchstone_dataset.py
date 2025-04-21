@@ -71,7 +71,6 @@ def test_dataset_getitem_raw(dataset_dir):
 
 
 # ---------- Трансформы (на основе реальных данных) ------------------------------
-
 def test_dataset_with_transforms(dataset_dir, sample_info):
     x_tf = TComposite([
         x_transforms.X_SelectKeys(sample_info["selected_keys"]),
@@ -90,9 +89,9 @@ def test_dataset_with_transforms(dataset_dir, sample_info):
     x, s = ds[0]
 
     # Проверка параметров (X)
-    assert isinstance(x, np.ndarray)
-    assert x.ndim == 1
-    assert x.shape[0] == len(sample_info["selected_keys"])
+    assert isinstance(x, dict), "x должен быть словарём после X_SelectKeys"
+    assert set(x.keys()) == set(sample_info["selected_keys"]), "Неверный набор ключей"
+    assert all(isinstance(v, float) or np.isnan(v) for v in x.values()), "Значения должны быть числами или NaN"
 
     # Проверка S‑матрицы (rf.Network)
     assert isinstance(s, rf.Network)
@@ -100,7 +99,6 @@ def test_dataset_with_transforms(dataset_dir, sample_info):
     assert s.s.shape[0] == 50                    # F
     assert s.s.shape[1] == sample_info["ports"]  # P
     assert s.s.shape[2] == sample_info["ports"]  # P
-
 
 # ---------- Обработка отсутствующих параметров -----------------------------------
 
