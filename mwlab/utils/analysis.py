@@ -166,13 +166,16 @@ class TouchstoneDatasetAnalyzer:
         return out
 
     def plot_s_stats(self,
-                     port_out: int = 0,
-                     port_in:  int = 0,
+                     port_out: int = 1,
+                     port_in:  int = 1,
                      metric:   Literal['db','deg'] = 'db',
                      stats:    List[str] = ['mean','std','min','max']):
         ds = self.summarize_s(metric)
         freq = ds['freq'].values
         fig, ax = plt.subplots(figsize=(8,4))
+
+        port_out -= 1
+        port_in -= 1
 
         if 'mean' in stats:
             sns.lineplot(x=freq,
@@ -193,7 +196,7 @@ class TouchstoneDatasetAnalyzer:
         unit_label = 'dB' if metric == 'db' else 'deg'
         unit_freq = getattr(self.common_freq, "dtype", "Hz") if self.common_freq is not None else "Hz"
         ax.set_xlabel(f'Frequency ({unit_freq})')
-        ax.set_ylabel(f'S{port_out}{port_in} ({unit_label})')
+        ax.set_ylabel(f'S{port_out+1}{port_in+1} ({unit_label})')
         ax.legend()
         plt.tight_layout()
         return fig
