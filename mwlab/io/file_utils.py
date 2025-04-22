@@ -4,6 +4,12 @@ import pathlib
 import zipfile
 import warnings
 
+# Настраиваем короткий формат вывода предупреждений
+def custom_formatwarning(msg, *args, **kwargs):
+    return f"Warning: {msg}\n"
+
+warnings.formatwarning = custom_formatwarning
+
 def backup_to_drive(env_path: str, drive_zip_fname: str):
     """Архивирует папку `env_path` в ZIP‑файл `drive_zip_fname`."""
     env_path = pathlib.Path(env_path)
