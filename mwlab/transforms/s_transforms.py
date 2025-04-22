@@ -17,18 +17,17 @@ class S_Crop:
         Единица измерения ('Hz', 'kHz', 'MHz', 'GHz').
         Если None — используется `network.frequency.unit`.
     """
-    def __init__(self, f_start: float, f_stop: float, unit: str | None = None):
+    def __init__(self, f_start: float, f_stop: float, unit: str = 'Hz'):
         if f_start >= f_stop:
             raise ValueError("f_start должен быть меньше f_stop")
         self.f_start = f_start
         self.f_stop = f_stop
-        self.unit = unit  # может быть None
+        self.unit = unit
 
     def __call__(self, network: skrf.Network) -> skrf.Network:
-        unit = self.unit or network.frequency.unit  # <‑‑ ключевая строка
         return network.cropped(f_start=self.f_start,
                                f_stop=self.f_stop,
-                               unit=unit)
+                               unit=self.unit)
 
 
 class S_Resample:
