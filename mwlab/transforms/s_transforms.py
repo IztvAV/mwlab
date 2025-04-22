@@ -18,8 +18,13 @@ class S_Crop:
         self.unit = unit
 
     def __call__(self, network: skrf.network.Network) -> skrf.network.Network:
-        # Используем метод cropped для создания новой сети без изменения исходной
-        return network.cropped(f_start=self.f_start, f_stop=self.f_stop, unit=self.unit)
+        # Если unit не задан, используем unit сети (и проверим, что он не None)
+        unit = self.unit or network.frequency.unit
+        if unit is None:
+            raise ValueError("Невозможно определить единицу измерения частоты: "
+                             "ни self.unit, ни network.frequency.unit не заданы.")
+
+        return network.cropped(f_start=self.f_start, f_stop=self.f_stop, unit=unit)
 
 
 class S_Resample:
