@@ -287,14 +287,14 @@ class TouchstoneDatasetAnalyzer:
 
         Возвращает:
             pd.DataFrame со строками: ['mean', 'std', ...]
-            и колонками: ['S11.re', 'S11.im', 'S12.re', ...]
+            и колонками: ['S11.real', 'S11.imag', 'S12.real', ...]
         """
         da = self._assemble_s_xarray()  # (S, 2, F, P, P)
 
         stat = {}
         for po in da.coords['port_out'].values:
             for pi in da.coords['port_in'].values:
-                for ri, label in enumerate(['re', 'im']):
+                for ri, label in enumerate(['real', 'imag']):
                     arr = da.sel(real_imag=label, port_out=po, port_in=pi).values  # (S, F)
                     arr_flat = arr.reshape(-1)
 
