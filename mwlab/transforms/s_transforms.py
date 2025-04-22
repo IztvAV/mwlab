@@ -4,27 +4,31 @@ import numpy as np
 import skrf
 
 class S_Crop:
-    """Обрезает сеть по диапазону частот [f_start, f_stop].
-
-    Параметры:
-        f_start (float): начальная частота в единицах unit.
-        f_stop (float): конечная частота в единицах unit.
-        unit (str, optional): единица измерения частоты ('GHz','MHz' и т.д.).
-                              Если None, используется unit сети.
     """
-    def __init__(self, f_start: float, f_stop: float, unit: str = None):
+    Обрезает сеть по диапазону частот [f_start, f_stop].
+
+    Параметры
+    ----------
+    f_start : float
+        Начальная частота в единицах *unit*.
+    f_stop  : float
+        Конечная частота в единицах *unit*.
+    unit : str, optional
+        Единица измерения ('Hz', 'kHz', 'MHz', 'GHz').
+        Если None — используется `network.frequency.unit`.
+    """
+    def __init__(self, f_start: float, f_stop: float, unit: str | None = None):
+        if f_start >= f_stop:
+            raise ValueError("f_start должен быть меньше f_stop")
         self.f_start = f_start
         self.f_stop = f_stop
-        self.unit = unit
+        self.unit = unit  # может быть None
 
-    def __call__(self, network: skrf.network.Network) -> skrf.network.Network:
-        # Если unit не задан, используем unit сети (и проверим, что он не None)
-        unit = self.unit or network.frequency.unit
-        if unit is None:
-            raise ValueError("Невозможно определить единицу измерения частоты: "
-                             "ни self.unit, ни network.frequency.unit не заданы.")
-
-        return network.cropped(f_start=self.f_start, f_stop=self.f_stop, unit=unit)
+    def __call__(self, network: skrf.Network) -> skrf.Network:
+        unit = self.unit or network.frequency.unit  # <‑‑ ключевая строка
+        return network.cropped(f_start=self.f_start,
+                               f_stop=self.f_stop,
+                               unit=unit)
 
 
 class S_Resample:
