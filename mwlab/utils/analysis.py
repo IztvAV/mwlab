@@ -294,7 +294,7 @@ class TouchstoneDatasetAnalyzer:
         stat = {}
         for po in da.coords['port_out'].values:
             for pi in da.coords['port_in'].values:
-                for ri, label in enumerate(['real', 'imag']):
+                for ri, label in enumerate(['re', 'im']):
                     arr = da.sel(real_imag=label, port_out=po, port_in=pi).values  # (S, F)
                     arr_flat = arr.reshape(-1)
 
