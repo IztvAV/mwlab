@@ -279,6 +279,37 @@ class TouchstoneDatasetAnalyzer:
         plt.tight_layout()
         return fig
 
+    def summarize_s_components(self) -> pd.DataFrame:
+        """
+        Вычисляет сводную статистику (mean, std, min, max, nan_count, is_constant)
+        по всем компонентам S-параметров: Sij.real и Sij.imag,
+        усреднённо по всем сэмплам и всем частотам.
+
+        Возвращает:
+            pd.DataFrame со строками: ['mean', 'std', ...]
+            и колонками: ['S11.real', 'S11.imag', 'S12.real', ...]
+        """
+        da = self._assemble_s_xarray()  # (S, 2, F, P, P)
+
+        stat = {}
+        for po in da.coords['port_out'].values:
+            for pi in da.coords['port_in'].values:
+                for ri, label in enumerate(['real', 'imag']):
+                    arr = da.sel(real_imag=label, port_out=po, port_in=pi).values  # (S, F)
+                    arr_flat = arr.reshape(-1)
+
+                    name = f"S{po + 1}{pi + 1}.{label}"
+                    stat[name] = {
+                        "mean": np.nanmean(arr_flat),
+                        "std": np.nanstd(arr_flat),
+                        "min": np.nanmin(arr_flat),
+                        "max": np.nanmax(arr_flat),
+                        "nan_count": np.isnan(arr_flat).sum(),
+                        "is_constant": np.nanstd(arr_flat) < 1e-12,
+                    }
+
+        return pd.DataFrame(stat)
+
     # ========================================================
     #                        ЭКСПОРТ
     # ========================================================
