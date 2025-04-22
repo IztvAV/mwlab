@@ -287,7 +287,7 @@ class TouchstoneDatasetAnalyzer:
 
         Возвращает:
             pd.DataFrame со строками: ['mean', 'std', ...]
-            и колонками: ['S11.real', 'S11.imag', 'S12.real', ...]
+            и колонками: ['S11.re', 'S11.im', 'S12.re', ...]
         """
         da = self._assemble_s_xarray()  # (S, 2, F, P, P)
 
