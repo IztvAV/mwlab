@@ -189,11 +189,12 @@ class TouchstoneDatasetAnalyzer:
             )
 
         if metric == 'db':
+            eps = 1e-12
             mag = np.sqrt(
                 da.sel(real_imag='real') ** 2 +
                 da.sel(real_imag='imag') ** 2
             )
-            return 20 * np.log10(mag)
+            return 20 * np.log10(mag + eps)
 
         if metric == 'deg':
             phase = np.arctan2(
