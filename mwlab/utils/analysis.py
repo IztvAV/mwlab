@@ -24,8 +24,9 @@ class TouchstoneDatasetAnalyzer:
     """
 
     # ------------------------- init -------------------------
-    def __init__(self, dataset: TouchstoneDataset):
+    def __init__(self, dataset: TouchstoneDataset, eps_db: float = 1e-12):
         self.ds = dataset
+        self._eps_db = eps_db
 
         # кеш для ускорения
         self._cache_params: Dict[int, Dict[str, float]] = {}
@@ -189,12 +190,11 @@ class TouchstoneDatasetAnalyzer:
             )
 
         if metric == 'db':
-            eps = 1e-12
             mag = np.sqrt(
                 da.sel(real_imag='real') ** 2 +
                 da.sel(real_imag='imag') ** 2
             )
-            return 20 * np.log10(mag + eps)
+            return 20 * np.log10(mag + self._eps_db)
 
         if metric == 'deg':
             phase = np.arctan2(
