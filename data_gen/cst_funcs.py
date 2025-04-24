@@ -20,7 +20,7 @@ def get_cst_api_path_via_registry_search():
         value, _ = winreg.QueryValueEx(key, "")
         exe_path = value.split(",")[0].strip('"')
 
-        #   должно быть в C:\Soft\CST_Studio_Suite\AMD64\python_cst_libraries
+        #   например у меня в C:\Soft\CST_Studio_Suite\AMD64\python_cst_libraries
         if os.path.isfile(exe_path):
             root_dir = os.path.dirname(exe_path)
             python_api_dir = os.path.join(root_dir, "python_cst_libraries")
@@ -71,18 +71,25 @@ class CSTWrapper:
         StoreDoubleParameter("dim10_delta", ''' + str(np_set[9]) + ''')
         StoreDoubleParameter("dim11_delta", ''' + str(np_set[10]) + ''')
         StoreDoubleParameter("dim12_delta", ''' + str(np_set[11]) + ''')
-        StoreDoubleParameter("dim14_delta", ''' + str(np_set[12]) + ''')
-        StoreDoubleParameter("dim15_delta", ''' + str(np_set[13]) + ''')
-        StoreDoubleParameter("dim16_delta", ''' + str(np_set[14]) + ''')
-        StoreDoubleParameter("dim17_delta", ''' + str(np_set[15]) + ''')
-        StoreDoubleParameter("dim20_delta", ''' + str(np_set[16]) + ''')
+        StoreDoubleParameter("dim13_delta", ''' + str(np_set[12]) + ''')
+        StoreDoubleParameter("dim14_delta", ''' + str(np_set[13]) + ''')
+        StoreDoubleParameter("dim15_delta", ''' + str(np_set[14]) + ''')
+        StoreDoubleParameter("dim16_delta", ''' + str(np_set[15]) + ''')
+        StoreDoubleParameter("dim17_delta", ''' + str(np_set[16]) + ''')
+        StoreDoubleParameter("dim18_delta", ''' + str(np_set[17]) + ''')
+        StoreDoubleParameter("dim19_delta", ''' + str(np_set[18]) + ''')
+        StoreDoubleParameter("dim20_delta", ''' + str(np_set[19]) + ''')
         RebuildOnParametricChange (bfullRebuild, bShowErrorMsgBox)
         End Sub'''
         self.cst_project.schematic.execute_vba_code(vba_command, timeout=None)
 
 
     def run_solver(self):
-        self.cst_project.model3d.run_solver()
+        try:
+            self.cst_project.model3d.run_solver()
+        except Exception as e:
+            print(e)
+            print('SOLVER ERROR')
 
 
     def save_as(self, new_project_file_path: str):
@@ -141,14 +148,15 @@ class CSTResultsWrapper:
 
 #   EXAMPLES
 if __name__ == '__main__':
-    #   get results (if they exist)
-    file_path = r'C:\Users\admin\PycharmProjects\NNWithCST\cst_projects\buro_zero.cst'
-    #   results
-    cst_results = CSTResultsWrapper(file_path)
-    print(cst_results.raw_complex_sparams)
+    pass
+    # #   get results (if they exist)
+    # file_path = r'C:\Users\admin\PycharmProjects\NNWithCST\cst_projects\buro_zero.cst'
+    # #   results
+    # cst_results = CSTResultsWrapper(file_path)
+    # print(cst_results.raw_complex_sparams)
 
-    exit()
-    #   print params list of a CST project
-    cst_project = CSTWrapper(file_path)
-    cst_project.print_attributes_raw()
-    cst_project.close()
+    # exit()
+    # #   print params list of a CST project
+    # cst_project = CSTWrapper(file_path)
+    # cst_project.print_attributes_raw()
+    # cst_project.close()
