@@ -149,14 +149,3 @@ class CSTResultsWrapper:
 #   EXAMPLES
 if __name__ == '__main__':
     pass
-    # #   get results (if they exist)
-    # file_path = r'C:\Users\admin\PycharmProjects\NNWithCST\cst_projects\buro_zero.cst'
-    # #   results
-    # cst_results = CSTResultsWrapper(file_path)
-    # print(cst_results.raw_complex_sparams)
-
-    # exit()
-    # #   print params list of a CST project
-    # cst_project = CSTWrapper(file_path)
-    # cst_project.print_attributes_raw()
-    # cst_project.close()
