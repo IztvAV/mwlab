@@ -69,7 +69,7 @@ if __name__ == '__main__':
     print('start @', datetime.datetime.now())
     main_start_time = datetime.datetime.now()
 
-    cst_project_path = r'C:\Users\admin\PycharmProjects\NNWithCST\cst_projects\buro_20.cst'
+    cst_project_path = путь к cst файлу
     DatasetsGenerator(cst_project_path).generate_this_many_datasets(200)
 
     print('генерация датасета закончена, это заняло', datetime.datetime.now() - main_start_time)
