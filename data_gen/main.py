@@ -29,17 +29,18 @@ class DatasetsGenerator:
         iters_number = iters
 
         #   набор входных данных, используя latin-hypercube
-        #   A элементов, Б наборов всего, 17 входов у нас на модели
-        size_errors_np_arrays = lhs(17, iters_number)
+        #   A элементов, Б наборов всего, 20 входов у нас на модели
+        size_errors_np_arrays = lhs(20, iters_number)
         # print(f"size_errors_np_arrays shape: {size_errors_np_arrays.shape}, type: {type(size_errors_np_arrays)}")
         #   перевод в область от -100 до 100 микрон, 0 = -100, 1 = 100
-        #   микрон это 10 ^ -6, у нас ** 3 потомучто единица измерений в модели = мм
+        #   микрон это 10 ^ -6, у нас ** 3 потому что единица измерений в модели = мм
         scale = 10 ** 3
         size_errors_np_arrays = (size_errors_np_arrays * 200 - 100) / scale
 
         for i in range(iters_number):
             start_datetime = datetime.datetime.now()
             print('итерация:', i + 1, '@', start_datetime, end='...')
+
             #   модель
             cst_project = CSTWrapper(self.cst_project_path)
 
@@ -57,18 +58,18 @@ class DatasetsGenerator:
             #   и сгенерировать тачстоун
             if not os.path.exists('sparams'):
                 os.makedirs('sparams')
-                        
-            ts_file_path = 'sparams\\sparams_'  + get_random_n_bytes_ascii_string(8)
+
+            ts_file_path = 'sparams\\sparams_'  + get_random_n_bytes_ascii_string(8) + '_' + str(i)
             TouchstoneGenerator(ts_file_path, size_errors_set).convert_and_save_these_sparams(s_params_set_complex)
 
-            print(' заняло', datetime.datetime.now() - start_datetime)
+            print(' заняла', datetime.datetime.now() - start_datetime)
 
 
 if __name__ == '__main__':
     print('start @', datetime.datetime.now())
     main_start_time = datetime.datetime.now()
 
-    cst_project_path = r'C:\Users\admin\PycharmProjects\NNWithCST\cst_projects\buro.cst'
-    DatasetsGenerator(cst_project_path).generate_this_many_datasets(2)
+    cst_project_path = r'C:\Users\admin\PycharmProjects\NNWithCST\cst_projects\buro_20.cst'
+    DatasetsGenerator(cst_project_path).generate_this_many_datasets(200)
 
     print('генерация датасета закончена, это заняло', datetime.datetime.now() - main_start_time)
