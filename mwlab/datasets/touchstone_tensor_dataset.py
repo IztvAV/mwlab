@@ -12,7 +12,7 @@ import skrf as rf
 from mwlab.datasets import TouchstoneDataset  # «сырой» датасет
 
 # --------------------------------------------------------------------------- #
-#                                helpers                                       #
+#                                helpers                                      #
 # --------------------------------------------------------------------------- #
 
 
@@ -34,7 +34,7 @@ def _parse_channel(tag: str) -> Tuple[int, int, str]:
 
 
 def _convert_component(s: np.ndarray, comp: str, *, eps: float = 1e-12) -> np.ndarray:
-    """Convert a 1‑D complex vector *s* into the requested scalar component."""
+    """Преобразует одномерный комплексный вектор *s* в заданную скалярную компоненту."""
     comp = comp.lower()
     if comp == "real":
         return s.real
@@ -46,13 +46,12 @@ def _convert_component(s: np.ndarray, comp: str, *, eps: float = 1e-12) -> np.nd
         return np.abs(s)
     if comp == "deg":
         return np.unwrap(np.angle(s), axis=-1) * 180 / np.pi
-    raise ValueError(f"Unknown component: {comp!r}")
+    raise ValueError(f"Неизвестная компонента: {comp!r}")
 
 
 # --------------------------------------------------------------------------- #
-#                        TouchstoneTensorDataset                               #
+#                        TouchstoneTensorDataset                              #
 # --------------------------------------------------------------------------- #
-
 
 class TouchstoneTensorDataset(Dataset):
     r"""PyTorch‑совместимый датасет, преобразующий ``TouchstoneDataset``.
@@ -100,7 +99,7 @@ class TouchstoneTensorDataset(Dataset):
         self.x_keys: List[str] = sorted(keys_union)
         self._x_dim: int = len(self.x_keys)
 
-        # ---- сеть‑зависимые параметры ------------------------------------ #
+        # ---- Network‑зависимые параметры ---------------------------------- #
         assert first_net is not None
         self._n_ports: int = first_net.number_of_ports
         self._freq_len: int = first_net.s.shape[0]

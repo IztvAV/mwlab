@@ -32,23 +32,16 @@ def sample_info(dataset_dir):
     f_crop_min = fmin_hz + 0.25 * (fmax_hz - fmin_hz)
     f_crop_max = fmax_hz - 0.25 * (fmax_hz - fmin_hz)
 
-    # Единица частоты (для S_Crop)
-    unit = ts.network.frequency.unit  # например, 'GHz'
-    multiplier = rf.Frequency.multiplier_dict[unit.lower()]
-    f_crop_min_scaled = f_crop_min / multiplier
-    f_crop_max_scaled = f_crop_max / multiplier
-
     # Создаём объект Frequency для S_Resample (в Гц)
     n_points = 50
     f_interp = rf.Frequency.from_f(f=np.linspace(f_crop_min, f_crop_max, n_points), unit='Hz')
 
     return {
         "selected_keys": selected_keys,
-        "f_crop_min": f_crop_min_scaled,  # в native unit для crop
-        "f_crop_max": f_crop_max_scaled,
+        "f_crop_min": f_crop_min,  # в native unit для crop
+        "f_crop_max": f_crop_max,
         "f_interp": f_interp,
-        "ports": ts.network.number_of_ports,
-        "unit": unit
+        "ports": ts.network.number_of_ports
     }
 
 

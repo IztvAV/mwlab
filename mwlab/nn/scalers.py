@@ -13,8 +13,9 @@ from __future__ import annotations
 import torch
 from typing import Sequence, Tuple
 
-
-# ───────────────────────────────── helpers ──────────────────────────────────
+# --------------------------------------------------------------------------- #
+#                                helpers                                      #
+# --------------------------------------------------------------------------- #
 def _norm_dim(arg: int | Sequence[int] | None) -> Tuple[int, ...]:
     """
     Приводит аргумент `dim` к кортежу целых:
@@ -46,8 +47,9 @@ def _update_buffer(module: torch.nn.Module, name: str, value: torch.Tensor) -> N
     else:
         getattr(module, name).copy_(value)
 
-
-# ───────────────────────────────── base class ───────────────────────────────
+# --------------------------------------------------------------------------- #
+#                                base class                                   #
+# --------------------------------------------------------------------------- #
 class _Base(torch.nn.Module):
     """
     Базовый класс скейлеров.
@@ -78,8 +80,9 @@ class _Base(torch.nn.Module):
     # ── public API (дочерние классы должны определить: fit, forward, inverse) ─
     def fit(self, data: torch.Tensor, dim: Sequence[int] | int | None = None): ...  # noqa: D401,E701  (abstract stub)
 
-
-# ──────────────────────────────── StdScaler ─────────────────────────────────
+# --------------------------------------------------------------------------- #
+#                                StdScaler                                    #
+# --------------------------------------------------------------------------- #
 class StdScaler(_Base):
     """
     Стандартизация:
@@ -121,8 +124,9 @@ class StdScaler(_Base):
     def extra_repr(self) -> str:  # для красивого print(module)
         return f"dim={self.default_dim}, unbiased={self.unbiased}, eps={self.eps}"
 
-
-# ─────────────────────────────── MinMaxScaler ───────────────────────────────
+# --------------------------------------------------------------------------- #
+#                               MinMaxScaler                                  #
+# --------------------------------------------------------------------------- #
 class MinMaxScaler(_Base):
     """
     Линейное масштабирование в диапазон [a, b].
