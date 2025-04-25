@@ -6,3 +6,4 @@ torch
 seaborn
 pandas
 xarray
+lightning
