@@ -8,8 +8,6 @@ mwlab.io.touchstone
 * .save(path)                           – запись с корректным заголовком
 """
 
-from __future__ import annotations
-
 import pathlib
 import re
 from typing import Dict, Optional, Union
