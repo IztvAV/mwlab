@@ -1,110 +1,144 @@
 # tests/test_touchstone_tensor_dataset.py
+"""
+Проверки TouchstoneTensorDataset и миксина _CachedDataset.
+
+Потребуются «живые» *.sNp; путь передает фикстура `dataset_dir`
+
+Покрываем:
+    ✓ корректная длина и форма X / Y;
+    ✓ swap_xy   — инверсная постановка;
+    ✓ return_meta – наличие meta с путём и params;
+    ✓ LRU-кэш (_CachedDataset): ограничение размера и переиспользование объектов.
+"""
+
 import pathlib
 import pytest
-import torch
-import numpy as np
 
-from mwlab import TouchstoneTensorDataset
+from mwlab.datasets.touchstone_dataset import TouchstoneDataset
+from mwlab.datasets.touchstone_tensor_dataset import TouchstoneTensorDataset
+from mwlab.codecs.touchstone_codec import TouchstoneCodec
 
+# ─────────────────────────────────────────────────────────────────────────────
+#                                       FIXTURES
+# ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="module")
-def dataset_dir():
+def dataset_dir() -> pathlib.Path:
     """Путь к директории с тестовыми *.sNp файлами."""
     return pathlib.Path(__file__).parent.parent / "Data" / "Filter12"
 
 
-# ---------------------------------------------------------------------------
-# 1. Базовая работоспособность и размеры тензоров
-# ---------------------------------------------------------------------------
-
-def test_basic_shapes(dataset_dir):
-    ds = TouchstoneTensorDataset(dataset_dir)
-    assert len(ds) > 0
-
-    x, y = ds[0]
-    assert isinstance(x, torch.Tensor) and isinstance(y, torch.Tensor)
-    assert x.dtype == torch.float32 and y.dtype == torch.float32
-    assert x.shape == (len(ds.x_keys),)
-    assert y.shape[0] == len(ds.y_channels)
-    assert y.shape[1] == ds._freq_len
+@pytest.fixture(scope="module")
+def codec(dataset_dir):
+    """Генерируем Codec по содержимому директории (real/imag, union x_keys)."""
+    raw = TouchstoneDataset(dataset_dir)
+    return TouchstoneCodec.from_dataset(raw)
 
 
-# ---------------------------------------------------------------------------
-# 2. Автогенерация каналов «components → y_channels»
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("components", [["real", "imag"], ["db"], ["mag", "deg"]])
-def test_components_autogeneration(dataset_dir, components):
-    ds = TouchstoneTensorDataset(dataset_dir, components=components, y_channels=None)
-    n_ports = ds._n_ports
-    expected_c = len(components) * n_ports * n_ports
-    assert len(ds.y_channels) == expected_c
-    _, y = ds[0]
-    assert y.shape[0] == expected_c
+@pytest.fixture(scope="module")
+def ds_direct(dataset_dir, codec):
+    """Прямая задача X ➜ Y (swap_xy=False)."""
+    return TouchstoneTensorDataset(
+        root=dataset_dir,
+        codec=codec,
+        swap_xy=False,
+        return_meta=False,
+        cache_size=0,      # кэш выключен
+    )
 
 
-# ---------------------------------------------------------------------------
-# 3. y_channels имеет приоритет над components
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+#                                       HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
 
-def test_y_channels_override(dataset_dir):
-    custom = ["S11.real", "S12.imag"]
-    ds = TouchstoneTensorDataset(dataset_dir, y_channels=custom, components=["db", "deg"])
-    assert ds.y_channels == custom
-    _, y = ds[0]
-    assert y.shape[0] == len(custom)
-
-
-# ---------------------------------------------------------------------------
-# 4. Проверка формата y_channels
-# ---------------------------------------------------------------------------
-
-def test_y_channels_format(dataset_dir):
-    ds = TouchstoneTensorDataset(dataset_dir)
-    for tag in ds.y_channels:
-        assert tag.startswith("S") and "." in tag
-        i, j, comp = tag[1], tag[2], tag[4:]
-        assert i.isdigit() and j.isdigit()
-        assert comp in {"real", "imag", "db", "mag", "deg"}
+def _assert_shapes(ds: TouchstoneTensorDataset, idx: int = 0):
+    """Проверка размерностей X-вектора и Y-тензора."""
+    x, y = ds[idx]
+    C, F = y.shape
+    assert x.ndim == 1
+    assert x.numel() == len(ds.codec.x_keys)
+    assert C == len(ds.codec.y_channels)
+    assert F == len(ds.codec.freq_hz)
 
 
-# ---------------------------------------------------------------------------
-# 5. Проверка значений Y: S11.real
-# ---------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+#                                       TESTS
+# ─────────────────────────────────────────────────────────────────────────────
 
-def test_y_tensor_values(dataset_dir):
-    ds = TouchstoneTensorDataset(dataset_dir, y_channels=["S11.real"])
-    _, y = ds[0]
-    _, net = ds._base[0]
-    expected = net.s[:, 0, 0].real
-    torch.testing.assert_close(y[0], torch.tensor(expected, dtype=torch.float32))
-
-
-# ---------------------------------------------------------------------------
-# 6. LRU-кэш (ограничение размера + вытеснение)
-# ---------------------------------------------------------------------------
-
-def test_lru_cache(dataset_dir):
-    ds = TouchstoneTensorDataset(dataset_dir, cache_size=2)
-    for i in range(min(4, len(ds))):
-        _ = ds[i]
-    assert len(ds._cache) <= 2
-
-# ---------------------------------------------------------------------------
-# 7. __repr__ / __str__ содержат ключевую информацию
-# ---------------------------------------------------------------------------
-
-def test_repr_str(dataset_dir):
-    ds = TouchstoneTensorDataset(dataset_dir, cache_size=1)
-    txt = str(ds)
-    assert all(tok in txt for tok in ["samples=", "x_dim=", "y_shape=", "cache="])
+def test_length_matches_filecount(ds_direct, dataset_dir):
+    """
+    Количество элементов в датасете соответствует количеству файлов *.sNp.
+    """
+    n_files = sum(1 for p in dataset_dir.rglob("*.s?p"))
+    assert len(ds_direct) == n_files
 
 
-# ---------------------------------------------------------------------------
-# 8. Ошибка при пустой директории
-# ---------------------------------------------------------------------------
+def test_shapes_direct(ds_direct):
+    """
+    Прямая задача (swap_xy=False):
+      X — вектор признаков;
+      Y — тензор (C, F).
+    """
+    _assert_shapes(ds_direct)
 
-def test_empty_dataset_dir(tmp_path):
-    with pytest.raises(ValueError, match="Пустой TouchstoneDataset"):
-        _ = TouchstoneTensorDataset(tmp_path)
 
+def test_shapes_inverse(dataset_dir, codec):
+    """
+    Обратная задача (swap_xy=True):
+      меняем местами X и Y.
+    """
+    ds_inv = TouchstoneTensorDataset(
+        root=dataset_dir,
+        codec=codec,
+        swap_xy=True,
+        return_meta=False,
+        cache_size=0,
+    )
+    y, x = ds_inv[0]  # (Y, X) в обратном порядке
+    assert y.shape[0] == len(codec.y_channels)
+    assert x.ndim == 1 and x.numel() == len(codec.x_keys)
+
+
+def test_return_meta(dataset_dir, codec):
+    """
+    Возвращение метаданных (return_meta=True):
+      meta содержит путь и параметры.
+    """
+    ds_meta = TouchstoneTensorDataset(
+        root=dataset_dir,
+        codec=codec,
+        return_meta=True,
+        cache_size=0,
+    )
+    x, y, meta = ds_meta[0]
+
+    assert "orig_path" in meta or "path" in meta, "Missing path info in meta"
+    assert isinstance(meta["params"], dict), "Missing params dict in meta"
+    assert set(meta["params"]).issuperset(codec.x_keys), "Params keys mismatch"
+
+
+def test_cache_behaviour(dataset_dir, codec):
+    """
+    Поведение кэша (_CachedDataset):
+      • cache_size=2 → в памяти не более 2 элементов;
+      • повторный доступ к индексу → тот же объект.
+    """
+    ds_cache = TouchstoneTensorDataset(
+        root=dataset_dir,
+        codec=codec,
+        cache_size=2,
+        return_meta=False,
+    )
+
+    # первый доступ — кэш пуст
+    x0, y0 = ds_cache[0]
+    first_id = id(x0)
+
+    # второй доступ к тому же idx — тот же объект
+    x0b, y0b = ds_cache[0]
+    assert id(x0b) == first_id
+
+    # запросим ещё два индекса — кэш не превышает лимит
+    _ = ds_cache[1]
+    _ = ds_cache[2]
+    assert len(ds_cache._cache) <= 2
