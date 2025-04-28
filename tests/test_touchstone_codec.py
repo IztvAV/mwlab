@@ -5,8 +5,10 @@
 Покрывает:
     ✓ round-trip  encode → decode  (real/imag и db/deg);
     ✓ корректную обработку неполных каналов (amp без фазы);
-    ✓ валидацию формата каналов (_parse_channel).
+    ✓ валидацию формата каналов (_parse_channel);
+    ✓ ресемплинг частотной сетки.
 """
+
 import numpy as np
 import pytest
 import skrf as rf
@@ -133,3 +135,29 @@ def test_parse_channel_validation(bad_tag):
     with pytest.raises(ValueError):
         codec._parse_channel(bad_tag)
 
+# ----------------------------------------------------------------
+def test_resample_encode(ts_sample):
+    """
+    Проверяем, что encode() корректно вызывает net.resample()
+    если частотная сетка Codec'а отличается от сетки TouchstoneData.
+    """
+    freq_new = np.linspace(1e9, 5e9, 51)   # 51 точка вместо 101
+    y_ch = [f"S11.real", "S11.imag"]
+
+    codec = TouchstoneCodec(
+        x_keys=["a", "b"],
+        y_channels=y_ch,
+        freq_hz=freq_new,                 # другая сетка!
+    )
+
+    x_t, y_t, meta = codec.encode(ts_sample)
+
+    # (1) длина частот = 51
+    assert y_t.shape[1] == len(freq_new)
+
+    # (2) при decode() получаем сеть ровно на freq_new
+    ts_rec = codec.decode(y_t, meta)
+    assert np.allclose(ts_rec.network.f, freq_new, atol=0.0, rtol=1e-12)
+
+    # (3) интерполированное значение не «взрывается» (проверим диапазон)
+    assert np.isfinite(ts_rec.network.s).all()
