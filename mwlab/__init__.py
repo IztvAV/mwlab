@@ -5,5 +5,6 @@ from .datasets.touchstone_tensor_dataset import  TouchstoneTensorDataset
 from .utils.analysis import TouchstoneDatasetAnalyzer
 from .codecs.touchstone_codec import TouchstoneCodec
 from .lightning.touchstone_ldm import TouchstoneLDataModule
-
+from .lightning.base_lm import BaseLModule
+from .lightning.base_lm_with_metrics import BaseLMWithMetrics
 
