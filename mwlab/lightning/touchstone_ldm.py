@@ -1,15 +1,26 @@
 # mwlab/lightning/touchstone_ldm.py
-
+import pathlib, math, torch
 import lightning as L
-import torch
 from torch.utils.data import DataLoader, random_split, Subset
-from mwlab.datasets import TouchstoneTensorDataset
+from mwlab.datasets.touchstone_tensor_dataset import TouchstoneTensorDataset
+from mwlab.codecs.touchstone_codec import TouchstoneCodec
 
 class TouchstoneLDataModule(L.LightningDataModule):
+    """
+    Lightning-обёртка вокруг TouchstoneTensorDataset.
+
+    • Принимает готовый TouchstoneCodec  (централизуем всю «логику форматов»);
+    • Поддерживает прямую и обратную задачу (swap_xy=True);
+    • Возвращает meta-объект в predict-loader-е — удобно декодировать
+      результат сразу в TouchstoneData внутри `predict_step`.
+    """
+
+    # ---------------------------------------------------------------- init
     def __init__(
         self,
-        root: str,
+        root: str | pathlib.Path,
         *,
+        codec: TouchstoneCodec,
         batch_size: int = 32,
         num_workers: int = 0,
         pin_memory: bool = True,
@@ -17,84 +28,107 @@ class TouchstoneLDataModule(L.LightningDataModule):
         test_ratio: float = 0.1,
         max_samples: int | None = None,
         seed: int = 42,
-        scaler_in=None,
-        scaler_out=None,
-        **dataset_kwargs,
+        swap_xy: bool = False,
+        cache_size: int | None = 0,
+        scaler_in: torch.nn.Module | None = None,
+        scaler_out: torch.nn.Module | None = None,
+        base_ds_kwargs: dict | None = None,
     ):
         super().__init__()
-        self.root = root
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        self.pin_memory = pin_memory
-        self.val_ratio = val_ratio
-        self.test_ratio = test_ratio
-        self.max_samples = max_samples
-        self.seed = seed
-        self.scaler_in = scaler_in
-        self.scaler_out = scaler_out
-        self.dataset_kwargs = dataset_kwargs
+        self.root          = pathlib.Path(root)
+        self.codec         = codec
+        self.batch_size    = batch_size
+        self.num_workers   = num_workers
+        self.pin_memory    = pin_memory
+        self.val_ratio     = val_ratio
+        self.test_ratio    = test_ratio
+        self.max_samples   = max_samples
+        self.seed          = seed
+        self.swap_xy       = swap_xy
+        self.cache_size    = cache_size
+        self.scaler_in     = scaler_in
+        self.scaler_out    = scaler_out
+        self.base_kwargs   = base_ds_kwargs or {}
 
-        self.train_ds = None
-        self.val_ds = None
-        self.test_ds = None
-        self.predict_ds = None
+        self.train_ds:   torch.utils.data.Dataset | None = None
+        self.val_ds:     torch.utils.data.Dataset | None = None
+        self.test_ds:    torch.utils.data.Dataset | None = None
+        self.predict_ds: torch.utils.data.Dataset | None = None
 
-    def setup(self, stage: str):
-        full_dataset = TouchstoneTensorDataset(self.root, **self.dataset_kwargs)
+    # -------------------------------------------------------------- private
+    def _make_dataset(self, *, return_meta: bool) -> TouchstoneTensorDataset:
+        return TouchstoneTensorDataset(
+            root         = self.root,
+            codec        = self.codec,
+            swap_xy      = self.swap_xy,
+            return_meta  = return_meta,
+            cache_size   = self.cache_size,
+            base_kwargs  = self.base_kwargs,
+        )
 
+    # ---------------------------------------------------------------- setup
+    def setup(self, stage: str | None = None):
+        full_ds = self._make_dataset(return_meta=False)
+
+        # ограничиваем размер набора (для быстрых экспериментальных запусков)
         if self.max_samples is not None:
-            full_dataset = Subset(full_dataset, list(range(min(self.max_samples, len(full_dataset)))))
+            full_ds = Subset(full_ds, list(range(min(len(full_ds),
+                                                   int(self.max_samples)))))
 
-        if stage == "fit" or stage is None:
-            total = len(full_dataset)
-            n_val = int(total * self.val_ratio)
-            n_test = int(total * self.test_ratio)
-            n_train = total - n_val - n_test
-
+        if stage in ("fit", None):
+            n_total = len(full_ds)
+            n_val   = math.floor(n_total * self.val_ratio)
+            n_test  = math.floor(n_total * self.test_ratio)
+            n_train = n_total - n_val - n_test
             self.train_ds, self.val_ds, self.test_ds = random_split(
-                full_dataset,
+                full_ds,
                 lengths=[n_train, n_val, n_test],
                 generator=torch.Generator().manual_seed(self.seed),
             )
 
-            # Fit скейлеров по train
-            if self.scaler_in:
-                x_tensors = torch.stack([x for x, _ in self.train_ds])
-                self.scaler_in.fit(x_tensors)
-            if self.scaler_out:
-                y_tensors = torch.stack([y for _, y in self.train_ds])
-                self.scaler_out.fit(y_tensors)
+            # ------ скейлеры ------------------------------------------------
+            if self.scaler_in is not None:
+                xs = torch.stack([x for x, _ in self.train_ds])
+                self.scaler_in.fit(xs)
+            if self.scaler_out is not None:
+                ys = torch.stack([y for _, y in self.train_ds])
+                self.scaler_out.fit(ys)
 
+        # ---------- validate / test: проверяем, что наборы уже есть -------
         elif stage == "validate":
             if self.val_ds is None:
                 raise RuntimeError("val_ds не инициализирован. Сначала вызовите setup('fit').")
-
         elif stage == "test":
             if self.test_ds is None:
                 raise RuntimeError("test_ds не инициализирован. Сначала вызовите setup('fit').")
 
+        # ---------- predict ----------------------------------------------
         elif stage == "predict":
-            # fallback: если не задана predict_ds, используем test_ds
+            # отдельный набор, в котором meta нужны
             if self.predict_ds is None:
-                self.predict_ds = self.test_ds
+                self.predict_ds = self._make_dataset(return_meta=True)
+
+    # ----------------------------------------------------------- dataloaders
+    def _loader(self, ds, shuffle=False):
+        return DataLoader(
+            ds, batch_size=self.batch_size, shuffle=shuffle,
+            num_workers=self.num_workers, pin_memory=self.pin_memory
+        )
 
     def train_dataloader(self):
-        return DataLoader(self.train_ds, batch_size=self.batch_size,
-                          num_workers=self.num_workers, pin_memory=self.pin_memory, shuffle=True)
+        return self._loader(self.train_ds, shuffle=True)
 
     def val_dataloader(self):
-        return DataLoader(self.val_ds, batch_size=self.batch_size,
-                          num_workers=self.num_workers, pin_memory=self.pin_memory)
+        return self._loader(self.val_ds)
 
     def test_dataloader(self):
-        return DataLoader(self.test_ds, batch_size=self.batch_size,
-                          num_workers=self.num_workers, pin_memory=self.pin_memory)
+        return self._loader(self.test_ds)
 
     def predict_dataloader(self):
-        return DataLoader(self.predict_ds, batch_size=self.batch_size,
-                          num_workers=self.num_workers, pin_memory=self.pin_memory)
+        return self._loader(self.predict_ds)
 
+    # ---------------------------------------------------------------- view
     def __repr__(self):
-        return (f"{self.__class__.__name__}(root={self.root}, batch_size={self.batch_size}, "
-                f"scaler_in={self.scaler_in}, scaler_out={self.scaler_out}, "
-                f"val_ratio={self.val_ratio}, test_ratio={self.test_ratio})")
+        return (f"{self.__class__.__name__}(root={self.root}, swap_xy={self.swap_xy}, "
+                f"batch={self.batch_size}, val_ratio={self.val_ratio}, "
+                f"test_ratio={self.test_ratio})")
