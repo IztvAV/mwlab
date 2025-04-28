@@ -19,7 +19,7 @@ import skrf as rf
 from typing import Sequence, Tuple, List, Dict, Any, Mapping, Optional
 
 from mwlab.io.touchstone import TouchstoneData
-
+from mwlab.datasets.touchstone_dataset import TouchstoneDataset
 
 # ──────────────────────────────────────────────────────────────────────────
 #                               TouchstoneCodec
@@ -87,10 +87,22 @@ class TouchstoneCodec:
         nan_fill: complex | float = np.nan + 1j * np.nan,
     ) -> "TouchstoneCodec":                # ← строковая аннотация
         """
-        Автоматически формирует Codec по «сырому» (исходному) TouchstoneDataset.
+        Автоматически формирует Codec по исходному TouchstoneDataset.
+
+        Параметры
+        ----------
+        ds : TouchstoneDataset | TouchstoneTensorDataset
+            Экземпляр датасета (возможно с настроенными трансформами).
+        components : Sequence[str]
+            Список компонент для авто-генерации `y_channels`
+            (например `("real", "imag")`, `("mag","deg")` …).
+        eps_db, force_resample, nan_fill
+            Передаются в конструктор `TouchstoneCodec`.
+
+        Возвращает
+        ----------
+        TouchstoneCodec
         """
-        # ленивый импорт, чтобы не провоцировать циклические связи
-        from mwlab.datasets.touchstone_dataset import TouchstoneDataset
 
         if not isinstance(ds, TouchstoneDataset):
             raise TypeError("from_dataset() ожидает TouchstoneDataset")
@@ -98,32 +110,46 @@ class TouchstoneCodec:
         if len(ds) == 0:
             raise ValueError("Dataset пуст – нечего анализировать")
 
-        # собираем полный набор параметров
+        # ------------- проходим по самому датасету (учитываются tf) -------
         key_union: set[str] = set()
-        first_ts: TouchstoneData | None = None
-        for p in ds.paths:
-            ts = TouchstoneData.load(p)
-            key_union.update(ts.params.keys())
-            if first_ts is None:
-                first_ts = ts
+        first_net = None
 
-        if first_ts is None:
-            raise RuntimeError("Не удалось прочитать ни одного Touchstone-файла")
+        for idx in range(len(ds)):
+            sample = ds[idx]
 
-        # генерируем y_channels
-        n_ports = first_ts.network.number_of_ports
-        comp_lower = [c.lower() for c in components]
-        y_ch = [
+            # TouchstoneDataset -> (x_dict, Network)
+            # TouchstoneTensorDataset -> (x_t, y_t [, meta])
+            # пробуем найти dict и skrf.Network в кортежe
+            x_part = next((p for p in sample if isinstance(p, dict)), None)
+            net_part = next((p for p in sample if hasattr(p, "s")), None)
+
+            if x_part is None or net_part is None:
+                raise TypeError(
+                    "from_dataset() ожидает, что элемент датасета содержит "
+                    "dict параметров и skrf.Network"
+                )
+
+            key_union.update(x_part.keys())
+            if first_net is None:
+                first_net = net_part
+
+        # ------------- генерируем параметры кодека ------------------------
+        assert first_net is not None
+        n_ports = first_net.number_of_ports
+        freq_hz = first_net.f            # уже после возможного S_Resample
+        comps = [c.lower() for c in components]
+
+        y_channels = [
             f"S{i + 1}{j + 1}.{comp}"
-            for comp in comp_lower
+            for comp in comps
             for i in range(n_ports)
             for j in range(n_ports)
         ]
 
         return cls(
             x_keys=sorted(key_union),
-            y_channels=y_ch,
-            freq_hz=first_ts.network.f,
+            y_channels=y_channels,
+            freq_hz=freq_hz,
             eps_db=eps_db,
             force_resample=force_resample,
             nan_fill=nan_fill,
