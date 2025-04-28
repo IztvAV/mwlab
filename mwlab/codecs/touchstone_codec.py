@@ -268,3 +268,16 @@ class TouchstoneCodec:
             return "phase", np.deg2rad(arr)
         raise RuntimeError
 
+    # для вывода основной информации о кодаке -> print(codec)
+    def __repr__(self) -> str:
+        comps = {self._parse_channel(t)[2] for t in self.y_channels}
+        return (
+            f"{self.__class__.__name__}("
+            f"x_keys={len(self.x_keys)}, "
+            f"y_channels={len(self.y_channels)} [{','.join(sorted(comps))}], "
+            f"freq_pts={len(self.freq_hz)}, "
+            f"ports={self.n_ports})"
+        )
+
+    __str__ = __repr__
+
