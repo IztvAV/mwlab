@@ -1,7 +1,7 @@
 import skrf as rf
-import couplilng_matrix as cm
 import re
 import numpy as np
+from filters.filter.couplilng_matrix import CouplingMatrix
 
 
 class MWFilter(rf.Network):
@@ -9,11 +9,11 @@ class MWFilter(rf.Network):
         super().__init__(*args, **kwargs)
 
         # Новые поля
-        self._order = 0
-        self._f0 = 0
-        self._bw = 0
-        self._Q = 0
-        self._coupling_matrix = None
+        self._order: int = 0
+        self._f0: float = 0.0
+        self._bw: float = 0.0
+        self._Q: float = 0.0
+        self._coupling_matrix: CouplingMatrix | None = None
         self._parse_comments()
 
     def _parse_comments(self):
@@ -46,7 +46,7 @@ class MWFilter(rf.Network):
                 matrix = np.zeros((self._order+2, self._order+2))
                 rows, cols = zip(*matrix_elements.keys())
                 matrix[rows, cols] = list(matrix_elements.values())
-                self._coupling_matrix = np.rot90(matrix, 2) + matrix - np.diag(np.diag(matrix))
+                self._coupling_matrix = CouplingMatrix(np.rot90(matrix, 2) + matrix - np.diag(np.diag(matrix)))
 
     @property
     def coupling_matrix(self):

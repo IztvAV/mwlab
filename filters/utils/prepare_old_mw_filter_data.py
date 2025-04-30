@@ -1,9 +1,9 @@
 import argparse
 import os
 import skrf as rf
-import couplilng_matrix as cm
+from filters.filter import couplilng_matrix as cm
 import copy
-from mwfilter import MWFilter
+from filters.filter.mwfilter import MWFilter
 
 
 def get_filter_name(path_to_s_parameters: str) -> str:
@@ -17,7 +17,6 @@ def save_matrix_to_s2p_single_comment(matrix_indices, matrix_values):
     """
     Сохраняет .s2p файл с матрицей, записанной в один комментарий.
     """
-    import numpy as np
 
     # Формируем строку вида: ! matrix = [m_0_1 = 1.23, m_1_2 = 0.56]
     elements = [f"m_{i}_{j} = {val:.6f}" for (i, j), val in zip(matrix_indices, matrix_values)]

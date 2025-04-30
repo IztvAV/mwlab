@@ -1,10 +1,7 @@
 from mwlab import TouchstoneData
 import pathlib
-import re
-from typing import Dict, Optional, Union
-from filters.mwfilter import MWFilter
-
-import skrf as rf
+from typing import Union
+from filters.filter.mwfilter import MWFilter
 
 
 class TouchstoneMWFilterData(TouchstoneData):
