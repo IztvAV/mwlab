@@ -1,7 +1,7 @@
 # mwlab/lightning/base_lm.py
 
 """
-Базовый LightningModule MWLab.
+Базовый LightningModule для MWLab.
 
 Функциональность
 ----------------
@@ -16,12 +16,14 @@
     • обратная       →  словарь параметров
 """
 
+from __future__ import annotations
 import torch
 import lightning as L
 from torch import nn
-from typing import Callable, Optional, Tuple, Any, Mapping
+from typing import Callable, Optional, Tuple, Any
 
 from mwlab.codecs.touchstone_codec import TouchstoneCodec
+from mwlab.io.touchstone import TouchstoneData
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -60,7 +62,7 @@ class BaseLModule(L.LightningModule):
         Конфигурация оптимизатора. Пример: {"name": "Adam", "lr": 1e-3}.
 
     scheduler_cfg : dict, optional
-        Конфигурация планировщика learning rate. Пример: {"name": "StepLR", "step_size": 10, "gamma": 0.1}.
+        Конфигурация планировщика learning rate. Пример: {"name": "StepLR", "step_size": 10}.
     """
 
     def __init__(
@@ -120,22 +122,18 @@ class BaseLModule(L.LightningModule):
         raise AttributeError("Scaler has neither inverse nor inverse_transform")
 
     @staticmethod
-    def _split_meta(meta: Mapping[str, Any], idx: int) -> dict:
-        """Из batched-meta получить компонент №idx."""
-        out = {}
-        for k, v in meta.items():
-            if torch.is_tensor(v) and v.dim() > 0:
-                out[k] = v[idx]
-            elif isinstance(v, (list, tuple)):
-                out[k] = v[idx]
-            else:
-                out[k] = v
-        return out
-
-    @staticmethod
-    def _unpack_batch(batch):
-        """Поддерживает форматы (x,y) и (x,y,meta)."""
-        return batch if len(batch) == 3 else (*batch, None)
+    def _split_batch(batch) -> Tuple[torch.Tensor, torch.Tensor, Any]:
+        """
+        Поддерживаем форматы:
+            (x, y)            – без meta
+            (x, y, meta)      – с meta (touchstone_dataset return_meta=True)
+        """
+        if len(batch) == 3:
+            x, y, meta = batch
+        else:
+            x, y = batch
+            meta = None
+        return x, y, meta
 
     # ───────────────────────────────────────────────────────────────── forward
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -147,7 +145,7 @@ class BaseLModule(L.LightningModule):
     # ───────────────────────────────────────────────────────────── shared step
     def _shared_step(self, batch):
         """Общий шаг для train/val/test — считает loss."""
-        x, y, _ = self._unpack_batch(batch)
+        x, y, _ = self._split_batch(batch)
         preds = self(x)
 
         # если предсказываем Y, то надо нормализовать target
@@ -167,45 +165,38 @@ class BaseLModule(L.LightningModule):
     # ---------------------------------------------------------------- validate
     def validation_step(self, batch, batch_idx):
         loss = self._shared_step(batch)
-        self.log("val_loss", loss, on_epoch=True, prog_bar=True, batch_size=batch[0].size(0))
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
 
+    # ------------------------------------------------------------------- test
     def test_step(self, batch, batch_idx):
         loss = self._shared_step(batch)
-        self.log("test_loss", loss, on_epoch=True, prog_bar=True, batch_size=batch[0].size(0))
+        self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
 
     # ---------------------------------------------------------------- predict
-    def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        x, _, meta = self._unpack_batch(batch)
+    def predict_step(self, batch, batch_idx, dataloader_idx: int = 0):
+        """
+        Возвращает:
+          • swap_xy=False  →  TouchstoneData  (если codec+meta и auto_decode=True)
+          • swap_xy=True   →  dict с параметрами
+        """
+        x, _, meta = self._split_batch(batch)
         preds = self(x)
 
-        # -------- прямая модель (X→Y) --------------------------------------
-        if not self.swap_xy:
-            if self.scaler_out is not None:
-                preds = self._apply_inverse(self.scaler_out, preds)
+        # ―― 1. инвертируем скейлер выхода (если Y-задача)
+        if not self.swap_xy and self.scaler_out is not None:
+            preds = self._apply_inverse(self.scaler_out, preds)
 
-            if not (self.auto_decode and self.codec and meta):
-                return preds
-
-            # batched decode
-            if preds.dim() == 2:   # (C,F)
+        # ―― 2. разное поведение для прямой/обратной задачи ――――――――――――――――
+        if self.swap_xy:
+            # предсказывали X-вектор → возвращаем словарь параметров
+            return {
+                k: float(v) for k, v in zip(self.codec.x_keys if self.codec else [], preds)
+            } if self.codec else preds
+        else:
+            # предсказывали Y → можно Decode → TouchstoneData
+            if self.auto_decode and self.codec is not None and meta is not None:
                 return self.codec.decode(preds, meta)
-
-            out = [
-                self.codec.decode(preds[i], self._split_meta(meta, i))
-                for i in range(preds.size(0))
-            ]
-            return out[0] if len(out) == 1 else out
-
-        # -------- обратная модель (Y→X) -----------------------------------
-        if not self.auto_decode or self.codec is None:
-            return preds          # raw tensor
-
-        keys = self.codec.x_keys
-        if preds.dim() == 1:
-            return {k: float(v) for k, v in zip(keys, preds)}
-
-        out = [{k: float(v) for k, v in zip(keys, row)} for row in preds]
-        return out[0] if preds.size(0) == 1 else out
+            return preds
 
     # ─────────────────────────────────────────────────────────— optim & sched
     def _extract_cfg(self, cfg: dict, key: str = "name"):
