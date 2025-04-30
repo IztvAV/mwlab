@@ -1,9 +1,9 @@
 import argparse
 import os
 import skrf as rf
-from filters.filter import couplilng_matrix as cm
+from filter import couplilng_matrix as cm
 import copy
-from filters.filter.mwfilter import MWFilter
+from filter.mwfilter import MWFilter
 
 
 def get_filter_name(path_to_s_parameters: str) -> str:
@@ -20,7 +20,8 @@ def save_matrix_to_s2p_single_comment(matrix_indices, matrix_values):
 
     # Формируем строку вида: ! matrix = [m_0_1 = 1.23, m_1_2 = 0.56]
     elements = [f"m_{i}_{j} = {val:.6f}" for (i, j), val in zip(matrix_indices, matrix_values)]
-    matrix_comment = " matrix: [" + ", ".join(elements) + "]\n"
+    # matrix_comment = " matrix: [" + ", ".join(elements) + "]\n"
+    matrix_comment = " matrix=[" + ", ".join(elements) + "]"
     return matrix_comment
 
 
@@ -40,11 +41,12 @@ def main():
     matrix = cm.CouplingMatrix.from_file(args.matrix)
     matrix_comment = save_matrix_to_s2p_single_comment(matrix_indices=matrix.links, matrix_values=matrix.factors)
     net = copy.deepcopy(rf.Network(args.freq_resp))
-    net.comments += " f0: " + args.center_freq + " MHz\n bw: " + args.bandwidth + " MHz\n Q: " + args.quality_factor + "\n N: " + str(matrix.matrix_order-2) + "\n" + matrix_comment
+    # net.comments += " f0: " + args.center_freq + " MHz\n bw: " + args.bandwidth + " MHz\n Q: " + args.quality_factor + "\n N: " + str(matrix.matrix_order-2) + "\n" + matrix_comment
+    net.comments += " Parameters = {f0=" + args.center_freq + "; bw=" + args.bandwidth + "; Q=" + args.quality_factor + "; N=" + str(matrix.matrix_order-2) + ";" + matrix_comment + "}"
     path_to_save = args.path_to_save + "\\" + filter_name+"_modify.s2p"
     print(f"Path to save file: {path_to_save}")
     net.write_touchstone(filename=path_to_save)
-    mwfilter = MWFilter(path_to_save)
+    # mwfilter = MWFilter(path_to_save)
     pass
 
 
