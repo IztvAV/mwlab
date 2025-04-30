@@ -2,6 +2,7 @@ import skrf as rf
 import re
 import numpy as np
 from filters.filter.couplilng_matrix import CouplingMatrix
+from copy import deepcopy as copy
 
 
 class MWFilter(rf.Network):
@@ -36,7 +37,7 @@ class MWFilter(rf.Network):
                 elif key == "N":
                     self._order = int(match.group(2))
                 elif key == "Q":
-                    self._order = int(match.group(2))
+                    self._Q = float(match.group(2))
             elif line.startswith(" matrix"):
                 # Найти все пары вида m_1_2 = 0.123
                 matches = re.findall(r"m_(\d+)_(\d+)\s*=\s*([-+eE0-9.]+)", line)
@@ -67,3 +68,65 @@ class MWFilter(rf.Network):
     @property
     def Q(self):
         return self._Q
+
+
+    ## CLASS METHODS
+    def copy(self, *, shallow_copy: bool = False):
+        """
+        Return a copy of this Network.
+
+        Needed to allow pass-by-value for a Network instead of
+        pass-by-reference
+
+        Parameters
+        ----------
+        shallow_copy : bool, optional
+            If True, the method creates a new Network object with empty s-parameters that share the same shape
+            as the original Network, but without copying the actual s-parameters data. This is useful when you
+            plan to immediately modify the s-parameters after creating the Network, as a deep copy would be
+            unnecessary and costly. Using `shallow_copy` improves performance by leveraging lazy initialization
+            through `numpy's np.empty()`, which allocates virtual memory without immediate physical memory
+            allocation, deferring actual memory initialization until first access. This approach can significantly
+            enhance `copy()` performance when dealing with large `Network` objects, when you are intended for
+            immediate modification after the Network's creation.
+
+        Note
+        ----
+        If you require a complete copy of the `Network` instance or need to perform operation on the s-parameters
+        of the copied Network, it is essential not to use the `shallow_copy` parameter!
+
+        Returns
+        -------
+        ntwk : :class:`Network`
+            Copy of the Network
+
+        """
+        ntwk = MWFilter(z0=self.z0, s_def=self.s_def, comments=self.comments)
+
+        ntwk._s = (
+            np.empty(shape=self.s.shape, dtype=self.s.dtype)
+            if shallow_copy
+            else self.s.copy()
+        )
+        ntwk.frequency._f = self.frequency._f.copy()
+        ntwk.frequency.unit = self.frequency.unit
+        ntwk.port_modes = self.port_modes.copy()
+
+        if self.params is not None:
+            ntwk.params = self.params.copy()
+
+        ntwk.name = self.name
+
+        if self.noise is not None and self.noise_freq is not None:
+          ntwk.noise = self.noise.copy()
+          ntwk.noise_freq = self.noise_freq.copy()
+
+        # copy special attributes (such as _is_circuit_port) but skip methods
+        ntwk._ext_attrs = self._ext_attrs.copy()
+
+        try:
+            ntwk.port_names = copy(self.port_names)
+        except(AttributeError):
+            ntwk.port_names = None
+        return ntwk
+
