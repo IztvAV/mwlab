@@ -1,6 +1,6 @@
 import os
 import mwlab
-from filters.datasets.touchstone_dataset import TouchstoneMWFilterDataset
+from filters import TouchstoneMWFilterDataset
 
 
 def main():
