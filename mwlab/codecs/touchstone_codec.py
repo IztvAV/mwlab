@@ -167,11 +167,11 @@ class TouchstoneCodec:
         meta : dict      — {'params': …, 'orig_path': …}
         """
         # -------- X ----------------------------------------------------
-        # params = np.array([])
-        # for k in self.x_keys:
-        #     params = np.hstack((params, ts.params[k]))
-        # x_vec = torch.tensor(params, dtype=torch.float32)
-        x_vec = torch.tensor([ts.params[k] for k in self.x_keys], dtype=torch.float32)
+        params = np.array([])
+        for k in self.x_keys:
+            params = np.hstack((params, ts.params[k]))
+        x_vec = torch.tensor(params, dtype=torch.float32)
+        # x_vec = torch.tensor([ts.params[k] for k in self.x_keys], dtype=torch.float32)
 
         # -------- Y (с ресемплингом при необходимости) -----------------
         net = ts.network
