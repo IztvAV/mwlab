@@ -1,7 +1,7 @@
 import skrf as rf
 import re
 import numpy as np
-from filters.filter.couplilng_matrix import CouplingMatrix
+from filter.couplilng_matrix import CouplingMatrix
 from copy import deepcopy as copy
 
 
