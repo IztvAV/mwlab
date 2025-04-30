@@ -27,13 +27,14 @@ def save_matrix_to_s2p_single_comment(matrix_indices, matrix_values):
 
 def main():
     # Парсинг аргументов командной строки
-    parser = argparse.ArgumentParser(description="Конфигурация последовательного порта")
+    parser = argparse.ArgumentParser(description="Генератор .s2p файлов для добавления информации о МС и параметрах фильтра. Корректирует старые данные для использования их в обучении ИИ")
     parser.add_argument("-fr", "--freq_resp", type=str, default=os.getcwd()+"\\SCYA501-KuIMUXT5-BPFC3/SCYA501-KuIMUXT5-BPFC3 Rev.0.3-0.0#УФМ.12.44-12.8 ГГц. RI.s2p",
                         help="Путь к .s2p файлу с частотными характеристиками фильтра")
     parser.add_argument("-m", "--matrix", type=str, default=os.getcwd()+"\\SCYA501-KuIMUXT5-BPFC3/SCYA501-KuIMUXT5-BPFC3 Rev.0.3-0.0#Матрица связи.txt", help="Путь к файлу .txt с матрицей связи фильтра")
     parser.add_argument("-f0", "--center_freq", type=str, default="12000", help="Центральная частота фильтра в МГц")
     parser.add_argument("-bw", "--bandwidth", type=str, default="36", help="Ширина полосы пропускания фильтра в МГц")
     parser.add_argument("-q", "--quality_factor", type=str, default="6100", help="Значение добротности")
+    parser.add_argument("-p", "--path_to_save", type=str, default=os.getcwd(), help="Путь для сохранения измененного файла")
 
     args = parser.parse_args()
     filter_name = get_filter_name(path_to_s_parameters=args.freq_resp)
@@ -41,8 +42,10 @@ def main():
     matrix_comment = save_matrix_to_s2p_single_comment(matrix_indices=matrix.links, matrix_values=matrix.factors)
     net = copy.deepcopy(rf.Network(args.freq_resp))
     net.comments += " f0: " + args.center_freq + " MHz\n bw: " + args.bandwidth + " MHz\n Q: " + args.quality_factor + "\n N: " + str(matrix.matrix_order-2) + "\n" + matrix_comment
-    net.write_touchstone(filename=filter_name+"_modify.s2p")
-    mwfilter = MWFilter(filter_name+"_modify.s2p")
+    path_to_save = args.path_to_save + "\\" + filter_name+"_modify.s2p"
+    print(f"Path to save file: {path_to_save}")
+    net.write_touchstone(filename=path_to_save)
+    mwfilter = MWFilter(path_to_save)
     pass
 
 
