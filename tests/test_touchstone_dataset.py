@@ -1,120 +1,124 @@
-import pytest
-import torch
-import numpy as np
-import pathlib
-import skrf as rf
+"""
+Тесты TouchstoneDataset: базовая логика, трансформы, DataLoader
+"""
 
-from mwlab import TouchstoneData
-from mwlab import TouchstoneDataset
-from mwlab.transforms import x_transforms, s_transforms
+from __future__ import annotations
+
+import numpy as np
+import pytest
+import skrf as rf
+from torch.utils.data import DataLoader
+
+from mwlab.io.backends import FileBackend
+from mwlab.datasets.touchstone_dataset import TouchstoneDataset
+from mwlab.transforms.x_transforms import X_SelectKeys
+from mwlab.transforms.s_transforms import S_Crop, S_Resample
 from mwlab.transforms import TComposite
 
 
-# ---------- Фикстуры -------------------------------------------------------------
-
+# ---------- Фикстуры ------------------------------------------------------------------------------------
 @pytest.fixture(scope="module")
-def dataset_dir():
-    """Путь к директории с тестовыми *.sNp файлами."""
-    return pathlib.Path(__file__).parent.parent / "Data" / "Filter12"
+def sample_info(sample_dir):
+    """Вспомогательная информация по первым данным (параметры, частоты, число портов)."""
+    file = next(sample_dir.glob("*.s?p"))
+    ts = FileBackend(sample_dir).read(0)
 
-
-@pytest.fixture(scope="module")
-def sample_info(dataset_dir):
-    file = next(dataset_dir.glob("*.s?p"))
-    ts = TouchstoneData.load(file)
-
-    # Параметры
     param_keys = list(ts.params.keys())
     selected_keys = param_keys[:3] if len(param_keys) >= 3 else param_keys
 
-    # Частоты в Гц
     fmin_hz, fmax_hz = ts.network.f[0], ts.network.f[-1]
     f_crop_min = fmin_hz + 0.25 * (fmax_hz - fmin_hz)
     f_crop_max = fmax_hz - 0.25 * (fmax_hz - fmin_hz)
-
-    # Создаём объект Frequency для S_Resample (в Гц)
     n_points = 50
     f_interp = rf.Frequency.from_f(f=np.linspace(f_crop_min, f_crop_max, n_points), unit='Hz')
 
     return {
         "selected_keys": selected_keys,
-        "f_crop_min": f_crop_min,  # в native unit для crop
+        "f_crop_min": f_crop_min,
         "f_crop_max": f_crop_max,
         "f_interp": f_interp,
         "ports": ts.network.number_of_ports
     }
 
 
-# ---------- Базовые тесты -------------------------------------------------------
+# ---------- Тесты ----------------------------------------------------------------------------------------
 
-def test_dataset_len_and_paths(dataset_dir):
-    ds = TouchstoneDataset(dataset_dir)
-    assert len(ds) > 0
-    for path in ds.paths:
-        assert path.suffix.lower() in {".s1p", ".s2p", ".s3p", ".s4p"}
-
-
-def test_dataset_getitem_raw(dataset_dir):
-    ds = TouchstoneDataset(dataset_dir)
+def test_getitem_basic(sample_dir):
+    """Базовая проверка __getitem__ без трансформов."""
+    backend = FileBackend(sample_dir)
+    ds = TouchstoneDataset(backend)
     x, s = ds[0]
     assert isinstance(x, dict)
     assert isinstance(s, rf.Network)
-    assert s.s.shape[0] > 0  # F
-    assert s.s.ndim == 3     # (F, P, P)
+    assert s.s.ndim == 3
 
 
-# ---------- Трансформы (на основе реальных данных) ------------------------------
-def test_dataset_with_transforms(dataset_dir, sample_info):
+def test_dataset_with_transforms(sample_dir, sample_info):
+    """Проверка работы x_tf и s_tf на реальных данных."""
+    backend = FileBackend(sample_dir)
+
     x_tf = TComposite([
-        x_transforms.X_SelectKeys(sample_info["selected_keys"]),
+        X_SelectKeys(sample_info["selected_keys"]),
     ])
     s_tf = TComposite([
-        s_transforms.S_Crop(f_start=sample_info["f_crop_min"],
-                            f_stop=sample_info["f_crop_max"]),
-        s_transforms.S_Resample(freq_or_n=sample_info["f_interp"]),
+        S_Crop(f_start=sample_info["f_crop_min"],
+               f_stop=sample_info["f_crop_max"]),
+        S_Resample(freq_or_n=sample_info["f_interp"]),
     ])
 
-    ds = TouchstoneDataset(dataset_dir,
-                           x_keys=sample_info["selected_keys"],
-                           x_tf=x_tf,
-                           s_tf=s_tf)
+    ds = TouchstoneDataset(
+        backend,
+        x_keys=sample_info["selected_keys"],
+        x_tf=x_tf,
+        s_tf=s_tf,
+    )
 
     x, s = ds[0]
-
-    # Проверка параметров (X)
-    assert isinstance(x, dict), "x должен быть словарём после X_SelectKeys"
-    assert set(x.keys()) == set(sample_info["selected_keys"]), "Неверный набор ключей"
-    assert all(isinstance(v, float) or np.isnan(v) for v in x.values()), "Значения должны быть числами или NaN"
-
-    # Проверка S‑матрицы (rf.Network)
-    assert isinstance(s, rf.Network)
-    assert s.s.ndim == 3  # (F, P, P)
-    assert s.s.shape[0] == 50                    # F
-    assert s.s.shape[1] == sample_info["ports"]  # P
-    assert s.s.shape[2] == sample_info["ports"]  # P
-
-# ---------- Обработка отсутствующих параметров -----------------------------------
-
-def test_missing_params_are_nan(dataset_dir):
-    ds = TouchstoneDataset(dataset_dir, x_keys=["nonexistent_parameter"])
-    x, _ = ds[0]
     assert isinstance(x, dict)
-    assert "nonexistent_parameter" in x
-    assert np.isnan(x["nonexistent_parameter"])
+    assert set(x.keys()) == set(sample_info["selected_keys"])
+    assert all(isinstance(v, float) or np.isnan(v) for v in x.values())
+
+    assert isinstance(s, rf.Network)
+    assert s.s.ndim == 3
+    assert s.s.shape[0] == 50
+    assert s.s.shape[1] == sample_info["ports"]
+    assert s.s.shape[2] == sample_info["ports"]
 
 
-# ---------- Параметры без трансформов (fallback-поведение) -----------------------
+def test_missing_params_are_nan(sample_dir):
+    """Если параметр отсутствует — он должен быть np.nan"""
+    backend = FileBackend(sample_dir)
+    ds = TouchstoneDataset(backend, x_keys=["nonexistent_param"])
+    x, _ = ds[0]
+    assert "nonexistent_param" in x
+    assert np.isnan(x["nonexistent_param"])
 
-def test_fallback_behavior(dataset_dir):
-    ds = TouchstoneDataset(dataset_dir)
+
+def test_fallback_behavior(sample_dir):
+    """Проверка без x_keys и трансформов — fallback-поведение."""
+    backend = FileBackend(sample_dir)
+    ds = TouchstoneDataset(backend)
     x, s = ds[0]
-
-    # x: словарь параметров
     assert isinstance(x, dict)
     assert all(isinstance(k, str) for k in x)
-    assert all(isinstance(v, float | int | str | type(np.nan)) for v in x.values())
-
-    # s: skrf.Network
+    assert all(isinstance(v, (float, int, str, type(np.nan))) for v in x.values())
     assert isinstance(s, rf.Network)
-    assert s.s.ndim == 3  # (F, P, P)
+    assert s.s.ndim == 3
 
+
+def simple_collate_fn(batch):
+    xs, ss = zip(*batch)
+    return list(xs), list(ss)
+
+def test_dataloader_workers(sample_dir):
+    """Проверка, что DataLoader работает с num_workers > 0."""
+    backend = FileBackend(sample_dir)
+    ds = TouchstoneDataset(backend)
+
+    loader = DataLoader(ds, batch_size=8, num_workers=2, collate_fn=simple_collate_fn)
+    x_batch, s_batch = next(iter(loader))
+
+    assert len(x_batch) == 8
+    assert len(s_batch) == 8
+    assert isinstance(x_batch[0], dict)
+    assert hasattr(s_batch[0], "s")
