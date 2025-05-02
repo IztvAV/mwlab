@@ -7,4 +7,3 @@ seaborn
 pandas
 xarray
 lightning
-h5py

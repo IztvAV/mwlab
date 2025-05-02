@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mwlab"
-version = "0.1.1"
+version = "0.1.0"
 description = "Библиотека для проектирования СВЧ-устройств"
 authors = [{ name = "Andrey Izotov", email = "andrey.iztv@gmail.com" }]
 readme = "README.md"

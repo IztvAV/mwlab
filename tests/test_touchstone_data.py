@@ -1,53 +1,75 @@
-#tests/test_touchstone_data.py
 """
-Тесты модуля mwlab.io.touchstone.TouchstoneData
+PyTest‑набор для проверки основных сценариев работы класса
+mwlab.io.touchstone.TouchstoneData.
+
+Запуск из корня проекта:
+    pytest -q
 """
-
-from __future__ import annotations
-
 import numpy as np
-import pathlib
+import pytest
 import skrf as rf
 
-from mwlab.io.touchstone import TouchstoneData
+from mwlab import TouchstoneData
 
 
-def test_load_and_parse_params(sample_file):
-    """Убеждаемся, что .load() возвращает объект и корректно парсит параметры."""
-    ts = TouchstoneData.load(sample_file)
-    assert isinstance(ts.network, rf.Network)
+# ---------- вспомогательное -------------------------------------------------
+HERE = rf.os.path.dirname(__file__)
+SRC  = rf.os.path.join(HERE, "Sprms.s2p")     # тестовый файл из CST
+
+
+# ---------- тесты -----------------------------------------------------------
+def test_load_params():
+    """Файл загружается, параметры читаются в dict."""
+    ts = TouchstoneData.load(SRC)
     assert isinstance(ts.params, dict)
-    # В Sprms.s2p заведомо должна быть хотя бы одна пара "ключ=значение"
-    assert ts.params, "Словарь параметров пуст!"
+    # в Touchstone‑файле из CST параметры точно есть
+    assert len(ts.params) > 0
 
 
-def test_save_roundtrip(tmp_dir, dummy_network):
-    """Сохраняем во временный файл → загружаем обратно → сравниваем."""
-    params = {"w": 1.23, "gap": 0.1, "label": "sample1"}
+def test_save_roundtrip(tmp_path):
+    """
+    • Загружаем исходный файл
+    • Меняем один параметр
+    • Сохраняем -> перечитываем
+    • Проверяем, что S‑матрица не изменилась,
+      а параметр в header обновился
+    """
+    ts = TouchstoneData.load(SRC)
+    old_s = ts.network.s.copy()
 
-    ts = TouchstoneData(dummy_network, params)
-    dst = pathlib.Path(tmp_dir) / "roundtrip.s2p"
-    ts.save(dst)
+    # меняем (или добавляем) параметр w
+    ts.params["w"] = ts.params.get("w", 0.0) + 0.123
+    out = tmp_path / "roundtrip.s2p"
+    ts.save(out)
 
-    ts2 = TouchstoneData.load(dst)
-
-    # --- частоты и S-матрица совпадают
-    np.testing.assert_allclose(ts.network.s, ts2.network.s)
-    np.testing.assert_allclose(ts.network.f, ts2.network.f)
-
-    # --- параметры
-    assert ts2.params == params
+    ts2 = TouchstoneData.load(out)
+    assert np.allclose(ts2.network.s, old_s)
+    assert pytest.approx(ts2.params["w"]) == ts.params["w"]
 
 
-def test_numpy_serialisation(dummy_network):
-    """to_numpy() ↔ from_numpy() не теряет информацию."""
-    params = {"k": 42.0, "note": "abc"}
-    ts1 = TouchstoneData(dummy_network, params)
-    bundle = ts1.to_numpy()
-    ts2 = TouchstoneData.from_numpy(bundle)
+def test_init_from_network(tmp_path):
+    """
+    Создаём TouchstoneData «с нуля» из Network + params,
+    сохраняем и перечитываем.
+    """
+    # простая синтетическая сеть 2×2 на 101 точке
+    freq = rf.Frequency(1, 3, 101, unit="GHz")
+    s = np.zeros((101, 2, 2), dtype=np.complex64)
+    net = rf.Network(frequency=freq, s=s, z0=50)
 
-    # Проверяем S-матрицу
-    np.testing.assert_allclose(ts1.network.s, ts2.network.s)
-    # Проверяем параметры
-    assert ts2.params == params
+    td = TouchstoneData(net, params={"a": 1.0, "b": 2.0})
+    out = tmp_path / "gen.s2p"
+    td.save(out)
 
+    td2 = TouchstoneData.load(out)
+    assert td2.params == {"a": 1.0, "b": 2.0}
+
+
+def test_port_limit():
+    """Network с 10‑ю портами должен выбросить ValueError."""
+    freq = rf.Frequency(1, 1, 1, unit="GHz")
+    s = np.zeros((1, 10, 10), dtype=np.complex64)
+    net = rf.Network(frequency=freq, s=s, z0=50)
+
+    with pytest.raises(ValueError):
+        TouchstoneData(net)
