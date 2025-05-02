@@ -41,7 +41,7 @@ DATA_DIR = Path(__file__).parents[2] / "Data" / "Filter12"
     Класс `TouchstoneDataset` предоставляет удобный интерфейс для доступа к этим данным и дальнейшего анализа.
 """
 # Загружаем набор Touchstone-файлов
-ds = TouchstoneDataset(root=DATA_DIR)
+ds = TouchstoneDataset(source=DATA_DIR)
 
 print(f"Загружено файлов: {len(ds)}")
 print("Пример параметров из первого файла:")
@@ -192,7 +192,7 @@ varying = analyzer.get_varying_keys()
 x_tf = X_SelectKeys(varying)
 
 # Создаем новый датасет с примененной X-трансформацией
-ds_x = TouchstoneDataset(root=DATA_DIR, x_tf=x_tf)
+ds_x = TouchstoneDataset(source=DATA_DIR, x_tf=x_tf)
 
 # Инициализируем анализатор на основе преобразованного датасета
 analyzer_x = TouchstoneDatasetAnalyzer(ds_x)
@@ -248,7 +248,7 @@ print(f"\nОграничим диапазон: с {f1 / mult:.3f} до {f2 / mul
 s_tf_crop = S_Crop(f_start=f1, f_stop=f2)
 
 # Пересоздаем датасет и анализатор с новым S-преобразованием
-ds_crop = TouchstoneDataset(root=DATA_DIR, s_tf=s_tf_crop)
+ds_crop = TouchstoneDataset(source=DATA_DIR, s_tf=s_tf_crop)
 analyzer_crop = TouchstoneDatasetAnalyzer(ds_crop)
 
 """
@@ -276,7 +276,7 @@ plt.show()
 # Вариант 1: пересэмплируем до 128 равномерно распределенных точек
 s_tf_resample1 = S_Resample(128)
 
-ds_resample1 = TouchstoneDataset(root=DATA_DIR, s_tf=s_tf_resample1)
+ds_resample1 = TouchstoneDataset(source=DATA_DIR, s_tf=s_tf_resample1)
 analyzer_resample1 = TouchstoneDatasetAnalyzer(ds_resample1)
 
 fig = analyzer_resample1.plot_s_stats(port_out=2, port_in=1)
@@ -293,7 +293,7 @@ plt.show()
 f = rf.Frequency(12.7, 12.76, 64, unit="GHz")
 s_tf_resample2 = S_Resample(f)
 
-ds_resample2 = TouchstoneDataset(root=DATA_DIR, s_tf=s_tf_resample2)
+ds_resample2 = TouchstoneDataset(source=DATA_DIR, s_tf=s_tf_resample2)
 analyzer_resample2 = TouchstoneDatasetAnalyzer(ds_resample2)
 
 fig = analyzer_resample2.plot_s_stats(port_out=2, port_in=1)
@@ -323,7 +323,7 @@ s_tf_composite = TComposite([
 ])
 
 # Создаём новый датасет и анализатор с объединённым S-преобразованием
-ds_composite = TouchstoneDataset(root=DATA_DIR, s_tf=s_tf_composite)
+ds_composite = TouchstoneDataset(source=DATA_DIR, s_tf=s_tf_composite)
 analyzer_composite = TouchstoneDatasetAnalyzer(ds_composite)
 
 # Визуализируем результат (например, S21)
