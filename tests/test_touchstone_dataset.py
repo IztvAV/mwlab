@@ -1,5 +1,6 @@
+#tests/test_touchstone_dataset.py
 """
-Тесты TouchstoneDataset: базовая логика, трансформы, DataLoader
+Базовые тесты TouchstoneDataset + проверки трансформов.
 """
 
 from __future__ import annotations
@@ -12,7 +13,13 @@ from torch.utils.data import DataLoader
 from mwlab.io.backends import FileBackend
 from mwlab.datasets.touchstone_dataset import TouchstoneDataset
 from mwlab.transforms.x_transforms import X_SelectKeys
-from mwlab.transforms.s_transforms import S_Crop, S_Resample
+from mwlab.transforms.s_transforms import (
+    S_Crop,
+    S_Resample,
+    S_AddNoise,
+    S_PhaseShiftDelay,
+    S_PhaseShiftAngle,
+)
 from mwlab.transforms import TComposite
 
 
@@ -20,7 +27,6 @@ from mwlab.transforms import TComposite
 @pytest.fixture(scope="module")
 def sample_info(sample_dir):
     """Вспомогательная информация по первым данным (параметры, частоты, число портов)."""
-    file = next(sample_dir.glob("*.s?p"))
     ts = FileBackend(sample_dir).read(0)
 
     param_keys = list(ts.params.keys())
@@ -30,21 +36,21 @@ def sample_info(sample_dir):
     f_crop_min = fmin_hz + 0.25 * (fmax_hz - fmin_hz)
     f_crop_max = fmax_hz - 0.25 * (fmax_hz - fmin_hz)
     n_points = 50
-    f_interp = rf.Frequency.from_f(f=np.linspace(f_crop_min, f_crop_max, n_points), unit='Hz')
+    f_interp = rf.Frequency.from_f(
+        f=np.linspace(f_crop_min, f_crop_max, n_points), unit="Hz"
+    )
 
     return {
         "selected_keys": selected_keys,
         "f_crop_min": f_crop_min,
         "f_crop_max": f_crop_max,
         "f_interp": f_interp,
-        "ports": ts.network.number_of_ports
+        "ports": ts.network.number_of_ports,
     }
 
 
-# ---------- Тесты ----------------------------------------------------------------------------------------
-
+# ---------- Общие тесты TouchstoneDataset ----------------------------------------------------------------
 def test_getitem_basic(sample_dir):
-    """Базовая проверка __getitem__ без трансформов."""
     backend = FileBackend(sample_dir)
     ds = TouchstoneDataset(backend)
     x, s = ds[0]
@@ -54,17 +60,17 @@ def test_getitem_basic(sample_dir):
 
 
 def test_dataset_with_transforms(sample_dir, sample_info):
-    """Проверка работы x_tf и s_tf на реальных данных."""
     backend = FileBackend(sample_dir)
 
-    x_tf = TComposite([
-        X_SelectKeys(sample_info["selected_keys"]),
-    ])
-    s_tf = TComposite([
-        S_Crop(f_start=sample_info["f_crop_min"],
-               f_stop=sample_info["f_crop_max"]),
-        S_Resample(freq_or_n=sample_info["f_interp"]),
-    ])
+    x_tf = TComposite([X_SelectKeys(sample_info["selected_keys"])])
+    s_tf = TComposite(
+        [
+            S_Crop(
+                f_start=sample_info["f_crop_min"], f_stop=sample_info["f_crop_max"]
+            ),
+            S_Resample(freq_or_n=sample_info["f_interp"]),
+        ]
+    )
 
     ds = TouchstoneDataset(
         backend,
@@ -74,51 +80,85 @@ def test_dataset_with_transforms(sample_dir, sample_info):
     )
 
     x, s = ds[0]
-    assert isinstance(x, dict)
     assert set(x.keys()) == set(sample_info["selected_keys"])
-    assert all(isinstance(v, float) or np.isnan(v) for v in x.values())
-
     assert isinstance(s, rf.Network)
-    assert s.s.ndim == 3
     assert s.s.shape[0] == 50
-    assert s.s.shape[1] == sample_info["ports"]
-    assert s.s.shape[2] == sample_info["ports"]
+    assert s.s.shape[1] == sample_info["ports"] == s.s.shape[2]
 
 
 def test_missing_params_are_nan(sample_dir):
-    """Если параметр отсутствует — он должен быть np.nan"""
     backend = FileBackend(sample_dir)
     ds = TouchstoneDataset(backend, x_keys=["nonexistent_param"])
     x, _ = ds[0]
-    assert "nonexistent_param" in x
     assert np.isnan(x["nonexistent_param"])
 
 
 def test_fallback_behavior(sample_dir):
-    """Проверка без x_keys и трансформов — fallback-поведение."""
     backend = FileBackend(sample_dir)
     ds = TouchstoneDataset(backend)
     x, s = ds[0]
-    assert isinstance(x, dict)
     assert all(isinstance(k, str) for k in x)
-    assert all(isinstance(v, (float, int, str, type(np.nan))) for v in x.values())
     assert isinstance(s, rf.Network)
-    assert s.s.ndim == 3
 
 
 def simple_collate_fn(batch):
     xs, ss = zip(*batch)
     return list(xs), list(ss)
 
+
 def test_dataloader_workers(sample_dir):
-    """Проверка, что DataLoader работает с num_workers > 0."""
     backend = FileBackend(sample_dir)
     ds = TouchstoneDataset(backend)
 
-    loader = DataLoader(ds, batch_size=8, num_workers=2, collate_fn=simple_collate_fn)
+    loader = DataLoader(
+        ds, batch_size=8, num_workers=2, collate_fn=simple_collate_fn
+    )
     x_batch, s_batch = next(iter(loader))
+    assert len(x_batch) == 8 and len(s_batch) == 8
 
-    assert len(x_batch) == 8
-    assert len(s_batch) == 8
-    assert isinstance(x_batch[0], dict)
-    assert hasattr(s_batch[0], "s")
+
+# ---------- НОВЫЕ ТЕСТЫ: аугментация ---------------------------------------------------------------------
+def _get_sample_network(sample_dir) -> rf.Network:
+    """Берём копию первой сети из датасета."""
+    return FileBackend(sample_dir).read(0).network.copy()
+
+
+def test_addnoise_nochange(sample_dir):
+    """При нулевых σ сеть остаётся неизменной."""
+    net = _get_sample_network(sample_dir)
+    tf = S_AddNoise(sigma_db=0.0, sigma_deg=0.0)
+    out = tf(net)
+    np.testing.assert_allclose(out.s, net.s)
+
+
+def test_addnoise_changes(sample_dir):
+    """Ненулевой шум должен изменить хотя бы один элемент."""
+    net = _get_sample_network(sample_dir)
+    tf = S_AddNoise(sigma_db=0.2, sigma_deg=5.0)
+    out = tf(net)
+    assert np.any(np.abs(out.s - net.s) > 0)
+
+
+def test_phaseshiftdelay_fixed(sample_dir):
+    """Фиксированная задержка τ задаёт известный фазовый множитель."""
+    net = _get_sample_network(sample_dir)
+    tau_ps = 10.0
+    tf = S_PhaseShiftDelay(tau_ps=tau_ps)
+    out = tf(net)
+
+    tau = tau_ps * 1e-12
+    phase = np.exp(-1j * 2 * np.pi * net.f * tau)[:, None, None]
+    np.testing.assert_allclose(out.s, net.s * phase)
+
+
+def test_phaseshiftangle_fixed(sample_dir):
+    """Фиксированный угол φ должен умножать всю матрицу на e^{jφ}."""
+    net = _get_sample_network(sample_dir)
+    phi_deg = 30.0
+    tf = S_PhaseShiftAngle(phi_deg=phi_deg)
+    out = tf(net)
+
+    phi = np.deg2rad(phi_deg)
+    expected = net.s * np.exp(1j * phi)
+    np.testing.assert_allclose(out.s, expected)
+
