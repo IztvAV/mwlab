@@ -2,19 +2,16 @@
 """
 mwlab.io.touchstone
 -------------------
-Базовый контейнер TouchstoneData.
+Базовый контейнер TouchstoneData + (де)сериализация в NumPy‑словарь.
 
 Основные возможности:
 
 * TouchstoneData.load(path)      – чтение *.sNp
 * TouchstoneData(network, ...)   – создание «с нуля»
 * .save(path)                    – запись в Touchstone-файл
-
-НОВОЕ в версии 0.1.1:
 * .to_numpy() / .from_numpy()    – сериализация S-матрицы в NumPy-словарь
   для хранения в бинарных backend-ах (HDF5, LMDB, Zarr и т.п.).
 """
-
 from __future__ import annotations
 
 import pathlib
@@ -24,42 +21,41 @@ from typing import Dict, Optional, Union
 import numpy as np
 import skrf as rf
 
-# ------------------------------ вспомогательный шаблон "Parameters = {k=v; ...}"
+# ------------------------------ шаблон "Parameters = {k=v; ...}"
 _PARAM_RE = re.compile(r"Parameters\s*=\s*\{([^}]*)\}", re.IGNORECASE)
 
 
 class TouchstoneData:
     """
     Контейнер:
-        • self.network : skrf.Network      – S-параметры + частотная сетка
-        • self.params  : dict[str, float]  – произвольные скалярные параметры
+        • self.network : skrf.Network      – S‑матрица + частоты
+        • self.params  : dict[str, float|str]  – пользовательские метаданные
     """
 
-    # ---------------------------------------------------------------- init
+    # ---------------------------------------------------------- init
     def __init__(
         self,
         network: rf.Network,
-        params: Optional[Dict[str, float]] = None,
+        params: Optional[Dict[str, float | str]] = None,
         path: Optional[Union[str, pathlib.Path]] = None,
     ):
-        # scikit-rf иногда отдает comments=None – приводим к списку
-        if network.comments is None:
-            network.comments = []
+        # scikit‑rf иногда отдает comments=None
+        network.comments = list(network.comments or [])
 
-        # --- собираем параметры из комментария + явные **params
+        # --- собираем параметры из network.comments
         parsed = self._params_from_comments(network.comments)
         if params:
             parsed.update(params)
 
         self.network = network
-        self.params: Dict[str, float] = parsed
+        self.params: Dict[str, float | str] = parsed
         self.path = pathlib.Path(path) if path else None
 
-        # Ограничение: scikit-rf не поддерживает n_ports > 9 при записи
+        # Ограничения
         if self.network.number_of_ports > 9:
-            raise ValueError("> 9 портов не поддерживается в данной реализации.")
+            raise ValueError("> 9 портов не поддерживается.")
 
-    # -------------------------------------------------------- Загрузка *.sNp
+    # ------------------------------------------------------- Загрузка *.sNp
     @classmethod
     def load(cls, path: Union[str, pathlib.Path]) -> "TouchstoneData":
         """
@@ -75,10 +71,9 @@ class TouchstoneData:
         # запасной парсинг, если comments пусты
         if not obj.params:
             obj.params = obj._params_from_file(path)
-
         return obj
 
-    # ------------------------------------------------------------- Сохранение
+    # ------------------------------------------------------- Сохранение
     def save(self, path: Optional[Union[str, pathlib.Path]] = None) -> None:
         """
         Записывает данные в Touchstone-файл.
@@ -123,59 +118,82 @@ class TouchstoneData:
         with real_file.open("w", encoding="utf-8") as fh:
             fh.writelines(lines)
 
-    # -------------------------------------------------- СЕРИАЛИЗАЦИЯ БИНАРНАЯ
+    # --------------------------------------------- СЕРИАЛИЗАЦИЯ → NumPy
     def to_numpy(self) -> dict[str, np.ndarray]:
         """
         Возвращает словарь ndarray-ов (готов к записи в HDF5/LMDB).
 
-        Формат:
-            {
-              "s":  complex64  (freq, n_ports, n_ports)
-              "f":  float64    (freq,)     – частоты в Гц
-              "params_k": float32|str      – по одному ключу на атрибут
-            }
+        Ключи:
+            's'                 – (F,P,P) complex64
+            'f'                 – (F,)    float64   (в Гц)
+            'meta/unit'         – ()      S ascii
+            'meta/s_def'        – ()      S ascii
+            'meta/z0'           – (P,)    complex64
+            'meta/comments'     – (N,)    uint8  (если есть)
+            'param/...'         – пользовательские ключи
         """
         out: dict[str, np.ndarray] = {}
         out["s"] = self.network.s.astype(np.complex64)
-        out["f"] = self.network.f.astype(np.float64)
+        # ---- частотная сетка -------------------------------------------
+        unit = self.network.frequency.unit or "Hz"
+        # f_scaled – массив уже в единице `unit` (если unit='GHz', числа в ГГц)
+        out["f"] = self.network.frequency.f_scaled.astype(np.float64)
 
-        # Параметры: отделяем числовые и строковые, т.к. HDF5 плохо пишет mixed-dtypes.
+        # ---- системные метаданные ---------------------------------------
+        out["meta/unit"] = np.bytes_(unit)
+        out["meta/s_def"] = np.bytes_(self.network.s_def)
+        out["meta/z0"] = self.network.z0.astype(np.complex64)
+        if self.network.comments:
+            clean = [c.rstrip("\n") for c in self.network.comments]
+            out["meta/comments"] = np.frombuffer(
+                "\n".join(clean).encode(), dtype="uint8"
+            )
+
+        # ---- пользовательские параметры ---------------------------------
         for k, v in self.params.items():
-            if isinstance(v, (int, float)):
+            if isinstance(v, int):
+                out[f"param/{k}"] = np.array(v, dtype=np.int64)
+            elif isinstance(v, float):
                 out[f"param/{k}"] = np.array(v, dtype=np.float32)
             else:
-                out[f"param/{k}"] = np.frombuffer(
-                    str(v).encode("utf-8"), dtype="uint8"
-                )
-
+                out[f"param/{k}"] = np.frombuffer(str(v).encode(), dtype="uint8")
         return out
 
+    # --------------------------------------------- NumPy → TouchstoneData
     @classmethod
     def from_numpy(cls, dct: dict[str, np.ndarray]) -> "TouchstoneData":
         """
         Обратная операция: словарь ndarray-ов → TouchstoneData.
         """
+        # --- обязательные поля ------------------------------------------
         s = dct["s"].astype(np.complex64)
         f = dct["f"].astype(np.float64)
-        freq = rf.Frequency.from_f(f, unit="Hz")
-        net = rf.Network(frequency=freq, s=s)
 
-        params: Dict[str, float] = {}
+        unit = bytes(dct["meta/unit"]).decode()
+        freq = rf.Frequency.from_f(f, unit=unit)
+
+        net = rf.Network(frequency=freq, s=s)
+        net.s_def = bytes(dct["meta/s_def"]).decode()
+        net.z0[:] = dct["meta/z0"].astype(np.complex64)
+
+        if "meta/comments" in dct:
+            net.comments = bytes(dct["meta/comments"]).decode().split("\n")
+
+        # --- параметры пользователя -------------------------------------
+        params: Dict[str, float | str] = {}
         for k, v in dct.items():
             if not k.startswith("param/"):
                 continue
             name = k.split("/", 1)[1]
-            if v.dtype == "uint8":  # значит строка
-                params[name] = bytes(v).decode("utf-8")
-            else:
-                params[name] = float(v)
+            params[name] = (
+                bytes(v).decode() if v.dtype == "uint8" else v.item()
+            )
+        return cls(net, params)
 
-        return cls(net, params=params)
-
-    # ------------------------------------------------------ helpers: парсинг
+    # --------------------------------------------------- helpers: парсинг
     @staticmethod
-    def _split_params(raw: str) -> Dict[str, float]:
-        out = {}
+    def _split_params(raw: str) -> Dict[str, float | str]:
+        out: Dict[str, float | str] = {}
         for item in raw.split(";"):
             if "=" not in item:
                 continue
@@ -189,18 +207,17 @@ class TouchstoneData:
         return out
 
     @classmethod
-    def _params_from_comments(cls, comments) -> Dict[str, float]:
+    def _params_from_comments(cls, comments) -> Dict[str, float | str]:
         if not comments:
             return {}
-        joined = " ".join(c.strip() for c in comments)
-        m = _PARAM_RE.search(joined)
+        m = _PARAM_RE.search(" ".join(c.strip() for c in comments))
         return cls._split_params(m.group(1)) if m else {}
 
     @staticmethod
-    def _params_from_file(path: pathlib.Path) -> Dict[str, float]:
+    def _params_from_file(path: pathlib.Path) -> Dict[str, float | str]:
         try:
             with path.open("r", errors="ignore") as fh:
-                for _ in range(100):  # читаем первые 100 строк
+                for _ in range(100):
                     line = fh.readline()
                     if not line or line.lstrip().startswith("#"):
                         break
@@ -212,3 +229,11 @@ class TouchstoneData:
             pass
         return {}
 
+    def __repr__(self) -> str:
+        n_ports = self.network.number_of_ports
+        n_freq  = len(self.network.frequency)
+        keys    = ", ".join(self.params) or "—"
+        return (
+            f"<TouchstoneData {n_ports}‑port · {n_freq}pts · "
+            f"params=[{keys}] · unit={self.network.frequency.unit}>"
+        )
