@@ -1,4 +1,4 @@
-#tests/test_touchstone_dataset.py
+#tests/test_touchstone_dataset_transforms.py
 """
 Базовые тесты TouchstoneDataset + проверки трансформов.
 """
@@ -19,6 +19,10 @@ from mwlab.transforms.s_transforms import (
     S_AddNoise,
     S_PhaseShiftDelay,
     S_PhaseShiftAngle,
+    S_DeReciprocal,
+    S_Z0Shift,
+    S_Ripple,
+    S_MagSlope,
 )
 from mwlab.transforms import TComposite
 
@@ -48,6 +52,9 @@ def sample_info(sample_dir):
         "ports": ts.network.number_of_ports,
     }
 
+
+def _copy_net(sample_dir) -> rf.Network:
+    return FileBackend(sample_dir).read(0).network.copy()
 
 # ---------- Общие тесты TouchstoneDataset ----------------------------------------------------------------
 def test_getitem_basic(sample_dir):
@@ -162,3 +169,45 @@ def test_phaseshiftangle_fixed(sample_dir):
     expected = net.s * np.exp(1j * phi)
     np.testing.assert_allclose(out.s, expected)
 
+# ----------------------------------------------------------------- Reciprocity
+def test_dereciprocal(sample_dir):
+    net = _copy_net(sample_dir)
+    tf = S_DeReciprocal(sigma_db=0.2)
+    out = tf(net)
+    # off‑diagonal элементы должны отличаться
+    i, j = 0, 1
+    assert np.any(np.abs(out.s[:, i, j] - out.s[:, j, i]) > 1e-6)
+
+
+# ----------------------------------------------------------------- Z0‑shift
+def test_z0shift_changes_impedance(sample_dir):
+    net = _copy_net(sample_dir)
+    orig_z0 = net.z0.copy()
+    tf = S_Z0Shift(delta_ohm=2.0)
+    out = tf(net)
+    assert np.all(np.abs(out.z0 - orig_z0) >= 1.9)
+
+
+# ----------------------------------------------------------------- Ripple
+def test_ripple_variation(sample_dir):
+    net = _copy_net(sample_dir)
+    tf = S_Ripple(amp_db=0.5, period_hz=2e9)
+    out = tf(net)
+    ratio = np.abs(out.s) / np.abs(net.s)
+    # дисперсия коэффициента > 0 указывает на ripple
+    assert np.var(ratio) > 0
+
+
+# ----------------------------------------------------------------- Slope
+@pytest.mark.parametrize("k_db", [2.0, -2.0])
+def test_magslope(sample_dir, k_db):
+    net = _copy_net(sample_dir)
+    tf = S_MagSlope(slope_db_per_ghz=k_db)
+    out = tf(net)
+
+    mag_orig = 20 * np.log10(np.abs(net.s[:, 0, 0]) + 1e-12)
+    mag_new = 20 * np.log10(np.abs(out.s[:, 0, 0]) + 1e-12)
+    slope_est = np.polyfit(net.f / 1e9, mag_new - mag_orig, 1)[0]
+
+    assert np.sign(slope_est) == np.sign(k_db)
+    assert abs(slope_est) > 0.5  # существенный наклон

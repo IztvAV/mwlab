@@ -221,6 +221,129 @@ class S_PhaseShiftAngle:
         ntwk.s *= np.exp(1j * phi)
         return ntwk
 
+# ----------------------------------------------------------------- Дополнительно
+class S_DeReciprocal:
+    """
+    Нарушает взаимность: S[i,j] ≠ S[j,i].
+
+    Parameters
+    ----------
+    sigma_db : float | (μ,σ) | callable
+        Стандартное отклонение аддитивного шума (дБ, на линейную величину).
+    """
+
+    def __init__(
+        self,
+        sigma_db: Union[float, Tuple[float, float], Callable[[], float]] = 0.05,
+    ):
+        self.sigma_db_sampler = _make_sampler(sigma_db, "sigma_db")
+
+    def __call__(self, net: skrf.Network) -> skrf.Network:
+        ntwk = net.copy()
+        s = ntwk.s.copy()
+
+        σ_db = self.sigma_db_sampler()
+        σ_lin = (10 ** (σ_db / 20.0)) - 1.0         # небольшая относительная величина
+
+        nr, _, _ = s.shape
+        for f in range(nr):
+            # работаем только с верхним треугольником
+            noise = (
+                np.random.normal(scale=σ_lin, size=s[f].shape)
+                + 1j * np.random.normal(scale=σ_lin, size=s[f].shape)
+            )
+            noise = np.triu(noise, 1)               # исключаем диагональ
+            s[f] += noise
+            s[f] -= noise.T                         # антисимметрично
+
+        ntwk.s = s
+        return ntwk
+
+
+class S_Z0Shift:
+    """
+    Имитация неточного опорного импеданса (все порты одинаково).
+
+    Parameters
+    ----------
+    delta_ohm : float | (μ,σ) | callable
+        Сдвиг ΔΩ.  Типичное ±1 Ω → (0.0, 1.0).
+    """
+
+    def __init__(
+        self,
+        delta_ohm: Union[float, Tuple[float, float], Callable[[], float]] = (0.0, 1.0),
+    ):
+        self.delta_sampler = _make_sampler(delta_ohm, "delta_ohm")
+
+    def __call__(self, net: skrf.Network) -> skrf.Network:
+        ntwk = net.copy()
+        delta = self.delta_sampler()
+        new_z0 = ntwk.z0 + delta
+        ntwk.renormalize(new_z0)
+        return ntwk
+
+
+class S_Ripple:
+    """
+    Синусоидальная амплитудная ripple, часто наблюдаемая из‑за кабельных мод.
+
+    Parameters
+    ----------
+    amp_db      : float | (μ,σ) | callable
+        Пиковая амплитуда ripple (дБ).  0.2 дБ – реалистично.
+    period_hz   : float | (μ,σ) | callable
+        Период синусоиды (Гц).  Например 1 GHz → 1e9.
+    """
+
+    def __init__(
+        self,
+        amp_db: Union[float, Tuple[float, float], Callable[[], float]] = 0.2,
+        period_hz: Union[float, Tuple[float, float], Callable[[], float]] = 1e9,
+    ):
+        self.amp_sampler = _make_sampler(amp_db, "amp_db")
+        self.per_sampler = _make_sampler(period_hz, "period_hz")
+
+    def __call__(self, net: skrf.Network) -> skrf.Network:
+        ntwk = net.copy()
+        a_db = self.amp_sampler()
+        per = self.per_sampler()
+
+        a_lin = (10 ** (a_db / 20.0)) - 1.0
+        phi = np.random.uniform(0, 2 * np.pi)
+        f = ntwk.f  # Гц
+        ripple = 1 + a_lin * np.sin(2 * np.pi * f / per + phi)
+        ntwk.s *= ripple[:, None, None]
+        return ntwk
+
+
+class S_MagSlope:
+    """
+    Линейный наклон амплитуды по частоте: |S| ← |S|·10^{slope·(f−f0)/20}.
+
+    Parameters
+    ----------
+    slope_db_per_ghz : float | (μ,σ) | callable
+        Наклон (дБ на ГГц).  Положительный – рост, отрицательный – падение.
+    """
+
+    def __init__(
+        self,
+        slope_db_per_ghz: Union[float, Tuple[float, float], Callable[[], float]] = 1.0,
+    ):
+        self.slope_sampler = _make_sampler(slope_db_per_ghz, "slope_db_per_ghz")
+
+    def __call__(self, net: skrf.Network) -> skrf.Network:
+        ntwk = net.copy()
+        k_db_per_ghz = self.slope_sampler()
+        k_db_per_hz = k_db_per_ghz / 1e9
+
+        f = ntwk.f
+        f0 = f[0]
+        factor = 10 ** (k_db_per_hz * (f - f0) / 20.0)
+        ntwk.s *= factor[:, None, None]
+        return ntwk
+
 
 # --------------------------------------------------------------------- экспорт
 __all__ = [
@@ -229,4 +352,8 @@ __all__ = [
     "S_AddNoise",
     "S_PhaseShiftDelay",
     "S_PhaseShiftAngle",
+    "S_DeReciprocal",
+    "S_Z0Shift",
+    "S_Ripple",
+    "S_MagSlope",
 ]
