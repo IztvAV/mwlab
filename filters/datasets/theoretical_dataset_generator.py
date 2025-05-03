@@ -20,6 +20,9 @@ class CMTheoreticalDatasetGenerator:
         self._samplers = samplers
         self._origin_filter = origin_filter
         self._path_to_save_dataset = path_to_save_dataset
+        print(f"Write data into directory: {path_to_save_dataset}")
+        if not os.path.exists(path_to_save_dataset):
+            os.makedirs(path_to_save_dataset)
 
     """TODO: Пока поддержана только свернутая топология. Сдвиги формируются как в старом методе"""
     def _get_cm_shift(self):
@@ -48,8 +51,11 @@ class CMTheoreticalDatasetGenerator:
         for _ in range(size):
             new_matrix = self._get_cm_shift()
             ps_shifts = self._get_ps_shift()
-            S = MWFilter.response_from_coupling_matrix(M=new_matrix, f0=self._origin_filter.f0,
+            # TODO: Проверить правильность возвращаемого значения
+            s_params = MWFilter.response_from_coupling_matrix(M=new_matrix, f0=self._origin_filter.f0,
                                                        FBW=self._origin_filter.fbw, Q=self._origin_filter.Q,
                                                        frange=self._origin_filter.f, Pss=ps_shifts)
+            new_filter = MWFilter(f0=self._origin_filter.f0, order=self._origin_filter.order, bw=self._origin_filter.bw,
+                     Q=self._origin_filter.Q, matrix=new_matrix, frequency=frequencies, s=s_params, z0=50)
             # TODO: сделать сохранение в датасет S-параметров и матрицы связи
 
