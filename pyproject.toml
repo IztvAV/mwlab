@@ -11,7 +11,8 @@ readme = "README.md"
 license = { text = "MIT" }
 dependencies = [
     "scikit-rf >=0.30",
-    "numpy >=1.21"
+    "numpy >=1.21",
+    "lightning >=2.1",
 ]
 
 
