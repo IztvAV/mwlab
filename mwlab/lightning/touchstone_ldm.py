@@ -1,9 +1,14 @@
 # mwlab/lightning/touchstone_ldm.py
-import pathlib, math, torch
+
+from pathlib import Path
+import math, torch
+from typing import Union
 import lightning as L
 from torch.utils.data import DataLoader, random_split, Subset
+
 from mwlab.datasets.touchstone_tensor_dataset import TouchstoneTensorDataset
 from mwlab.codecs.touchstone_codec import TouchstoneCodec
+from mwlab.io.backends import StorageBackend
 
 class TouchstoneLDataModule(L.LightningDataModule):
     """
@@ -18,7 +23,7 @@ class TouchstoneLDataModule(L.LightningDataModule):
     # ---------------------------------------------------------------- init
     def __init__(
         self,
-        root: str | pathlib.Path,
+        source: Union[str, Path, StorageBackend],
         *,
         codec: TouchstoneCodec,
         batch_size: int = 32,
@@ -35,7 +40,7 @@ class TouchstoneLDataModule(L.LightningDataModule):
         base_ds_kwargs: dict | None = None,
     ):
         super().__init__()
-        self.root          = pathlib.Path(root)
+        self.source          = source
         self.codec         = codec
         self.batch_size    = batch_size
         self.num_workers   = num_workers
@@ -58,7 +63,7 @@ class TouchstoneLDataModule(L.LightningDataModule):
     # -------------------------------------------------------------- private
     def _make_dataset(self, *, return_meta: bool) -> TouchstoneTensorDataset:
         return TouchstoneTensorDataset(
-            root         = self.root,
+            source         = self.source,
             codec        = self.codec,
             swap_xy      = self.swap_xy,
             return_meta  = return_meta,
@@ -129,6 +134,6 @@ class TouchstoneLDataModule(L.LightningDataModule):
 
     # ---------------------------------------------------------------- view
     def __repr__(self):
-        return (f"{self.__class__.__name__}(root={self.root}, swap_xy={self.swap_xy}, "
+        return (f"{self.__class__.__name__}(source={self.source}, swap_xy={self.swap_xy}, "
                 f"batch={self.batch_size}, val_ratio={self.val_ratio}, "
                 f"test_ratio={self.test_ratio})")

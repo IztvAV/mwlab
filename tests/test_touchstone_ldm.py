@@ -11,22 +11,18 @@ from mwlab.datasets.touchstone_tensor_dataset import TouchstoneTensorDataset
 from mwlab.nn.scalers import StdScaler, MinMaxScaler
 
 # ------------------------ fixtures ------------------------
-@pytest.fixture(scope="module")
-def dataset_dir() -> pathlib.Path:
-    return pathlib.Path(__file__).parent.parent / "Data" / "Filter12"
-
 
 @pytest.fixture(scope="module")
-def codec(dataset_dir) -> TouchstoneCodec:
+def codec(sample_dir) -> TouchstoneCodec:
     """Формируем Codec по сырому набору файлов (real+imag)."""
-    raw = TouchstoneDataset(dataset_dir)
+    raw = TouchstoneDataset(sample_dir)
     return TouchstoneCodec.from_dataset(raw)
 
 
 # 1. setup + dataloaders ---------------------------------------------
-def test_ldm_setup_and_dataloaders(dataset_dir, codec):
+def test_ldm_setup_and_dataloaders(sample_dir, codec):
     ldm = TouchstoneLDataModule(
-        root=str(dataset_dir),
+        source=str(sample_dir),
         codec=codec,
         batch_size=4,
         val_ratio=0.2,
@@ -50,16 +46,16 @@ def test_ldm_setup_and_dataloaders(dataset_dir, codec):
 
 
 # 2. predict_dataloader --------------------------------------------
-def test_ldm_predict_stage(dataset_dir, codec):
-    ldm = TouchstoneLDataModule(root=dataset_dir, codec=codec, batch_size=2)
+def test_ldm_predict_stage(sample_dir, codec):
+    ldm = TouchstoneLDataModule(source=sample_dir, codec=codec, batch_size=2)
     ldm.setup("predict")
     assert isinstance(ldm.predict_dataloader(), DataLoader)
 
 
 # 3. ограничение max_samples ----------------------------------------
-def test_ldm_max_samples(dataset_dir, codec):
+def test_ldm_max_samples(sample_dir, codec):
     ldm = TouchstoneLDataModule(
-        root=dataset_dir,
+        source=sample_dir,
         codec=codec,
         max_samples=3,
         batch_size=1,
@@ -69,29 +65,29 @@ def test_ldm_max_samples(dataset_dir, codec):
     assert total <= 3
 
 # 4 ─ repr / str ----------------------------------------------------
-def test_ldm_repr_contains_info(dataset_dir, codec):
-    ldm = TouchstoneLDataModule(root=dataset_dir, codec=codec, batch_size=4)
+def test_ldm_repr_contains_info(sample_dir, codec):
+    ldm = TouchstoneLDataModule(source=sample_dir, codec=codec, batch_size=4)
     txt = repr(ldm)
     for token in ("TouchstoneLDataModule", "batch=", "val_ratio=", "test_ratio="):
         assert token in txt
 
 
 # 5 ─ validate / test без fit ----------------------------------------
-def test_ldm_validate_error_before_fit(dataset_dir, codec):
-    ldm = TouchstoneLDataModule(root=dataset_dir, codec=codec)
+def test_ldm_validate_error_before_fit(sample_dir, codec):
+    ldm = TouchstoneLDataModule(source=sample_dir, codec=codec)
     with pytest.raises(RuntimeError, match="val_ds не инициализирован"):
         ldm.setup("validate")
 
-def test_ldm_test_error_before_fit(dataset_dir, codec):
-    ldm = TouchstoneLDataModule(root=dataset_dir, codec=codec)
+def test_ldm_test_error_before_fit(sample_dir, codec):
+    ldm = TouchstoneLDataModule(source=sample_dir, codec=codec)
     with pytest.raises(RuntimeError, match="test_ds не инициализирован"):
         ldm.setup("test")
 
 
 # 6-a. predict_ds (авто-fallback) ------------------------------------
-def test_ldm_predict_ds_auto(dataset_dir, codec):
+def test_ldm_predict_ds_auto(sample_dir, codec):
     ldm = TouchstoneLDataModule(
-        root=dataset_dir,
+        source=sample_dir,
         codec=codec,
         val_ratio=0.2,
         test_ratio=0.2,
@@ -105,10 +101,10 @@ def test_ldm_predict_ds_auto(dataset_dir, codec):
 
 
 # 6-b ─ predict_ds (явно задан) ------------------------------------
-def test_ldm_predict_ds_explicit(dataset_dir, codec):
-    explicit_ds = TouchstoneTensorDataset(root=dataset_dir, codec=codec, return_meta=True)
+def test_ldm_predict_ds_explicit(sample_dir, codec):
+    explicit_ds = TouchstoneTensorDataset(source=sample_dir, codec=codec, return_meta=True)
 
-    ldm = TouchstoneLDataModule(root=dataset_dir, codec=codec, val_ratio=0.1, test_ratio=0.1)
+    ldm = TouchstoneLDataModule(source=sample_dir, codec=codec, val_ratio=0.1, test_ratio=0.1)
     ldm.setup("fit")
 
     ldm.predict_ds = explicit_ds

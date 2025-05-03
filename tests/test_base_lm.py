@@ -37,7 +37,7 @@ class DummyCF(nn.Module):
 def mini_codec() -> TouchstoneCodec:
     return TouchstoneCodec(
         x_keys=["a"],
-        y_channels=["S11.real", "S11.imag"],
+        y_channels=["S1_1.real", "S1_1.imag"],
         freq_hz=np.array([1.0e9]),              # F = 1
     )
 
