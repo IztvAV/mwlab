@@ -146,16 +146,7 @@ class TouchstoneLDataModule(L.LightningDataModule):
         xs, ys, metas = zip(*batch)  # type: ignore
         x_coll = default_collate(xs)
         y_coll = default_collate(ys)
-        # агрегируем meta по ключам; безопасны к строкам / числам
-        keys = metas[0].keys()
-        meta_out: Dict[str, Any] = {}
-        for k in keys:
-            vals = [m[k] for m in metas]
-            try:
-                meta_out[k] = default_collate(vals)  # tensors / numbers
-            except Exception:
-                meta_out[k] = vals  # списки строк и т.п.
-        return x_coll, y_coll, meta_out
+        return x_coll, y_coll, list(metas)  # список длиной batch
 
     def _fit_scaler(
         self, scaler: torch.nn.Module, ds: Dataset, *, take: str

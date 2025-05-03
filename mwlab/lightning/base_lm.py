@@ -195,7 +195,12 @@ class BaseLModule(L.LightningModule):
             return out
         else:
             if self.auto_decode and self.codec is not None and meta is not None:
-                return self.codec.decode(preds, meta)
+                out = []
+                for i in range(preds.size(0)):
+                    per_meta = meta[i]  # словарь для конкретного сэмпла
+                    per_pred = preds[i]
+                    out.append(self.codec.decode(per_pred, per_meta))
+                return out  # список TouchstoneData
             return preds
 
     # ───────────────────────────────────────────── optim & schedulers
