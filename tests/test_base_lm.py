@@ -116,6 +116,8 @@ def test_predict_inverse_returns_dict():
     mod = BaseLModule(model=Dummy(2, 1), codec=codec, swap_xy=True)
     _, y, meta = sample_batch(codec)
     out = mod.predict_step((y.squeeze(-1), torch.zeros(1, 1), meta), 0)
-    assert isinstance(out, dict) and out.get("a") is not None
+    assert isinstance(out, list) and isinstance(out[0], dict)
+    assert "a" in out[0]
+
 
 
