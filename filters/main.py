@@ -10,7 +10,7 @@ ENV_DATASET_PATH = os.getcwd()+"\\Data"
 
 
 def main():
-    tds = TouchstoneMWFilterDataset(root=ENV_DATASET_PATH)
+    tds = TouchstoneMWFilterDataset(source=ENV_DATASET_PATH)
     print(f"Загружено файлов: {len(tds)}")
     print("Пример параметров из первого файла:")
     print(tds[0][0], "\n")
@@ -19,7 +19,7 @@ def main():
         S_Crop(f_start=net.f0-net.bw*1.2, f_stop=net.f0+net.bw*1.2, unit='MHz'),
         S_Resample(301)
     ])
-    tds_transformed = TouchstoneMWFilterDataset(root=ENV_DATASET_PATH, s_tf=y_transform)
+    tds_transformed = TouchstoneMWFilterDataset(source=ENV_DATASET_PATH, s_tf=y_transform)
     analyzer = mwlab.TouchstoneDatasetAnalyzer(tds_transformed)
     analyzer.plot_s_stats(port_in=2, port_out=1)
     analyzer.plot_s_stats(port_in=1, port_out=1)

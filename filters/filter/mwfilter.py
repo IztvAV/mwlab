@@ -7,24 +7,27 @@ import torch
 
 
 class MWFilter(rf.Network):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, order:int , f0: float, bw: float, Q: float, matrix: np.array, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
         # Новые поля
-        self._order: int = 0
-        self._f0: float = 0.0
-        self._bw: float = 0.0
-        self._Q: float = 0.0
-        self._coupling_matrix: CouplingMatrix | None = None
-        self._parse_comments()
+        self._order: int = order
+        self._f0: float = f0
+        self._bw: float = bw
+        self._Q: float = Q
+        self._coupling_matrix: CouplingMatrix = CouplingMatrix(matrix)
+        # if not from_matrix:
+        #     self._parse_comments()
 
-    def _parse_comments(self):
+    @classmethod
+    def from_file(cls, filename: str):
         """
-        Считывает матричные элементы, сохранённые в одной строке комментария.
-        Возвращает: словарь {(i, j): значение}
-        """
+                Считывает матричные элементы, сохранённые в одной строке комментария.
+                Возвращает: словарь {(i, j): значение}
+                """
+        net = rf.Network(filename)
         matrix_elements = {}
-        lines = self.comments
+        lines = net.comments
+        order, f0, bw, Q, matrix = None, None, None, None, None
 
         for line in lines.split("\n"):
             if line.startswith(" N") or line.startswith(" f0") or line.startswith(" bw") or line.startswith(" Q"):
@@ -32,23 +35,61 @@ class MWFilter(rf.Network):
                 match = pattern.match(line)
                 key = match.group(1)
                 if key == "f0":
-                    self._f0 = float(match.group(2))
+                    f0 = float(match.group(2))
                 elif key == "bw":
-                    self._bw = float(match.group(2))
+                    bw = float(match.group(2))
                 elif key == "N":
-                    self._order = int(match.group(2))
+                    order = int(match.group(2))
                 elif key == "Q":
-                    self._Q = float(match.group(2))
+                    Q = float(match.group(2))
             elif line.startswith(" matrix"):
                 # Найти все пары вида m_1_2 = 0.123
                 matches = re.findall(r"m_(\d+)_(\d+)\s*=\s*([-+eE0-9.]+)", line)
                 for i_str, j_str, val_str in matches:
                     i, j, val = int(i_str), int(j_str), float(val_str)
                     matrix_elements[(i, j)] = val
-                matrix = np.zeros((self._order+2, self._order+2))
+                matrix = np.zeros((order + 2, order + 2))
                 rows, cols = zip(*matrix_elements.keys())
                 matrix[rows, cols] = list(matrix_elements.values())
-                self._coupling_matrix = CouplingMatrix(np.rot90(matrix, 2) + matrix - np.diag(np.diag(matrix)))
+                coupling_matrix = np.rot90(matrix, 2) + matrix - np.diag(np.diag(matrix))
+        if f0 is None or bw is None or order is None or Q is None or coupling_matrix is None:
+            raise ImportError("Считан неправильный файл. В комментариях должна присутствовать информация о "
+                              "центральной частоте фильтра (f0), ширине полосы пропускания (bw), порядке фильтра (N), "
+                              "добротности резонаторов (Q) и матрице связи (m_i_j)")
+        return cls(order, f0, bw, Q, matrix, filename)
+
+    #
+    # def _parse_comments(self):
+    #     """
+    #     Считывает матричные элементы, сохранённые в одной строке комментария.
+    #     Возвращает: словарь {(i, j): значение}
+    #     """
+    #     matrix_elements = {}
+    #     lines = self.comments
+    #
+    #     for line in lines.split("\n"):
+    #         if line.startswith(" N") or line.startswith(" f0") or line.startswith(" bw") or line.startswith(" Q"):
+    #             pattern = re.compile(r" (\w+)\s*:\s*([\d.]+)\s*(MHz)?", re.IGNORECASE)
+    #             match = pattern.match(line)
+    #             key = match.group(1)
+    #             if key == "f0":
+    #                 self._f0 = float(match.group(2))
+    #             elif key == "bw":
+    #                 self._bw = float(match.group(2))
+    #             elif key == "N":
+    #                 self._order = int(match.group(2))
+    #             elif key == "Q":
+    #                 self._Q = float(match.group(2))
+    #         elif line.startswith(" matrix"):
+    #             # Найти все пары вида m_1_2 = 0.123
+    #             matches = re.findall(r"m_(\d+)_(\d+)\s*=\s*([-+eE0-9.]+)", line)
+    #             for i_str, j_str, val_str in matches:
+    #                 i, j, val = int(i_str), int(j_str), float(val_str)
+    #                 matrix_elements[(i, j)] = val
+    #             matrix = np.zeros((self._order+2, self._order+2))
+    #             rows, cols = zip(*matrix_elements.keys())
+    #             matrix[rows, cols] = list(matrix_elements.values())
+    #             self._coupling_matrix = CouplingMatrix(np.rot90(matrix, 2) + matrix - np.diag(np.diag(matrix)))
 
     @property
     def coupling_matrix(self):
@@ -106,7 +147,8 @@ class MWFilter(rf.Network):
             Copy of the Network
 
         """
-        ntwk = MWFilter(z0=self.z0, s_def=self.s_def, comments=self.comments)
+        ntwk = MWFilter(order=self.order, f0=self.f0, bw=self.bw, Q=self.Q, matrix=self.coupling_matrix.matrix,
+                        z0=self.z0, s_def=self.s_def, comments=self.comments)
 
         ntwk._s = (
             np.empty(shape=self.s.shape, dtype=self.s.dtype)

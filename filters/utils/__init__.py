@@ -1,1 +1,1 @@
-from samplers import Sampler, SamplerTypes
+from .samplers import Sampler, SamplerTypes
