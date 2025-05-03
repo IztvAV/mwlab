@@ -243,7 +243,11 @@ class TouchstoneCodec:
 
         # --- восстанавливаем метаданные ------------------------------
         meta = meta or {}
-        unit = meta.get("unit", "Hz")
+        # всегда считаем, что self.freq_hz в Гц
+        freq = rf.Frequency.from_f(self.freq_hz, unit="Hz")
+        # но сохраним оригинальную единицу для отображения графиков
+        orig_unit = meta.get("unit", "Hz")
+        freq.unit = orig_unit
 
         z0_meta = meta.get("z0", 50)  # scalar или (P,)
         if np.ndim(z0_meta) == 0:
@@ -254,9 +258,7 @@ class TouchstoneCodec:
                 raise ValueError("Количество значений meta['z0'] не соответствует n_ports")
             z0_full = np.broadcast_to(z0_vec, (F, P))
 
-        freq = rf.Frequency.from_f(self.freq_hz, unit=unit)
         net = rf.Network(frequency=freq, s=s, z0=z0_full)
-
         net.s_def = meta.get("s_def", None)
         net.comments = meta.get("comments", [])
 
