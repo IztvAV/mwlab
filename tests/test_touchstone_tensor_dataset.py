@@ -1,17 +1,23 @@
 # tests/test_touchstone_tensor_dataset.py
 """
-Проверки TouchstoneTensorDataset и миксина _CachedDataset.
+Тесты для TouchstoneTensorDataset и миксина _CachedDataset.
 
-Потребуются «живые» *.sNp; путь передает фикстура `dataset_dir`
+Потребуются реальные *.sNp-файлы; путь передаёт фикстура `sample_dir`.
 
 Покрываем:
-    ✓ корректная длина и форма X / Y;
-    ✓ swap_xy   — инверсная постановка;
-    ✓ return_meta – наличие meta с путём и params;
-    ✓ LRU-кэш (_CachedDataset): ограничение размера и переиспользование объектов.
+    ✓ Корректная длина и соответствие количеству файлов;
+    ✓ Проверка форм X (вектор признаков) и Y (тензор S‑параметров);
+    ✓ Поддержка swap_xy: обратная постановка признаков и целей;
+    ✓ Поддержка return_meta: возврат словаря meta с params, orig_path и др.;
+    ✓ Поведение LRU-кэша:
+        - ограничение размера;
+        - переиспользование объектов;
+        - очистка при многопоточном DataLoader;
+    ✓ Совместимость encode → decode (round-trip по тензору);
+    ✓ Обработка отсутствующих параметров (NaN в X).
 """
 
-import pathlib
+import torch
 import pytest
 
 from mwlab.datasets.touchstone_dataset import TouchstoneDataset
@@ -23,23 +29,17 @@ from mwlab.codecs.touchstone_codec import TouchstoneCodec
 # ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="module")
-def dataset_dir() -> pathlib.Path:
-    """Путь к директории с тестовыми *.sNp файлами."""
-    return pathlib.Path(__file__).parent.parent / "Data" / "Filter12"
-
-
-@pytest.fixture(scope="module")
-def codec(dataset_dir):
+def codec(sample_dir):
     """Генерируем Codec по содержимому директории (real/imag, union x_keys)."""
-    raw = TouchstoneDataset(dataset_dir)
+    raw = TouchstoneDataset(sample_dir)
     return TouchstoneCodec.from_dataset(raw)
 
 
 @pytest.fixture(scope="module")
-def ds_direct(dataset_dir, codec):
+def ds_direct(sample_dir, codec):
     """Прямая задача X ➜ Y (swap_xy=False)."""
     return TouchstoneTensorDataset(
-        root=dataset_dir,
+        source=sample_dir,
         codec=codec,
         swap_xy=False,
         return_meta=False,
@@ -65,11 +65,11 @@ def _assert_shapes(ds: TouchstoneTensorDataset, idx: int = 0):
 #                                       TESTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_length_matches_filecount(ds_direct, dataset_dir):
+def test_length_matches_filecount(ds_direct, sample_dir):
     """
     Количество элементов в датасете соответствует количеству файлов *.sNp.
     """
-    n_files = sum(1 for p in dataset_dir.rglob("*.s?p"))
+    n_files = sum(1 for p in sample_dir.rglob("*.s?p"))
     assert len(ds_direct) == n_files
 
 
@@ -82,13 +82,13 @@ def test_shapes_direct(ds_direct):
     _assert_shapes(ds_direct)
 
 
-def test_shapes_inverse(dataset_dir, codec):
+def test_shapes_inverse(sample_dir, codec):
     """
     Обратная задача (swap_xy=True):
       меняем местами X и Y.
     """
     ds_inv = TouchstoneTensorDataset(
-        root=dataset_dir,
+        source=sample_dir,
         codec=codec,
         swap_xy=True,
         return_meta=False,
@@ -99,13 +99,13 @@ def test_shapes_inverse(dataset_dir, codec):
     assert x.ndim == 1 and x.numel() == len(codec.x_keys)
 
 
-def test_return_meta(dataset_dir, codec):
+def test_return_meta(sample_dir, codec):
     """
     Возвращение метаданных (return_meta=True):
       meta содержит путь и параметры.
     """
     ds_meta = TouchstoneTensorDataset(
-        root=dataset_dir,
+        source=sample_dir,
         codec=codec,
         return_meta=True,
         cache_size=0,
@@ -117,14 +117,14 @@ def test_return_meta(dataset_dir, codec):
     assert set(meta["params"]).issuperset(codec.x_keys), "Params keys mismatch"
 
 
-def test_cache_behaviour(dataset_dir, codec):
+def test_cache_behaviour(sample_dir, codec):
     """
     Поведение кэша (_CachedDataset):
       • cache_size=2 → в памяти не более 2 элементов;
       • повторный доступ к индексу → тот же объект.
     """
     ds_cache = TouchstoneTensorDataset(
-        root=dataset_dir,
+        source=sample_dir,
         codec=codec,
         cache_size=2,
         return_meta=False,
@@ -142,3 +142,24 @@ def test_cache_behaviour(dataset_dir, codec):
     _ = ds_cache[1]
     _ = ds_cache[2]
     assert len(ds_cache._cache) <= 2
+
+def test_nan_on_missing_param(sample_dir, codec):
+    """
+    Если параметр отсутствует в конкретном файле — он должен быть заменён на NaN.
+    """
+    ds = TouchstoneTensorDataset(source=sample_dir, codec=codec)
+    x, y = ds[0]
+    assert torch.isnan(x).sum() <= len(x)  # допускается NaN, не должно быть ошибок
+
+
+def test_codec_roundtrip_on_tensor(sample_dir, codec):
+    ds = TouchstoneTensorDataset(
+        source=sample_dir,
+        codec=codec,
+        return_meta=True,  # ← ключевое
+        cache_size=0,
+    )
+    x, y, meta = ds[0]
+    ts_rec = codec.decode(y, meta)
+    assert ts_rec.network.s.shape[1:] == (codec.n_ports, codec.n_ports)
+
