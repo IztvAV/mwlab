@@ -3,18 +3,17 @@
 BaseLModule
 ===========
 
-Базовый Lightning‑модуль MWLab, предназначенный для регрессии
+Универсальный Lightning‑модуль MWLab, предназначенный для регрессии
 *как прямой* (X → Y), *так и обратной* (Y → X) задачи.
 Учтены следующие изменения:
 
-* **Скейлеры**: `scaler_out` теперь применяется к целевому `y` **всегда**
-  (обе постановки), а в `predict_step` выполняется обратная трансформация
-  вне зависимости от `swap_xy`.
-* **Predict‑output** при `swap_xy=True` — возвращается список словарей
-  (`[{param: value, …}, …]`) на случай батча > 1.
-* **Case‑insensitive** поиск оптимайзера и scheduler'а.
-* `_apply_inverse` надёжно оборачивает `np.ndarray` обратно в `Tensor`.
+Поддерживает:
+* прямую и обратную регрессию (флаг **swap_xy**);
+* любые скейлеры с методами `fit / forward / inverse`;
+* автоматическое декодирование S‑параметров (`TouchstoneCodec.decode`)
+  во время `predict_step`.
 """
+
 
 from __future__ import annotations
 
@@ -31,13 +30,37 @@ from mwlab.codecs.touchstone_codec import TouchstoneCodec
 # ─────────────────────────────────────────────────────────────────────────────
 class BaseLModule(L.LightningModule):
     """
-    Универсальный Lightning‑модуль MWLab.
+    Базовый класс LightningModule для MWLab.
 
-    Поддерживает:
-    * прямую и обратную регрессию (флаг **swap_xy**);
-    * любые скейлеры с методами `fit / forward / inverse`;
-    * автоматическое декодирование S‑параметров (`TouchstoneCodec.decode`)
-      во время `predict_step`.
+    Параметры
+    ----------
+    model : nn.Module
+        Модель для обучения.
+
+    swap_xy : bool, default=False
+        Если True — инверсная задача (Y → X вместо стандартной X → Y).
+
+    auto_decode : bool, default=True
+        Если True — автоматически применять TouchstoneCodec.decode()
+        к выходам модели в predict_step.
+
+    codec : TouchstoneCodec, optional
+        Кодек для преобразования TouchstoneData ↔︎ тензоров (используется в predict_step).
+
+    scaler_in : nn.Module, optional
+        Скейлер для нормализации входных данных (например, StdScaler).
+
+    scaler_out : nn.Module, optional
+        Скейлер для нормализации выходных данных.
+
+    loss_fn : Callable, optional
+        Функция потерь. По умолчанию используется MSELoss().
+
+    optimizer_cfg : dict, optional
+        Конфигурация оптимизатора. Пример: {"name": "Adam", "lr": 1e-3}.
+
+    scheduler_cfg : dict, optional
+        Конфигурация планировщика learning rate. Пример: {"name": "StepLR", "step_size": 10}.
     """
 
     # ----------------------------------------------------------------- init
