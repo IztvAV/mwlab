@@ -1,6 +1,4 @@
 # tests/test_touchstone_ldm.py
-
-import pathlib
 import pytest
 from torch.utils.data import DataLoader
 
@@ -67,20 +65,21 @@ def test_ldm_max_samples(sample_dir, codec):
 # 4 ─ repr / str ----------------------------------------------------
 def test_ldm_repr_contains_info(sample_dir, codec):
     ldm = TouchstoneLDataModule(source=sample_dir, codec=codec, batch_size=4)
+    ldm.setup('fit')
     txt = repr(ldm)
-    for token in ("TouchstoneLDataModule", "batch=", "val_ratio=", "test_ratio="):
+    for token in ("TouchstoneLDataModule", "batch=", "val=", "test="):
         assert token in txt
 
 
 # 5 ─ validate / test без fit ----------------------------------------
 def test_ldm_validate_error_before_fit(sample_dir, codec):
     ldm = TouchstoneLDataModule(source=sample_dir, codec=codec)
-    with pytest.raises(RuntimeError, match="val_ds не инициализирован"):
+    with pytest.raises(RuntimeError, match=r"setup\('fit'\) должно быть вызвано перед validate"):
         ldm.setup("validate")
 
 def test_ldm_test_error_before_fit(sample_dir, codec):
     ldm = TouchstoneLDataModule(source=sample_dir, codec=codec)
-    with pytest.raises(RuntimeError, match="test_ds не инициализирован"):
+    with pytest.raises(RuntimeError, match=r"setup\('fit'\) должно быть вызвано перед test"):
         ldm.setup("test")
 
 
@@ -112,3 +111,23 @@ def test_ldm_predict_ds_explicit(sample_dir, codec):
 
     assert ldm.predict_ds is explicit_ds
 
+def test_ldm_swap_xy_shapes(sample_dir, codec):
+    ldm = TouchstoneLDataModule(source=sample_dir, codec=codec, swap_xy=True, batch_size=2)
+    ldm.setup("fit")
+    batch = next(iter(ldm.train_dataloader()))
+    y, x = batch
+    assert x.shape[-1] == len(codec.x_keys)
+    assert y.shape[1] == len(codec.y_channels)  # (B, C, F)
+
+def test_ldm_raises_on_empty_dataset(sample_dir, codec):
+    ldm = TouchstoneLDataModule(source=sample_dir, codec=codec, max_samples=0)
+    with pytest.raises(ValueError, match="датасет пуст"):
+        ldm.setup("fit")
+
+def test_ldm_predict_returns_meta(sample_dir, codec):
+    ldm = TouchstoneLDataModule(source=sample_dir, codec=codec)
+    ldm.setup("predict")
+    batch = next(iter(ldm.predict_dataloader()))
+    assert isinstance(batch, (tuple, list))
+    assert len(batch) == 3  # (x, y, meta)
+    assert isinstance(batch[2], dict) and "params" in batch[2]
