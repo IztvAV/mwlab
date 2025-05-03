@@ -10,7 +10,7 @@ authors = [{ name = "Andrey Izotov", email = "andrey.iztv@gmail.com" }]
 readme = "README.md"
 license = { text = "MIT" }
 dependencies = [
-    "scikit-rf",
+    "scikit-rf >=0.30",
     "numpy >=1.21"
 ]
 
