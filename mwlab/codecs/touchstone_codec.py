@@ -230,6 +230,12 @@ class TouchstoneCodec:
                     s[:, i, j] = RE[key] + 1j * IM[key]
                 elif key in AMP and key in PH:
                     s[:, i, j] = AMP[key] * np.exp(1j * PH[key])
+                elif key in PH: # только фаза без амплитуды
+                    if "s_backup" in meta:
+                        amp = np.abs(meta["s_backup"][:, i, j])
+                    else:
+                        amp = 1.0  # fallback: единичный модуль
+                    s[:, i, j] = amp * np.exp(1j * PH[key])
                 elif key in RE:
                     s[:, i, j] = RE[key] + 1j * 0.0
                 elif key in IM:
@@ -300,11 +306,6 @@ class TouchstoneCodec:
             return i, j, part
         except Exception:
             raise ValueError(f"Invalid channel tag: {tag!r}") from None
-
-        part = part.lower()
-        if part not in {"real", "imag", "db", "mag", "deg"}:
-            raise ValueError(f"Unknown component: {part!r}")
-        return i, j, part
 
     # forward component
     def _convert(self, s: np.ndarray, part: str) -> np.ndarray:
