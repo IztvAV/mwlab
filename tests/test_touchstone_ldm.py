@@ -124,10 +124,17 @@ def test_ldm_raises_on_empty_dataset(sample_dir, codec):
     with pytest.raises(ValueError, match="датасет пуст"):
         ldm.setup("fit")
 
+
 def test_ldm_predict_returns_meta(sample_dir, codec):
-    ldm = TouchstoneLDataModule(source=sample_dir, codec=codec)
+    ldm = TouchstoneLDataModule(source=sample_dir, codec=codec, batch_size=2)
     ldm.setup("predict")
     batch = next(iter(ldm.predict_dataloader()))
+
     assert isinstance(batch, (tuple, list))
-    assert len(batch) == 3  # (x, y, meta)
-    assert isinstance(batch[2], dict) and "params" in batch[2]
+    assert len(batch) == 3  # (x, y, metas)
+
+    metas = batch[2]
+    assert isinstance(metas, list)
+    assert all(isinstance(m, dict) for m in metas)
+    assert all("params" in m for m in metas)
+

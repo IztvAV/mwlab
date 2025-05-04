@@ -104,12 +104,13 @@ def test_predict_touchstone_autodecode_true():
     codec = mini_codec()
     mod = BaseLModule(model=DummyCF(1, 2),
                       codec=codec, auto_decode=True)
-    ts_out = mod.predict_step(sample_batch(codec), 0)
-    assert isinstance(ts_out, TouchstoneData)
-    s = ts_out.network.s[0, 0, 0]
-    # 0.1(linear)*0.5(param) = 0.05
-    assert np.isclose(s.real, 0.05, atol=1e-6) and np.isclose(s.imag, 0.05, atol=1e-6)
-
+    x, y, meta = sample_batch(codec)
+    ts_out = mod.predict_step((x, y, [meta]), 0)
+    assert isinstance(ts_out, list)
+    assert isinstance(ts_out[0], TouchstoneData)
+    s = ts_out[0].network.s[0, 0, 0]
+    assert np.isclose(s.real, 0.05, atol=1e-6)
+    assert np.isclose(s.imag, 0.05, atol=1e-6)
 
 def test_predict_inverse_returns_dict():
     codec = mini_codec()
@@ -118,6 +119,3 @@ def test_predict_inverse_returns_dict():
     out = mod.predict_step((y.squeeze(-1), torch.zeros(1, 1), meta), 0)
     assert isinstance(out, list) and isinstance(out[0], dict)
     assert "a" in out[0]
-
-
-
