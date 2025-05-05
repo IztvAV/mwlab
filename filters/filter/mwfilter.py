@@ -56,7 +56,7 @@ class MWFilter(rf.Network):
             raise ImportError("Считан неправильный файл. В комментариях должна присутствовать информация о "
                               "центральной частоте фильтра (f0), ширине полосы пропускания (bw), порядке фильтра (N), "
                               "добротности резонаторов (Q) и матрице связи (m_i_j)")
-        return cls(order, f0, bw, Q, matrix, filename)
+        return cls(order, f0, bw, Q, coupling_matrix, filename)
 
     #
     # def _parse_comments(self):
@@ -280,11 +280,11 @@ class MWFilter(rf.Network):
             if n != n2:
                 print("ERROR: M is not Square")
                 return (1)
-            for row in range(n):
-                for col in range(n):
-                    if M[row, col] != M[col, row]:
-                        print("ERROR: M is not symmetric about diagonal")
-                        return (1)
+            # for row in range(n):
+            #     for col in range(n):
+            #         if M[row, col] != M[col, row]:
+            #             print("ERROR: M is not symmetric about diagonal")
+            #             return (1)
 
             ######## Q Vector Setup ################
 
