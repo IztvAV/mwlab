@@ -15,8 +15,8 @@ class Sampler:
         self._space = space
 
     @classmethod
-    def uniform(cls, start, stop, step):
-        space = np.linspace(start, stop, step)
+    def uniform(cls, start, stop, num):
+        space = np.linspace(start, stop, num)
         return cls(type=SamplerTypes.SAMPLER_UNIFORM, space=space)
 
     @property
@@ -35,4 +35,3 @@ class Sampler:
 
     def __getitem__(self, idx):
         return self._space[idx]
-
