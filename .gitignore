@@ -26,3 +26,6 @@ Thumbs.db
 
 # Tests cache
 tests/__pycache__/
+
+filters/lightning_logs
+filters/Data
