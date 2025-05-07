@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-ENV_DATASET_PATH = os.getcwd()+"\\Data"
+ENV_DATASET_PATH = os.getcwd()+"\\Data\\origins_data"
 
 
 def create_min_max_matrices(origin_matrix: CouplingMatrix, deltas: np.array):
@@ -46,6 +46,7 @@ def main():
     print("Пример параметров из первого файла:")
     print(tds[0][0], "\n")
     net: MWFilter = tds[0][1]
+    net.cropped(f_start=net.f0-net.bw*1.2, f_stop=net.f0+net.bw*1.2, unit='MHz')
     y_transform = TComposite([
         S_Crop(f_start=net.f0-net.bw*1.2, f_stop=net.f0+net.bw*1.2, unit='MHz'),
         S_Resample(301)
@@ -84,7 +85,7 @@ def main():
     )
 
     ds_gen = CMTheoreticalDatasetGenerator(
-        path_to_save_dataset=os.getcwd()+"\\Data\\test",
+        path_to_save_dataset=os.getcwd()+"\\Data\\datasets_data",
         origin_filter=net,
         samplers=samplers
     )

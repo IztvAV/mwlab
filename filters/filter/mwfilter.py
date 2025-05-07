@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import skrf as rf
 import re
 import numpy as np
@@ -25,71 +27,69 @@ class MWFilter(rf.Network):
                 Возвращает: словарь {(i, j): значение}
                 """
         net = rf.Network(filename)
-        matrix_elements = {}
         lines = net.comments
-        order, f0, bw, Q, matrix = None, None, None, None, None
 
+        # Ищем строку с параметрами
         for line in lines.split("\n"):
-            if line.startswith(" N") or line.startswith(" f0") or line.startswith(" bw") or line.startswith(" Q"):
-                pattern = re.compile(r" (\w+)\s*:\s*([\d.]+)\s*(MHz)?", re.IGNORECASE)
-                match = pattern.match(line)
-                key = match.group(1)
-                if key == "f0":
-                    f0 = float(match.group(2))
-                elif key == "bw":
-                    bw = float(match.group(2))
-                elif key == "N":
-                    order = int(match.group(2))
-                elif key == "Q":
-                    Q = float(match.group(2))
-            elif line.startswith(" matrix"):
-                # Найти все пары вида m_1_2 = 0.123
-                matches = re.findall(r"m_(\d+)_(\d+)\s*=\s*([-+eE0-9.]+)", line)
-                for i_str, j_str, val_str in matches:
-                    i, j, val = int(i_str), int(j_str), float(val_str)
-                    matrix_elements[(i, j)] = val
-                matrix = np.zeros((order + 2, order + 2))
-                rows, cols = zip(*matrix_elements.keys())
-                matrix[rows, cols] = list(matrix_elements.values())
-                coupling_matrix = np.rot90(matrix, 2) + matrix - np.diag(np.diag(matrix))
-        if f0 is None or bw is None or order is None or Q is None or coupling_matrix is None:
-            raise ImportError("Считан неправильный файл. В комментариях должна присутствовать информация о "
-                              "центральной частоте фильтра (f0), ширине полосы пропускания (bw), порядке фильтра (N), "
-                              "добротности резонаторов (Q) и матрице связи (m_i_j)")
-        return cls(order, f0, bw, Q, coupling_matrix, filename)
+            if line.startswith(" Parameters"):
+                # Убираем начальные символы и фигурные скобки
+                match = re.search(r"\{(.+?)\}", line)
+                if not match:
+                    raise ValueError("Malformed parameter line")
+                param_str = match.group(1)
 
-    #
-    # def _parse_comments(self):
-    #     """
-    #     Считывает матричные элементы, сохранённые в одной строке комментария.
-    #     Возвращает: словарь {(i, j): значение}
-    #     """
-    #     matrix_elements = {}
-    #     lines = self.comments
-    #
-    #     for line in lines.split("\n"):
-    #         if line.startswith(" N") or line.startswith(" f0") or line.startswith(" bw") or line.startswith(" Q"):
-    #             pattern = re.compile(r" (\w+)\s*:\s*([\d.]+)\s*(MHz)?", re.IGNORECASE)
-    #             match = pattern.match(line)
-    #             key = match.group(1)
-    #             if key == "f0":
-    #                 self._f0 = float(match.group(2))
-    #             elif key == "bw":
-    #                 self._bw = float(match.group(2))
-    #             elif key == "N":
-    #                 self._order = int(match.group(2))
-    #             elif key == "Q":
-    #                 self._Q = float(match.group(2))
-    #         elif line.startswith(" matrix"):
-    #             # Найти все пары вида m_1_2 = 0.123
-    #             matches = re.findall(r"m_(\d+)_(\d+)\s*=\s*([-+eE0-9.]+)", line)
-    #             for i_str, j_str, val_str in matches:
-    #                 i, j, val = int(i_str), int(j_str), float(val_str)
-    #                 matrix_elements[(i, j)] = val
-    #             matrix = np.zeros((self._order+2, self._order+2))
-    #             rows, cols = zip(*matrix_elements.keys())
-    #             matrix[rows, cols] = list(matrix_elements.values())
-    #             self._coupling_matrix = CouplingMatrix(np.rot90(matrix, 2) + matrix - np.diag(np.diag(matrix)))
+                # Разбираем параметры
+                params = {}
+                for part in param_str.split(";"):
+                    if "=" in part:
+                        k, v = part.split("=")
+                        k, v = k.strip(), float(v.strip())
+                        params[k] = v
+
+                # Собираем матрицу связи
+                N = int(params["N"])
+                M = np.zeros((N + 2, N + 2), dtype=float)
+                for k, v in params.items():
+                    if k.startswith("m_"):
+                        _, i, j = k.split("_")
+                        M[int(i), int(j)] = v
+                        M[int(j), int(i)] = v  # предполагается симметричность
+
+        return cls(
+            f0=params.get("f0"),
+            bw=params.get("bw"),
+            Q=params.get("Q"),
+            order=N,
+            matrix=M,
+            file=filename
+        )
+
+    def write_touchstone(self, filename: str | Path = None, *args, **kwargs) -> None:
+        # Собираем параметры
+        param_parts = [
+            f"f0={self.f0:.6f}",
+            f"bw={self.bw:.6f}",
+            f"Q={self.Q:.6f}",
+            f"N={int(self.order)}"
+        ]
+
+        # Добавляем элементы матрицы связи
+        M = self.coupling_matrix.matrix
+        for i in range(M.shape[0]):
+            for j in range(i, M.shape[1]):  # верхняя треугольная часть (или вся)
+                val = M[i, j]
+                if abs(val) > 1e-12:  # пропускаем нули
+                    param_parts.append(f"m_{i}_{j}={val:.6f}")
+
+        # Формируем одну строку комментария
+        param_comment = " Parameters = {" + "; ".join(param_parts) + "}\n"
+
+        if self.comments is not None:
+            self.comments += param_comment
+        else:
+            self.comments = param_comment
+        # Сохраняем обычный touchstone файл (без комментариев)
+        super().write_touchstone(filename)
 
     @property
     def coupling_matrix(self):
@@ -360,4 +360,7 @@ class MWFilter(rf.Network):
             return RespM2_gpu(M, f0, FBW, Q, frange, NRNlist, Rs, Rl, PSs)
         else:
             return RespM2_cpu(M, f0, FBW, Q, frange, NRNlist, Rs, Rl, PSs)
+    #
+    # def write(self, file: str | Path = None, *args, **kwargs) -> None:
+    #     pass
 

@@ -3,6 +3,7 @@ import numpy as np
 from ..filter import MWFilter
 from ..utils import Sampler
 from dataclasses import dataclass
+from tqdm import tqdm
 
 
 @dataclass
@@ -30,7 +31,7 @@ class CMTheoreticalDatasetGenerator:
                              f" должен равняться размеру сэмплера со сдвигами элементов матрицы связи (cm_shifts): "
                              f"{len(self._samplers.cm_shifts)}")
         size = len(self._samplers.cm_shifts)
-        for idx in range(size):
+        for idx in tqdm(range(size), desc=f"Генерация датасета в путь: {self._path_to_save_dataset}"):
             new_matrix = self._samplers.cm_shifts[idx]
             ps_shifts = self._samplers.ps_shifts[idx]
             # TODO: Проверить правильность возвращаемого значения
@@ -39,5 +40,6 @@ class CMTheoreticalDatasetGenerator:
                                                        frange=self._origin_filter.f, PSs=ps_shifts)
             new_filter = MWFilter(f0=self._origin_filter.f0, order=self._origin_filter.order, bw=self._origin_filter.bw,
                      Q=self._origin_filter.Q, matrix=new_matrix, frequency=self._origin_filter.f, s=s_params, z0=50)
-            # TODO: сделать сохранение в датасет S-параметров и матрицы связи
+            new_filter.write_touchstone(self._path_to_save_dataset+f"\\Data_{idx:04d}.s2p")
+            pass
 
