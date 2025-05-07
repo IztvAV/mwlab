@@ -46,7 +46,6 @@ def main():
     print("Пример параметров из первого файла:")
     print(tds[0][0], "\n")
     net: MWFilter = tds[0][1]
-    net.cropped(f_start=net.f0-net.bw*1.2, f_stop=net.f0+net.bw*1.2, unit='MHz')
     y_transform = TComposite([
         S_Crop(f_start=net.f0-net.bw*1.2, f_stop=net.f0+net.bw*1.2, unit='MHz'),
         S_Resample(301)
@@ -58,7 +57,7 @@ def main():
 
     codec = mwlab.TouchstoneCodec.from_dataset(tds_transformed)
     print(codec)
-    codec.y_channels = ['S11.real', 'S21.real', 'S22.real', 'S11.imag', 'S21.imag', 'S22.imag']
+    codec.y_channels = ['S1_1.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S2_1.imag', 'S2_2.imag']
     print("Каналы:", codec.y_channels)
     print("Количество каналов:", len(codec.y_channels))
 
