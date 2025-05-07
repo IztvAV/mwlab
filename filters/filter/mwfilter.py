@@ -113,7 +113,7 @@ class MWFilter(rf.Network):
 
     @property
     def fbw(self):
-        return self.f0/self.bw
+        return self.bw/self.f0
 
 
     ## CLASS METHODS
