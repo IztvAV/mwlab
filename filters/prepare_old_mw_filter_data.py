@@ -4,6 +4,7 @@ import skrf as rf
 from filter import couplilng_matrix as cm
 import copy
 from filter.mwfilter import MWFilter
+import mwlab
 
 
 def get_filter_name(path_to_s_parameters: str) -> str:
@@ -19,10 +20,9 @@ def save_matrix_to_s2p_single_comment(matrix_indices, matrix_values):
     """
 
     # Формируем строку вида: ! matrix = [m_0_1 = 1.23, m_1_2 = 0.56]
-    elements = [f"m_{i}_{j} = {val:.6f}" for (i, j), val in zip(matrix_indices, matrix_values)]
-    # matrix_comment = " matrix: [" + ", ".join(elements) + "]\n"
-    matrix_comment = " matrix=[" + ", ".join(elements) + "]"
-    return matrix_comment
+    matrix_dict = {}
+    [matrix_dict.update({f"m_{i}_{j}": val}) for (i, j), val in zip(matrix_indices, matrix_values)]
+    return matrix_dict
 
 
 def main():
@@ -31,23 +31,26 @@ def main():
     parser.add_argument("-fr", "--freq_resp", type=str, default=os.getcwd()+"\\SCYA501-KuIMUXT5-BPFC3/SCYA501-KuIMUXT5-BPFC3 Rev.0.3-0.0#УФМ.12.44-12.8 ГГц. RI.s2p",
                         help="Путь к .s2p файлу с частотными характеристиками фильтра")
     parser.add_argument("-m", "--matrix", type=str, default=os.getcwd()+"\\SCYA501-KuIMUXT5-BPFC3/SCYA501-KuIMUXT5-BPFC3 Rev.0.3-0.0#Матрица связи.txt", help="Путь к файлу .txt с матрицей связи фильтра")
-    parser.add_argument("-f0", "--center_freq", type=str, default="12000", help="Центральная частота фильтра в МГц")
-    parser.add_argument("-bw", "--bandwidth", type=str, default="36", help="Ширина полосы пропускания фильтра в МГц")
+    parser.add_argument("-f0", "--center_freq", type=str, default="12700.012", help="Центральная частота фильтра в МГц")
+    parser.add_argument("-bw", "--bandwidth", type=str, default="77.238", help="Ширина полосы пропускания фильтра в МГц")
     parser.add_argument("-q", "--quality_factor", type=str, default="6100", help="Значение добротности")
     parser.add_argument("-p", "--path_to_save", type=str, default=os.getcwd(), help="Путь для сохранения измененного файла")
 
     args = parser.parse_args()
     filter_name = get_filter_name(path_to_s_parameters=args.freq_resp)
     matrix = cm.CouplingMatrix.from_file(args.matrix)
-    matrix_comment = save_matrix_to_s2p_single_comment(matrix_indices=matrix.links, matrix_values=matrix.factors)
-    net = copy.deepcopy(rf.Network(args.freq_resp))
-    # net.comments += " f0: " + args.center_freq + " MHz\n bw: " + args.bandwidth + " MHz\n Q: " + args.quality_factor + "\n N: " + str(matrix.matrix_order-2) + "\n" + matrix_comment
-    net.comments += " Parameters = {f0=" + args.center_freq + "; bw=" + args.bandwidth + "; Q=" + args.quality_factor + "; N=" + str(matrix.matrix_order-2) + ";" + matrix_comment + "}"
+    net = rf.Network(args.freq_resp)
+
     path_to_save = args.path_to_save + "\\" + filter_name+"_modify.s2p"
+    new_td = mwlab.TouchstoneData(
+        network=rf.Network(frequency=net.frequency, s=net.s, z0=net.z0),
+        params={"f0": args.center_freq, "bw": args.bandwidth, "Q": args.quality_factor, "N": matrix.matrix_order-2}
+    )
+    matrix_dict = save_matrix_to_s2p_single_comment(matrix_indices=matrix.links, matrix_values=matrix.factors)
+    new_td.params.update(matrix_dict)
     print(f"Path to save file: {path_to_save}")
-    net.write_touchstone(filename=path_to_save)
-    # mwfilter = MWFilter(path_to_save)
-    pass
+    new_td.network.write_touchstone(filename=path_to_save)
+    new_td.save(path_to_save)
 
 
 if __name__ == "__main__":

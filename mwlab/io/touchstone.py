@@ -90,10 +90,10 @@ class TouchstoneData:
         target.parent.mkdir(parents=True, exist_ok=True)
 
         # 1) штатная запись S-параметров
-        stem = target.with_suffix("").name
         n_ports = int(self.network.number_of_ports)
-        self.network.write_touchstone(filename=stem, dir=str(target.parent))
+        self.network.write_touchstone(filename=target.name, dir=str(target.parent))
 
+        stem = target.with_suffix("").name
         real_file = target.parent / f"{stem}.s{n_ports}p"
 
         # 2) формируем строку Parameters
