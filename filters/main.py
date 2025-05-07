@@ -109,10 +109,6 @@ def main():
         S_Resample(301)
     ])
     tds_transformed = TouchstoneMWFilterDataset(source=ENV_ORIGIN_DATA_PATH, s_tf=y_transform)
-    analyzer = mwlab.TouchstoneDatasetAnalyzer(tds_transformed)
-    analyzer.plot_s_stats(port_in=2, port_out=1)
-    analyzer.plot_s_stats(port_in=1, port_out=1)
-
     codec = mwlab.TouchstoneCodec.from_dataset(tds_transformed)
     print(codec)
     codec.y_channels = ['S1_1.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S2_1.imag', 'S2_2.imag']
@@ -137,8 +133,8 @@ def main():
     phase_shifts_min, phase_shifts_max = create_min_max_phase_shifts(origin_shifts=np.array([0.547, -1.0, 0.01685, 0.017]),
                                                                      deltas=np.array([0.02, 0.02, 0.005, 0.005]))
     samplers = CMTheoreticalDatasetGeneratorSamplers(
-        cm_shifts=Sampler.lhs(start=m_min, stop=m_max, num=1000),
-        ps_shifts=Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=1000)
+        cm_shifts=Sampler.lhs(start=m_min, stop=m_max, num=10000),
+        ps_shifts=Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=10000)
     )
 
     ds_gen = CMTheoreticalDatasetGenerator(
@@ -189,16 +185,21 @@ def main():
         scheduler_cfg={"name": "StepLR", "step_size": 20, "gamma": 0.5},
         loss_fn=nn.MSELoss()
     )
+    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min", min_delta=0.00001)
 
     # Обучение модели с помощью PyTorch Lightning
     trainer = L.Trainer(
-        max_epochs=5,  # Максимальное количество эпох обучения
+        max_epochs=100,  # Максимальное количество эпох обучения
         accelerator="auto",  # Автоматический выбор устройства (CPU/GPU)
-        log_every_n_steps=100  # Частота логирования в процессе обучения
+        log_every_n_steps=100,  # Частота логирования в процессе обучения
+        callbacks=[
+            stoping
+        ]
     )
 
     # Запуск процесса обучения
     trainer.fit(lit_model, dm)
+    dm.setup("predict")
     prediction = trainer.predict(lit_model, datamodule=dm)
 
     # Извлекаем предсказания для первого файла

@@ -54,7 +54,6 @@ class MWFilter(rf.Network):
                         _, i, j = k.split("_")
                         M[int(i), int(j)] = v
                         M[int(j), int(i)] = v  # предполагается симметричность
-
         return cls(
             f0=params.get("f0"),
             bw=params.get("bw"),
@@ -63,6 +62,31 @@ class MWFilter(rf.Network):
             matrix=M,
             file=filename
         )
+
+    @classmethod
+    def from_touchstone_data_parameters(cls, params: dict):
+        f0 = params.get("f0")
+        bw = params.get("bw")
+        Q = params.get("Q")
+        order = params.get("N")
+        M = np.zeros((order + 2, order + 2), dtype=float)
+        for k, v in params.items():
+            if k.startswith("m_"):
+                _, i, j = k.split("_")
+                M[int(i), int(j)] = v
+                M[int(j), int(i)] = v  # предполагается симметричность
+        if f0 is None or bw is None or Q is None or order is None or M is None:
+            raise ValueError(f"Некорректные параметры для инициализации класса: f0={f0}, bw={bw}, Q={Q}, "
+                             f"order={order}, \nM={M}")
+        return cls(
+            f0=f0,
+            bw=bw,
+            Q=Q,
+            order=order,
+            matrix=M,
+            file=filename
+        )
+
 
     def write_touchstone(self, filename: str | Path = None, *args, **kwargs) -> None:
         # Собираем параметры
