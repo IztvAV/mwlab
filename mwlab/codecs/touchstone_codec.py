@@ -1,6 +1,8 @@
 # mwlab/codecs/touchstone_codec.py
 """
-Кодек TouchstoneData ↔︎ (X-тензор, Y-тензор, meta).
+`TouchstoneCodec` превращает объект `TouchstoneData` в тензоры PyTorch
+и обратно.  Поддерживает сериализацию (pickle) и авто‑конфигурацию
+по готовому `TouchstoneDataset`.
 
 Функциональность
 ----------------
@@ -11,49 +13,43 @@
 """
 
 from __future__ import annotations
+
 import math
 import pickle
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+
 import numpy as np
+import re
 import torch
 import skrf as rf
-from typing import Sequence, Tuple, List, Dict, Any, Mapping, Optional
 
 from mwlab.io.touchstone import TouchstoneData
 from mwlab.datasets.touchstone_dataset import TouchstoneDataset
 
-# ──────────────────────────────────────────────────────────────────────────
-#                               TouchstoneCodec
-# ──────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+#                                   TouchstoneCodec
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 class TouchstoneCodec:
     """
-    Преобразование Touchstone-файлов (TouchstoneData) в тензоры PyTorch и обратно.
+    Преобразует Touchstone‑файлы в тензоры PyTorch и обратно.
 
-    Публичные методы
-    ----------------
-    encode(ts: TouchstoneData)           → (x_t, y_t, meta)
-    decode(y_pred, meta)                 → TouchstoneData
-    dumps() / loads()                    → bytes  /  TouchstoneCodec
-    from_dataset(TouchstoneDataset, …)   → TouchstoneCodec (фабричный метод)
-
-    Параметры конструктора
-    ----------------------
-    x_keys : list[str]
-        Список признаков модели (X-пространство).
-    y_channels : list[str]
-        Список каналов сети вида 'Sij.part' (Y-пространство).
-    freq_hz : np.ndarray
-        Частотная сетка для S-параметров (Hz).
-    eps_db : float, optional
-        Малое значение для защиты при логарифмировании (по умолчанию 1e-12).
-    force_resample : bool, optional
-        Принудительный ресемплинг к freq_hz (по умолчанию True).
-    nan_fill : complex, optional
-        Значение-заполнитель для пропущенных элементов матрицы S.
+    Конструктор (ручной) .....................................................
+    Parameters
+    ----------
+    x_keys       : list[str]             – имена скалярных параметров (X‑пространство)
+    y_channels   : list[str]             – каналы вида ``"Sij.part"``
+                                            part ∈ {real, imag, db, mag, deg}
+    freq_hz      : ndarray (F,)          – целевая частотная сетка (Гц)
+    eps_db       : float, default 1e‑12  – защита при логарифмировании (dB)
+    force_resample : bool, default True  – если сетка не совпадает → resample
+    nan_fill     : complex, default NaN+1jNaN – заполнитель при неполной матрице
     """
 
-    VERSION: int = 1  # Номер схемы сериализации (сохранения класса в checkpoint)
+    VERSION = 1  # Номер схемы сериализации (сохранения класса в checkpoint)
 
-    # ------------------------------------------------------------------ init
+    # --------------------------------------------------------------------- init
     def __init__(
         self,
         *,
@@ -71,37 +67,27 @@ class TouchstoneCodec:
         self.force_resample = bool(force_resample)
         self.nan_fill = nan_fill
 
-        # определяем количество портов устройства по y_channels
+        # максимум индексов портов → число портов
         pairs = [self._parse_channel(tag)[:2] for tag in self.y_channels]
-        self.n_ports = int(max(max(i, j) for i, j in pairs) + 1)
+        self.n_ports: int = int(max(max(i, j) for i, j in pairs) + 1)
 
-    # ---------------------------------------------------------------- factory
+    # ----------------------------------------------------------------- factory
     @classmethod
     def from_dataset(
         cls,
-        ds,                    # TouchstoneDataset
+        ds: TouchstoneDataset,
         *,
         components: Sequence[str] = ("real", "imag"),
         eps_db: float = 1e-12,
         force_resample: bool = True,
         nan_fill: complex | float = np.nan + 1j * np.nan,
-    ) -> "TouchstoneCodec":                # ← строковая аннотация
+    ) -> "TouchstoneCodec":
         """
-        Автоматически формирует Codec по исходному TouchstoneDataset.
+        Автоматически формирует Codec на основе `TouchstoneDataset`.
 
-        Параметры
-        ----------
-        ds : TouchstoneDataset | TouchstoneTensorDataset
-            Экземпляр датасета (возможно с настроенными трансформами).
-        components : Sequence[str]
-            Список компонент для авто-генерации `y_channels`
-            (например `("real", "imag")`, `("mag","deg")` …).
-        eps_db, force_resample, nan_fill
-            Передаются в конструктор `TouchstoneCodec`.
-
-        Возвращает
-        ----------
-        TouchstoneCodec
+        • Собирает объединение ключей параметров → `x_keys`.
+        • Берет первую сеть → определяет `n_ports` и `freq_hz`.
+        • Формирует `y_channels` = Sij.компонента по всем портам.
         """
 
         if not isinstance(ds, TouchstoneDataset):
@@ -110,37 +96,27 @@ class TouchstoneCodec:
         if len(ds) == 0:
             raise ValueError("Dataset пуст – нечего анализировать")
 
-        # ------------- проходим по самому датасету (учитываются tf) -------
         key_union: set[str] = set()
-        first_net = None
+        first_net: Optional[rf.Network] = None
 
         for idx in range(len(ds)):
-            sample = ds[idx]
-
-            # TouchstoneDataset -> (x_dict, Network)
-            # TouchstoneTensorDataset -> (x_t, y_t [, meta])
-            # пробуем найти dict и skrf.Network в кортежe
-            x_part = next((p for p in sample if isinstance(p, dict)), None)
-            net_part = next((p for p in sample if hasattr(p, "s")), None)
-
-            if x_part is None or net_part is None:
+            x_dict, net = ds[idx]  # TouchstoneDataset гарантирует такую структуру
+            if not isinstance(x_dict, dict) or not hasattr(net, "s"):
                 raise TypeError(
                     "from_dataset() ожидает, что элемент датасета содержит "
-                    "dict параметров и skrf.Network"
+                    "dict и skrf.Network"
                 )
-
-            key_union.update(x_part.keys())
+            key_union.update(x_dict.keys())
             if first_net is None:
-                first_net = net_part
+                first_net = net
 
-        # ------------- генерируем параметры кодека ------------------------
         assert first_net is not None
         n_ports = first_net.number_of_ports
-        freq_hz = first_net.f            # уже после возможного S_Resample
-        comps = [c.lower() for c in components]
+        freq_hz = first_net.f  # уже после s_tf
 
+        comps = [c.lower() for c in components]
         y_channels = [
-            f"S{i + 1}{j + 1}.{comp}"
+            f"S{i + 1}_{j + 1}.{comp}"
             for comp in comps
             for i in range(n_ports)
             for j in range(n_ports)
@@ -162,36 +138,55 @@ class TouchstoneCodec:
         """
         TouchstoneData → (x_t, y_t, meta)
 
-        x_t : (D,)       — float32
-        y_t : (C, F)     — float32
-        meta : dict      — {'params': …, 'orig_path': …}
+        x_t : (Dx,)   float32
+        y_t : (C,F)  float32   (C = len(y_channels))
+        meta: словарь, необходимый для полного восстановления сети
         """
-        # -------- X ----------------------------------------------------
-        params = np.array([])
-        for k in self.x_keys:
-            params = np.hstack((params, ts.params[k]))
-        x_vec = torch.tensor(params, dtype=torch.float32)
-        # x_vec = torch.tensor([ts.params[k] for k in self.x_keys], dtype=torch.float32)
-
-        # -------- Y (с ресемплингом при необходимости) -----------------
-        net = ts.network
-        need_resample = (
-            len(net.f) != len(self.freq_hz) or not np.allclose(net.f, self.freq_hz)
+        # ----------- X‑вектор -----------------------------------------
+        x_vec = torch.tensor(
+            [ts.params.get(k, float("nan")) for k in self.x_keys],
+            dtype=torch.float32,
         )
-        if self.force_resample and need_resample:
+
+        # ----------- S‑матрица (ресемплинг) ---------------------------
+        net = ts.network
+
+        net_ports = int(net.number_of_ports)
+        if net_ports > self.n_ports:
+            self.n_ports = net_ports
+
+        if self.force_resample and (
+            len(net.f) != len(self.freq_hz) or not np.allclose(net.f, self.freq_hz)
+        ):
             net = net.copy()
-            net.resample(self.freq_hz)
+            freq_target = rf.Frequency.from_f(self.freq_hz, unit="Hz")
+            net.resample(freq_target)
+        else:
+            if not np.allclose(net.f, self.freq_hz):
+                raise ValueError("Несоответствие сетки частот и force_resample=False")
 
         chans = [
             self._convert(net.s[:, i, j], part)
             for (i, j, part) in map(self._parse_channel, self.y_channels)
         ]
-        y_t = torch.from_numpy(np.stack(chans, axis=0)).float()  # (C, F)
+        y_t = torch.from_numpy(np.stack(chans, axis=0)).float()
 
-        meta = {
+        covered_pairs = {self._parse_channel(tag)[:2] for tag in self.y_channels}
+        full_pairs = {(i, j) for i in range(net_ports) for j in range(net_ports)}
+        need_backup = covered_pairs != full_pairs
+
+        # ----------- meta (вся системная инфа + user params) ----------
+        meta: Dict[str, Any] = {
             "params": ts.params,
+            "unit": net.frequency.unit,
+            "s_def": net.s_def,
+            "z0": net.z0[0].copy(),          # (P,)
+            "n_ports": net_ports,
+            "comments": net.comments,
             "orig_path": str(ts.path) if ts.path else None,
         }
+        if need_backup:
+            meta["s_backup"] = net.s.astype(np.complex64)
         return x_vec, y_t, meta
 
     # ───────────────────────────────────────────────────────────── decode
@@ -200,25 +195,33 @@ class TouchstoneCodec:
         self, y_pred: torch.Tensor, meta: Optional[Mapping[str, Any]] = None
     ) -> TouchstoneData:
         """
-        (y_pred, meta) → TouchstoneData.
+        (y_pred, meta) → TouchstoneData
 
-        y_pred : (C,F)  *или* (B,C,F) — в случае батча берётся [0].
+        • `y_pred` формы (C,F) или (B,C,F) → используется первый элемент.
+        • Если `meta` отсутствует — восстанавливаем базово (unit='Hz', z0=50Ω).
         """
 
         if y_pred.dim() == 3:
             y_pred = y_pred[0]
         y_np = y_pred.cpu().float().numpy()
 
-        # --- первый проход ---
+        meta = meta or {}
+        P = int(meta.get("n_ports", self.n_ports))
+        F = len(self.freq_hz)
+
+        # --- разбор по компонентам -----------------------------------
         RE, IM, AMP, PH = {}, {}, {}, {}
         for k, tag in enumerate(self.y_channels):
             i, j, part = self._parse_channel(tag)
             kind, arr = self._reverse(y_np[k], part)
             {"re": RE, "im": IM, "amp": AMP, "phase": PH}[kind][(i, j)] = arr
 
-        # --- второй проход: сборка матрицы S ---
-        F, P = self.freq_hz.size, self.n_ports
-        s = np.full((F, P, P), self.nan_fill, dtype=complex)
+        # --- сборка комплексной S‑матрицы ----------------------------
+        if "s_backup" in meta:
+            s = np.asarray(meta["s_backup"]).astype(complex).copy()
+            F, P = s.shape[0], s.shape[1]
+        else:
+            s = np.full((F, P, P), self.nan_fill, dtype=complex)
 
         for i in range(P):
             for j in range(P):
@@ -227,6 +230,12 @@ class TouchstoneCodec:
                     s[:, i, j] = RE[key] + 1j * IM[key]
                 elif key in AMP and key in PH:
                     s[:, i, j] = AMP[key] * np.exp(1j * PH[key])
+                elif key in PH: # только фаза без амплитуды
+                    if "s_backup" in meta:
+                        amp = np.abs(meta["s_backup"][:, i, j])
+                    else:
+                        amp = 1.0  # fallback: единичный модуль
+                    s[:, i, j] = amp * np.exp(1j * PH[key])
                 elif key in RE:
                     s[:, i, j] = RE[key] + 1j * 0.0
                 elif key in IM:
@@ -234,41 +243,72 @@ class TouchstoneCodec:
                 elif key in AMP:
                     s[:, i, j] = AMP[key]
 
-        net = rf.Network(f=self.freq_hz, s=s, f_unit="Hz")
-        return TouchstoneData(net, params=dict(meta.get("params", {})) if meta else {})
+        # заменяем NaN → 0
+        nan_mask = np.isnan(s.real) | np.isnan(s.imag)
+        s[nan_mask] = 0.0 + 0.0j
+
+        # --- восстанавливаем метаданные ------------------------------
+        meta = meta or {}
+        # всегда считаем, что self.freq_hz в Гц
+        freq = rf.Frequency.from_f(self.freq_hz, unit="Hz")
+        # но сохраним оригинальную единицу для отображения графиков
+        orig_unit = meta.get("unit", "Hz")
+        freq.unit = orig_unit
+
+        z0_meta = meta.get("z0", 50)  # scalar или (P,)
+        if np.ndim(z0_meta) == 0:
+            z0_full = np.full((F, P), z0_meta, dtype=complex)
+        else:
+            z0_vec = np.asarray(z0_meta, dtype=complex).reshape(1, -1)  # (1,P)
+            if z0_vec.shape[1] != P:
+                raise ValueError("Количество значений meta['z0'] не соответствует n_ports")
+            z0_full = np.broadcast_to(z0_vec, (F, P))
+
+        net = rf.Network(frequency=freq, s=s, z0=z0_full)
+        net.s_def = meta.get("s_def", None)
+        net.comments = meta.get("comments", [])
+
+        return TouchstoneData(net, params=dict(meta.get("params", {})))
 
     # ─────────────────────────────────────────────────── (de)serialization
     def dumps(self) -> bytes:
-        """→ pickle-bytes (для сохранения в checkpoint)."""
-        return pickle.dumps({"ver": self.VERSION, **self.__dict__})
+        """Сериализация → bytes (pickle)."""
+        payload = {"ver": self.VERSION, **self.__dict__}
+        return pickle.dumps(payload)
 
     @classmethod
     def loads(cls, data: bytes) -> "TouchstoneCodec":
-        """← из pickle-bytes."""
+        """Десериализация ← bytes (pickle)."""
+        state = pickle.loads(data)
+        ver = state.pop("ver", 0)
+        if ver != cls.VERSION:
+            raise ValueError(
+                f"Incompatible TouchstoneCodec version: file {ver}, code {cls.VERSION}"
+            )
         obj = cls.__new__(cls)
-        obj.__dict__.update(pickle.loads(data))
+        obj.__dict__.update(state)
         return obj
 
     # ───────────────────────────────────────────────────── utilities
     @staticmethod
     def _parse_channel(tag: str) -> Tuple[int, int, str]:
-        """Парсинг строки 'Sij.part' → (i, j, part)."""
+        """
+        'S<i>_<j>.<part>' → (i, j, part)  (нумерация портов с 0).
+        """
         try:
-            idx, part = tag.split(".")
-            if not (idx.startswith("S") and len(idx) == 3):
-                raise ValueError
-            i, j = int(idx[1]) - 1, int(idx[2]) - 1
+            m = re.fullmatch(r"S(\d+)_(\d+)\.(\w+)", tag, re.IGNORECASE)
+            if not m:
+                raise ValueError(f"Invalid channel tag: {tag!r}")
+
+            i, j, part = int(m.group(1)) - 1, int(m.group(2)) - 1, m.group(3).lower()
+            if part not in {"real", "imag", "db", "mag", "deg"}:
+                raise ValueError(f"Unknown component: {part!r}")
+            return i, j, part
         except Exception:
             raise ValueError(f"Invalid channel tag: {tag!r}") from None
 
-        part = part.lower()
-        if part not in {"real", "imag", "db", "mag", "deg"}:
-            raise ValueError(f"Unknown component: {part!r}")
-        return i, j, part
-
     # forward component
     def _convert(self, s: np.ndarray, part: str) -> np.ndarray:
-        """Комплексный вектор → скалярная компонента."""
         p = part.lower()
         if p == "real":
             return s.real
@@ -284,7 +324,6 @@ class TouchstoneCodec:
 
     # reverse component
     def _reverse(self, arr: np.ndarray, part: str) -> Tuple[str, np.ndarray]:
-        """Инверсия преобразования для восстановления комплексных величин."""
         p = part.lower()
         if p == "real":
             return "re", arr
@@ -298,16 +337,17 @@ class TouchstoneCodec:
             return "phase", np.deg2rad(arr)
         raise RuntimeError
 
-    # для вывода основной информации о кодаке -> print(codec)
-    def __repr__(self) -> str:
+    # ---------------------------------------------------------------- repr
+    def __repr__(self) -> str:  # noqa: D401
         comps = {self._parse_channel(t)[2] for t in self.y_channels}
         return (
             f"{self.__class__.__name__}("
             f"x_keys={len(self.x_keys)}, "
-            f"y_channels={len(self.y_channels)} [{','.join(sorted(comps))}], "
+            f"y_channels={len(self.y_channels)}[{','.join(sorted(comps))}], "
             f"freq_pts={len(self.freq_hz)}, "
             f"ports={self.n_ports})"
         )
 
     __str__ = __repr__
+
 

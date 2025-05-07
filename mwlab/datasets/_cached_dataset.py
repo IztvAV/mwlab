@@ -49,8 +49,8 @@ class _CachedDataset(Dataset):
         raise NotImplementedError("Дочерний класс обязан реализовать _get_item_raw")
 
     def __getitem__(self, idx: int):
-        # Отключаем кэш в режиме многопоточности
-        if get_worker_info() is not None:
+        # Если работаем внутри DataLoader‑воркера, отключаем (единожды) кэш
+        if get_worker_info() is not None and self._cache_enabled:
             self._cache_enabled = False
             self._cache.clear()
 

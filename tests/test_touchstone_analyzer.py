@@ -5,23 +5,14 @@ import xarray as xr
 import tempfile
 
 from mwlab import TouchstoneDataset
-from mwlab.transforms import s_transforms as st, TComposite
 from mwlab.utils.analysis import TouchstoneDatasetAnalyzer
 
 
 # ------------------ ФИКСТУРЫ ------------------
-
 @pytest.fixture(scope="module")
-def dataset_resampled():
-    root = Path(__file__).parent.parent  / "Data" / "Filter12"
-    s_tf = TComposite([
-        st.S_Resample(freq_or_n=100)
-    ])
-    return TouchstoneDataset(root=root, s_tf=s_tf)
-
-@pytest.fixture(scope="module")
-def analyzer(dataset_resampled):
-    return TouchstoneDatasetAnalyzer(dataset=dataset_resampled)
+def analyzer(sample_dir):
+    ds=TouchstoneDataset(source=sample_dir)
+    return TouchstoneDatasetAnalyzer(ds)
 
 
 # ------------------ ПАРАМЕТРЫ ------------------

@@ -51,10 +51,6 @@ class TouchstoneData:
         self.params: Dict[str, float | str] = parsed
         self.path = pathlib.Path(path) if path else None
 
-        # Ограничения
-        if self.network.number_of_ports > 9:
-            raise ValueError("> 9 портов не поддерживается.")
-
     # ------------------------------------------------------- Загрузка *.sNp
     @classmethod
     def load(cls, path: Union[str, pathlib.Path]) -> "TouchstoneData":
@@ -70,7 +66,7 @@ class TouchstoneData:
 
         # запасной парсинг, если comments пусты
         if not obj.params:
-            obj.params = obj._params_from_file(path)
+            obj.params = cls._params_from_file(path)
         return obj
 
     # ------------------------------------------------------- Сохранение
@@ -128,7 +124,7 @@ class TouchstoneData:
             'f'                 – (F,)    float64   (в Гц)
             'meta/unit'         – ()      S ascii
             'meta/s_def'        – ()      S ascii
-            'meta/z0'           – (P,)    complex64
+            'meta/z0'           – (F,P)   complex64
             'meta/comments'     – (N,)    uint8  (если есть)
             'param/...'         – пользовательские ключи
         """
