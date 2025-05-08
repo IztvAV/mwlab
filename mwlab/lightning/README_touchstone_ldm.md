@@ -1,8 +1,8 @@
 # mwlab.lightning.touchstone_ldm
 
-Модуль `touchstone_ldm.py` предоставляет LightningDataModule-обертку для работы с Touchstone-данными — файлов формата *.sNp, используемых в ВЧ и СВЧ-моделировании (например, S-параметры фильтров, антенн и пр.).
+Модуль `touchstone_ldm.py` предоставляет LightningDataModule-обёртку для работы с Touchstone-данными — файлов формата *.sNp, используемых в ВЧ и СВЧ‑моделировании (например, S‑параметры фильтров, антенн и пр.).
 
-Основан на `TouchstoneTensorDataset` и обеспечивает полную поддержку типового ML-пайплайна: разбиение на train/val/test, скейлинг, predict-режим, поддержку метаданных.
+Он основан на `TouchstoneTensorDataset` и обеспечивает полную поддержку типового ML‑пайплайна: разбиение на train/val/test, масштабирование признаков и целей, predict‑режим, работу с метаданными и поддержку обратной постановки задачи.
 
 ---
 
@@ -14,53 +14,80 @@ class TouchstoneLDataModule(L.LightningDataModule)
 
 ### Основное предназначение
 
-- Поддержка чтения Touchstone-данных из различных backend-ов (`FileBackend`, `HDF5Backend`)
-- Разбиение на тренировочную, валидационную и тестовую части
-- Предобработка входов и выходов с помощью скейлеров
-- Возможность постановки обратной задачи (swap X ↔ Y)
-- Режим предсказания с возвратом `meta` для декодирования в `TouchstoneData`
+- Чтение Touchstone-данных из каталогов, HDF5-файлов и произвольных backend-ов (`StorageBackend`)
+- Разбиение на поднаборы train/val/test (по долям или фиксированному числу примеров)
+- Масштабирование входов и выходов с помощью `scaler_in`, `scaler_out` (с авто-обучением по train)
+- Возможность постановки обратной задачи: предсказывать X по Y (`swap_xy=True`)
+- Режим `predict` с возвратом `meta` для декодирования в `TouchstoneData`
+- Методы `get_dataset(...)` и `get_dataloader(...)` для удобного доступа к наборам данных
 
 ---
 
 ## Аргументы конструктора
 
-| Параметр | Тип               | Описание |
-|----------|-------------------|----------|
-| `source` | `str`/`Path`/`StorageBackend` | Путь к каталогу с *.sNp, .h5-файлу или объекту backend-а |
-| `codec` | `TouchstoneCodec` | Кодек для преобразования данных в тензоры |
-| `batch_size` | `int`             | Размер батча |
-| `val_ratio` | `float`           | Доля валидационного набора |
-| `test_ratio` | `float`           | Доля тестового набора |
-| `max_samples` | `int`/`None` | Ограничение по количеству примеров |
-| `swap_xy` | `bool`            | Обратная задача (Y→X) |
-| `scaler_in` | `nn.Module`/`None` | Скейлер признаков |
-| `scaler_out` | `nn.Module`/`None` | Скейлер выходов |
-| `cache_size` | `int`/`None` | Размер LRU-кеша |
-| `base_ds_kwargs` | `dict`/`None` | Аргументы для базового `TouchstoneDataset` |
+| Параметр | Тип | Описание |
+|----------|-----|----------|
+| `source` | `str` / `Path` / `StorageBackend` | Путь к *.sNp, .h5-файлу или backend-объект |
+| `codec` | `TouchstoneCodec` | Кодек для преобразования TouchstoneData ↔ тензоры |
+| `batch_size` | `int` | Размер батча |
+| `num_workers` | `int` | Число воркеров при загрузке данных |
+| `pin_memory` | `bool` | Использовать pinned memory при загрузке |
+| `val_ratio` | `float` | Доля валидационного набора |
+| `test_ratio` | `float` | Доля тестового набора |
+| `max_samples` | `int` / `None` | Ограничение общего числа примеров |
+| `seed` | `int` | Фиксация генератора для воспроизводимости |
+| `swap_xy` | `bool` | Обратная задача (Y → X) |
+| `cache_size` | `int` / `None` | Размер LRU-кеша |
+| `scaler_in` / `scaler_out` | `nn.Module` / `None` | Скейлеры признаков и выходов |
+| `base_ds_kwargs` | `dict` / `None` | Дополнительные аргументы в `TouchstoneTensorDataset` |
 
 ---
 
-## Методы
+## Основные методы
 
-### `setup(stage: str)`
+### `setup(stage: str | None)`
 
-Инициализирует подвыборки набора данных:
-
-- `'fit'` → train/val/test + подгонка скейлеров
-- `'validate'`, `'test'` → требует предварительного вызова `'fit'`
-- `'predict'` → отдельный датасет с `return_meta=True`
-
-### `train_dataloader() / val_dataloader() / test_dataloader() / predict_dataloader()`
-
-Возвращают  `DataLoader` для соответствующих (под)наборов данных.
+- `'fit'` или `None`: создаёт разбиение и, при необходимости, обучает скейлеры
+- `'validate'`, `'test'`: требуют предварительный вызов `setup('fit')`
+- `'predict'`: инициализирует датасет с `return_meta=True`
 
 ---
 
-## Режим `predict`
+## Методы доступа к данным
 
-- В режиме `predict`, датасет автоматически создается с `return_meta=True`
-- Коллатор `collate_fn` сохраняет `meta` в виде списка словарей
-- Это позволяет `LightningModule.predict_step()` декодировать результат в `TouchstoneData`
+### `get_dataset(split="train", meta=False)`
+
+Возвращает `Dataset` для одного из поднаборов:
+
+- `split ∈ {"train", "val", "test", "full"}`
+- если `meta=True`, возвращаются дополнительные словари с метаданными
+
+**Примеры:**
+
+```python
+train_ds = ldm.get_dataset("train")
+test_ds = ldm.get_dataset("test", meta=True)
+```
+
+### `get_dataloader(split="train", meta=False, shuffle=None)`
+
+Создаёт `DataLoader` для выбранного поднабора:
+
+- `shuffle` по умолчанию `True` только для `train`
+- если `meta=True`, батчи будут вида `(x, y, metas)`
+
+**Примеры:**
+
+```python
+val_loader = ldm.get_dataloader("val")
+pred_loader = ldm.get_dataloader("test", meta=True, shuffle=False)
+```
+
+---
+
+## Стандартные методы Lightning
+
+- `train_dataloader()` / `val_dataloader()` / `test_dataloader()` / `predict_dataloader()`
 
 ---
 
@@ -69,11 +96,10 @@ class TouchstoneLDataModule(L.LightningDataModule)
 ```python
 from mwlab.lightning.touchstone_ldm import TouchstoneLDataModule
 from mwlab.codecs.touchstone_codec import TouchstoneCodec
+from mwlab.nn.scalers import StdScaler, MinMaxScaler
 
-# создаем codec по датасету
 codec = TouchstoneCodec.from_dataset(...)
 
-# создаем LDataModule
 ldm = TouchstoneLDataModule(
     source="Data/FilterBank",
     codec=codec,
@@ -81,17 +107,19 @@ ldm = TouchstoneLDataModule(
     val_ratio=0.2,
     test_ratio=0.1,
     scaler_in=StdScaler(dim=0),
-    scaler_out=MinMaxScaler(dim=(0, 1)),
+    scaler_out=MinMaxScaler(dim=(0, 2)),
 )
 
 ldm.setup("fit")
-train_loader = ldm.train_dataloader()
+train_loader = ldm.get_dataloader("train")
 ```
 
 ---
 
 ## Особенности
 
-- Скейлеры автоматически обучаются (`fit()`) на тренировочной части
-- `predict_dataloader()` возвращает `(X, Y, meta)` — готово к декодированию
-- Совместим с `BaseLModule` и `BaseLMWithMetrics` из `mwlab.lightning`
+- Автоматическая подгонка скейлеров по тренировочной выборке
+- Совместимость с `BaseLModule` и `BaseLMWithMetrics`
+- Возможность ограничить размер датасета (`max_samples`) для быстрой отладки
+- Обратимая постановка задачи (`swap_xy=True`)
+- Предикт-режим готов к декодированию с `codec.decode(...)`)
