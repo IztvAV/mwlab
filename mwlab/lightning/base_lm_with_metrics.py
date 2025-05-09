@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from torchmetrics import MetricCollection, MeanSquaredError, MeanAbsoluteError
+from torchmetrics import MetricCollection, MeanSquaredError, MeanAbsoluteError, R2Score
 from typing import Optional, Callable, Any
 
 from mwlab.lightning.base_lm import BaseLModule
@@ -101,6 +101,7 @@ class BaseLMWithMetrics(BaseLModule):
             metrics = {
                 "mse": MeanSquaredError(),
                 "mae": MeanAbsoluteError(),
+                "r2" : R2Score()
             }
         if isinstance(metrics, dict):
             metrics = MetricCollection(metrics)
