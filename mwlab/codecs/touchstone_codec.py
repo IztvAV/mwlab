@@ -1,20 +1,38 @@
 # mwlab/codecs/touchstone_codec.py
 """
-TouchstoneCodec
-===============
+TouchstoneCodec: кодек для работы с Touchstone‑данными в MWLab
+===============================================================
 
-Расширенная версия кодека MWLab с поддержкой:
+Модуль предоставляет класс `TouchstoneCodec`, преобразующий данные из формата
+Touchstone (.sNp) в тензоры PyTorch и обратно. Используется в задачах моделирования,
+инференса и сериализации С‑параметров в рамках MWLab‑экспериментов.
 
-* гибкого режима резервного сохранения S‑матрицы (`backup_mode` = NONE | MISSING | FULL);
-* специализированных методов для инференса, когда на входе присутствует
-  **только** X‑параметры или **только** S‑параметры:
-    - `encode_x` / `decode_x`
-    - `encode_s` / `decode_s`
+Основные возможности
+---------------------
+- encode(ts)        → (x_t, y_t, meta): преобразует `TouchstoneData` в тензоры;
+- decode(y, meta)   → TouchstoneData: восстанавливает данные из предсказанных тензоров;
+- encode_x(params)  / decode_x(tensor): работа только с X‑параметрами;
+- encode_s(net)     / decode_s(tensor): работа только с S‑матрицей;
+- dumps() / loads() : сериализация и восстановление кодека (для checkpoint‑ов);
+- from_dataset(ds)  : авто‑конфигурация кодека по TouchstoneDataset.
 
-Большая часть исходной логики (encode / decode полных TouchstoneData,
-(d)e‑сериализация, utilities) сохранена — добавлены лишь новые
-ветки кода.
+Режимы резервного копирования (backup_mode)
+--------------------------------------------
+Если S‑матрица в сети неполная (не все Sij представлены в `y_channels`),
+кодек может по-разному сохранять недостающие данные в `meta`:
+- NONE    : ничего не сохранять, пропущенные компоненты будут заполнены NaN/0;
+- MISSING : сохранить только отсутствующие пары Sij → `meta['s_missing']`;
+- FULL    : сохранить всю S‑матрицу → `meta['s_backup']`.
+
+Применение
+----------
+Этот кодек может использоваться как в прямой (X→S), так и в обратной (S→X)
+регрессии, а также поддерживает частичную сериализацию, что удобно для
+инференса и загрузки в рамках пайплайнов ML/NN.
+
+См. также: mwlab.io.touchstone.TouchstoneData, mwlab.datasets.TouchstoneDataset
 """
+
 from __future__ import annotations
 
 import enum
@@ -31,7 +49,6 @@ from mwlab.io.touchstone import TouchstoneData
 from mwlab.datasets.touchstone_dataset import TouchstoneDataset
 
 __all__ = ["TouchstoneCodec", "BackupMode"]
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 #                               Backup Mode
@@ -59,7 +76,6 @@ class TouchstoneCodec:
     """
     Преобразует Touchstone‑файлы в тензоры PyTorch и обратно.
 
-    Конструктор (ручной) .....................................................
     Parameters
     ----------
     x_keys       : list[str]             – имена скалярных параметров (X‑пространство)
@@ -69,7 +85,7 @@ class TouchstoneCodec:
     eps_db       : float, default 1e‑12  – защита при логарифмировании (dB)
     force_resample : bool, default True  – если сетка не совпадает → resample
     nan_fill     : complex, default NaN+1jNaN – заполнитель при неполной матрице
-    backup_mode : BackupMode | str, default="missing"  - стратегия сохранения непокрытых компонент S‑матрицы.
+    backup_mode  : BackupMode | str, default="none" - стратегия сохранения непокрытых компонент S‑матрицы.
 
     Основные методы:
     ----------------
@@ -90,7 +106,7 @@ class TouchstoneCodec:
         eps_db: float = 1e-12,
         force_resample: bool = True,
         nan_fill: complex | float = np.nan + 1j * np.nan,
-        backup_mode: BackupMode | str = BackupMode.FULL,
+        backup_mode: BackupMode | str = BackupMode.NONE,
     ) -> None:
         self.x_keys: List[str] = list(x_keys)
         self.y_channels: List[str] = list(y_channels)
@@ -114,7 +130,7 @@ class TouchstoneCodec:
         eps_db: float = 1e-12,
         force_resample: bool = True,
         nan_fill: complex | float = np.nan + 1j * np.nan,
-        backup_mode: BackupMode | str = BackupMode.FULL,
+        backup_mode: BackupMode | str = BackupMode.NONE,
     ) -> "TouchstoneCodec":
         """
         Автоматически формирует Codec на основе `TouchstoneDataset`.
@@ -264,7 +280,7 @@ class TouchstoneCodec:
         x_t = self.encode_x(ts.params)
 
         # -------- S‑часть --------------------------------------------------
-        y_t, meta = self.encode_s(ts.network, strict=False)
+        y_t, meta = self.encode_s(ts.network, strict=True)
 
         # meta + пользовательские параметры + путь к исходнику
         meta["params"] = ts.params
