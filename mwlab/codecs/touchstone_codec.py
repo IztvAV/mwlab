@@ -82,7 +82,7 @@ class TouchstoneCodec:
         eps_db: float = 1e-12,
         force_resample: bool = True,
         nan_fill: complex | float = np.nan + 1j * np.nan,
-        backup_mode: BackupMode | str = BackupMode.MISSING,
+        backup_mode: BackupMode | str = BackupMode.FULL,
     ) -> None:
         self.x_keys: List[str] = list(x_keys)
         self.y_channels: List[str] = list(y_channels)
@@ -106,7 +106,7 @@ class TouchstoneCodec:
         eps_db: float = 1e-12,
         force_resample: bool = True,
         nan_fill: complex | float = np.nan + 1j * np.nan,
-        backup_mode: BackupMode | str = BackupMode.MISSING,
+        backup_mode: BackupMode | str = BackupMode.FULL,
     ) -> "TouchstoneCodec":
         """Автоматическое построение кодека по «сырому» TouchstoneDataset."""
         if not isinstance(ds, TouchstoneDataset):
