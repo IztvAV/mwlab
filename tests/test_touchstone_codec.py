@@ -154,7 +154,7 @@ def test_force_resample_off_error(ts_sample):
         force_resample=False,
     )
 
-    with pytest.raises(ValueError, match="Несоответствие сетки частот"):
+    with pytest.raises(ValueError, match="encode_s: несоответствие частотной сетки"):
         codec.encode(ts_sample)
 
 def test_decode_without_meta(ts_sample, freq_vec):
@@ -168,7 +168,7 @@ def test_decode_without_meta(ts_sample, freq_vec):
 
     # Проверим базовые свойства
     assert isinstance(ts_dec, TouchstoneData)
-    assert ts_dec.network.z0.shape == (len(freq_vec), 2)
+    assert ts_dec.network.z0.shape == (len(freq_vec), codec.n_ports)
     np.testing.assert_allclose(ts_dec.network.z0, 50, atol=1e-5)
 
 def test_nan_in_params(freq_vec):
@@ -208,12 +208,129 @@ def test_from_dataset_infers_keys_and_freq():
     assert set(codec.x_keys) == {"a", "b"}
     assert codec.n_ports == 2
 
+def test_backup_mode_full(ts_sample, freq_vec):
+    codec = TouchstoneCodec(
+        x_keys=["a", "b"],
+        y_channels=["S1_1.real"],  # только Re(S11)
+        freq_hz=freq_vec,
+        backup_mode="full",
+    )
+    _, y_t, meta = codec.encode(ts_sample)
+    assert "s_backup" in meta
+
+    ts_rec = codec.decode(y_t, meta)
+    s_ref = ts_sample.network.s
+    s_rec = ts_rec.network.s
+
+    # Только Re(S11) предсказывался
+    np.testing.assert_allclose(s_rec[:, 0, 0].real, s_ref[:, 0, 0].real, atol=1e-6)
+    # Остальные элементы — из s_backup
+    np.testing.assert_allclose(s_rec[:, 0, 1], s_ref[:, 0, 1], atol=1e-6)
+    np.testing.assert_allclose(s_rec[:, 1, 0], s_ref[:, 1, 0], atol=1e-6)
+    np.testing.assert_allclose(s_rec[:, 1, 1], s_ref[:, 1, 1], atol=1e-6)
+
+def test_backup_mode_missing(ts_sample, freq_vec):
+    codec = TouchstoneCodec(
+        x_keys=["a", "b"],
+        y_channels=["S1_1.real"],  # только Re(S11)
+        freq_hz=freq_vec,
+        backup_mode="missing",
+    )
+    _, y_t, meta = codec.encode(ts_sample)
+
+    # Проверяем, что резерв действительно сохранён выборочно
+    assert "s_missing" in meta
+    assert "s_backup" not in meta
+    assert "0_0" not in meta["s_missing"]  # т.к. S1_1 предсказывается
+    assert "0_1" in meta["s_missing"]
+    assert "1_1" in meta["s_missing"]
+
+    ts_rec = codec.decode(y_t, meta)
+    s_ref = ts_sample.network.s
+    s_rec = ts_rec.network.s
+
+    # Проверяем предсказанный канал
+    np.testing.assert_allclose(s_rec[:, 0, 0].real, s_ref[:, 0, 0].real, atol=1e-6)
+    # Проверяем восстановленные по резерву каналы
+    np.testing.assert_allclose(s_rec[:, 0, 1], s_ref[:, 0, 1], atol=1e-6)
+    np.testing.assert_allclose(s_rec[:, 1, 0], s_ref[:, 1, 0], atol=1e-6)
+    np.testing.assert_allclose(s_rec[:, 1, 1], s_ref[:, 1, 1], atol=1e-6)
+
+def test_backup_mode_none(ts_sample, freq_vec):
+    codec = TouchstoneCodec(
+        x_keys=["a", "b"],
+        y_channels=["S1_1.real"],
+        freq_hz=freq_vec,
+        backup_mode="none",
+    )
+    _, y_t, meta = codec.encode(ts_sample)
+    assert "s_backup" not in meta
+    assert "s_missing" not in meta
+
+    ts_rec = codec.decode(y_t, meta)
+    s_rec = ts_rec.network.s
+    # Проверяем, что отсутствующие элементы заполнены значениями по умолчанию
+    assert np.allclose(s_rec[:, 0, 0].real, ts_sample.network.s[:, 0, 0].real, atol=1e-6)
+    assert np.allclose(s_rec[:, 0, 1], 0.0, atol=1e-6)
+
+def test_encode_decode_s(ts_sample, freq_vec):
+    codec = TouchstoneCodec(
+        x_keys=["a", "b"],
+        y_channels=["S1_1.real", "S1_1.imag"],
+        freq_hz=freq_vec,
+    )
+    y_t, meta = codec.encode_s(ts_sample.network)
+    ts_rec = codec.decode_s(y_t, meta)
+    np.testing.assert_allclose(ts_rec.s[:, 0, 0], ts_sample.network.s[:, 0, 0], atol=1e-6)
+
+def test_encode_decode_x(ts_sample, freq_vec):
+    codec = TouchstoneCodec(
+        x_keys=["a", "b"],
+        y_channels=["S1_1.real", "S1_1.imag"],
+        freq_hz=freq_vec,
+    )
+    x_t = codec.encode_x(ts_sample.params)
+    params_rec = codec.decode_x(x_t)
+    assert params_rec["a"] == ts_sample.params["a"]
+    assert params_rec["b"] == ts_sample.params["b"]
+
 
 # ---------------------------------------------------------------- pickle
 def test_pickle_roundtrip(ts_sample, freq_vec):
-    y_ch = [f"S1_1.real", "S1_1.imag"]
-    codec = TouchstoneCodec(x_keys=["a"], y_channels=y_ch, freq_hz=freq_vec)
+    y_ch = ["S1_1.real", "S1_1.imag"]
+    codec = TouchstoneCodec(
+        x_keys=["a"],
+        y_channels=y_ch,
+        freq_hz=freq_vec,
+        backup_mode="full",  # ← важно для полной реконструкции
+    )
 
     data = codec.dumps()
     codec2 = TouchstoneCodec.loads(data)
-    _roundtrip(codec2, ts_sample)
+
+    x_t, y_t, meta = codec2.encode(ts_sample)
+    ts_rec = codec2.decode(y_t, meta)
+
+    np.testing.assert_allclose(ts_rec.network.s, ts_sample.network.s, atol=1e-6)
+
+def test_pickle_roundtrip_partial(ts_sample, freq_vec):
+    y_ch = ["S1_1.real", "S1_1.imag"]
+    codec = TouchstoneCodec(
+        x_keys=["a"],
+        y_channels=y_ch,
+        freq_hz=freq_vec,
+        backup_mode="none",  # ← тестируем поведение без резерва
+    )
+
+    data = codec.dumps()
+    codec2 = TouchstoneCodec.loads(data)
+
+    x_t, y_t, meta = codec2.encode(ts_sample)
+    ts_rec = codec2.decode(y_t, meta)
+
+    s_rec = ts_rec.network.s
+    s_ref = ts_sample.network.s
+
+    # Сравниваем только реально предсказанные компоненты
+    np.testing.assert_allclose(s_rec[:, 0, 0].real, s_ref[:, 0, 0].real, atol=1e-6)
+    np.testing.assert_allclose(s_rec[:, 0, 0].imag, s_ref[:, 0, 0].imag, atol=1e-6)
