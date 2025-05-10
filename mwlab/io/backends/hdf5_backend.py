@@ -27,7 +27,7 @@ from .base import StorageBackend
 class HDF5Backend(StorageBackend):
     """StorageBackend, сохраняющий отдельные TouchstoneData в один .h5‑файл."""
 
-    def __init__(self, path: str, mode: str = "r", in_memory: bool = False):
+    def __init__(self, path: str, mode: str = "r", in_memory: bool = True):
         """
         Параметры
         ---------
