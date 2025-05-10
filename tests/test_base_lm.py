@@ -48,6 +48,28 @@ def sample_batch(codec: TouchstoneCodec):
     x, y, meta = codec.encode(ts)
     return x.unsqueeze(0), y.unsqueeze(0), meta        # (1,D), (1,C,F)
 
+class DummyNet(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.fc = nn.Linear(in_dim, out_dim)
+        nn.init.constant_(self.fc.weight, 0.1)
+        nn.init.constant_(self.fc.bias, 0.0)
+
+    def forward(self, x):
+        return self.fc(x)
+
+def make_codec() -> TouchstoneCodec:
+    return TouchstoneCodec(
+        x_keys=["a"],
+        y_channels=["S1_1.real", "S1_1.imag"],
+        freq_hz=np.array([1e9])
+    )
+
+def make_touchstone_data() -> TouchstoneData:
+    net = rf.Network(f=[1e9], s=[[[0.2 + 0.1j]]], f_unit="Hz")
+    return TouchstoneData(net, params={"a": 0.5})
+
+
 
 # 1. базовые тесты (без codec) --------------------------------------------
 def test_forward_with_scaler():
@@ -119,3 +141,44 @@ def test_predict_inverse_returns_dict():
     out = mod.predict_step((y.squeeze(-1), torch.zeros(1, 1), meta), 0)
     assert isinstance(out, list) and isinstance(out[0], dict)
     assert "a" in out[0]
+
+# ────────────────────────────── new tests ──────────────────────────────
+
+def test_predict_s_direct_mode():
+    codec = make_codec()
+    module = BaseLModule(model=DummyNet(1, 2), codec=codec, swap_xy=False)
+    net = module.predict_s({"a": 0.5})
+    assert isinstance(net, rf.Network)
+    assert net.s.shape == (1, 1, 1)
+
+def test_predict_x_inverse_mode():
+    codec = make_codec()
+    module = BaseLModule(model=DummyNet(2, 1), codec=codec, swap_xy=True)
+    net = make_touchstone_data().network
+    params = module.predict_x(net)
+    assert isinstance(params, dict)
+    assert "a" in params and isinstance(params["a"], float)
+
+def test_predict_step_no_codec_returns_tensor():
+    module = BaseLModule(model=DummyNet(1, 2), codec=None)
+    x = torch.tensor([[1.0]])
+    out = module.predict_step((x, torch.zeros(1, 2)), batch_idx=0)
+    assert isinstance(out, torch.Tensor)
+    assert out.shape == (1, 2)
+
+def test_predict_step_with_codec_and_no_meta_returns_network():
+    codec = make_codec()
+    module = BaseLModule(model=DummyNet(1, 2), codec=codec, auto_decode=True)
+    x = torch.tensor([[0.5]])
+    out = module.predict_step((x, torch.zeros(1, 2, 1)), batch_idx=0)
+    assert isinstance(out, list)
+    assert isinstance(out[0], rf.Network)
+
+def test_codec_roundtrip_via_state_dict():
+    codec = make_codec()
+    module = BaseLModule(model=DummyNet(1, 2), codec=codec)
+    state = module.state_dict()
+    new_module = BaseLModule(model=DummyNet(1, 2))
+    new_module.load_state_dict(state, strict=False)
+    assert new_module.codec is not None
+    assert isinstance(new_module.codec, TouchstoneCodec)
