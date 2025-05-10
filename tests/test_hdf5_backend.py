@@ -19,6 +19,7 @@ import skrf as rf
 
 from mwlab.io.backends.hdf5_backend import HDF5Backend
 from mwlab.io.backends.file_backend import FileBackend
+from mwlab.io.touchstone import TouchstoneData
 
 
 # ---------------------------------------------------------------------------
@@ -142,28 +143,17 @@ def test_s_dataset_not_compressed(tmp_dir, sample_dir):
 
 
 # ---------------------------------------------------------------------------
-@pytest.mark.skipif(
-    not hasattr(h5py.File, "refresh"),
-    reason="refresh() отсутствует в данной версии h5py",
-)
-def test_len_updates_after_append(tmp_dir, sample_dir):
-    """
-    Проверяем, что reader, открытый ДО записи, видит новые данные
-    после len() благодаря File.refresh().
-    """
-    h5_path = pathlib.Path(tmp_dir) / "live.h5"
-
-    writer = HDF5Backend(h5_path, mode="w")
-    reader = HDF5Backend(h5_path, mode="r")  # открываем до записи
-
-    assert len(reader) == 0
-
+def test_in_memory_loads_all(tmp_dir, sample_dir):
+    """Проверяем, что in_memory загружает все записи и закрывает файл."""
+    h5_path = pathlib.Path(tmp_dir) / "all_in_memory.h5"
     file_backend = FileBackend(sample_dir)
-    writer.append(file_backend.read(0))
-    writer.close()
 
-    # SWMR‑читатель должен увидеть 1 запись
-    assert len(reader) == 1
+    with HDF5Backend(h5_path, mode="w") as writer:
+        for i in range(5):
+            writer.append(file_backend.read(i))
 
-    reader.close()
-
+    backend = HDF5Backend(h5_path, mode="r", in_memory=True)
+    assert len(backend) == 5
+    for i in range(5):
+        ts = backend.read(i)
+        assert isinstance(ts, TouchstoneData)
