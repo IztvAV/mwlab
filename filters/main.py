@@ -99,7 +99,6 @@ def create_min_max_phase_shifts(origin_shifts: np.array, deltas):
 
 
 def main():
-    # tds = TouchstoneMWFilterDataset(source=ENV_ORIGIN_DATA_PATH)
     tds = mwlab.TouchstoneDataset(source=ENV_ORIGIN_DATA_PATH)
     print(f"Загружено файлов: {len(tds)}")
     print("Пример параметров из первого файла:")
@@ -109,7 +108,7 @@ def main():
         S_Crop(f_start=origin_filter.f0-origin_filter.bw*1.2, f_stop=origin_filter.f0+origin_filter.bw*1.2, unit='MHz'),
         S_Resample(301)
     ])
-    tds_transformed = TouchstoneMWFilterDataset(source=ENV_ORIGIN_DATA_PATH, s_tf=y_transform)
+    tds_transformed = mwlab.TouchstoneDataset(source=ENV_ORIGIN_DATA_PATH, s_tf=y_transform)
     codec = mwlab.TouchstoneCodec.from_dataset(tds_transformed)
     print(codec)
     codec.y_channels = ['S1_1.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S2_1.imag', 'S2_2.imag']
@@ -121,7 +120,8 @@ def main():
     print("Количество каналов:", len(codec.y_channels))
 
     # Пример кодирования и декодирования
-    prms, origin_filter = tds_transformed[0]  # Используем первый файл набора
+    origin_filter = MWFilter.from_touchstone_dataset_item(tds_transformed[0])
+    prms, _ = tds_transformed[0]  # Используем первый файл набора
     ts = mwlab.TouchstoneData(origin_filter, prms)  # Создаем объект TouchstoneData
 
     # Кодирование
