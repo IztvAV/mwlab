@@ -99,11 +99,12 @@ def create_min_max_phase_shifts(origin_shifts: np.array, deltas):
 
 
 def main():
-    tds = TouchstoneMWFilterDataset(source=ENV_ORIGIN_DATA_PATH)
+    # tds = TouchstoneMWFilterDataset(source=ENV_ORIGIN_DATA_PATH)
+    tds = mwlab.TouchstoneDataset(source=ENV_ORIGIN_DATA_PATH)
     print(f"Загружено файлов: {len(tds)}")
     print("Пример параметров из первого файла:")
     print(tds[0][0], "\n")
-    origin_filter: MWFilter = tds[0][1]
+    origin_filter: MWFilter = MWFilter.from_touchstone_dataset_item(tds[0])
     y_transform = TComposite([
         S_Crop(f_start=origin_filter.f0-origin_filter.bw*1.2, f_stop=origin_filter.f0+origin_filter.bw*1.2, unit='MHz'),
         S_Resample(301)
