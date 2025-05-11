@@ -17,8 +17,6 @@ class MWFilter(rf.Network):
         self._bw: float = bw
         self._Q: float = Q
         self._coupling_matrix: CouplingMatrix = CouplingMatrix(matrix)
-        # if not from_matrix:
-        #     self._parse_comments()
 
     @classmethod
     def from_file(cls, filename: str):
@@ -64,12 +62,13 @@ class MWFilter(rf.Network):
         )
 
     @classmethod
-    def from_touchstone_data_parameters(cls, params: dict):
+    def from_touchstone_dataset_item(cls, item: tuple[dict, rf.Network]):
+        params, net = item
         f0 = params.get("f0")
         bw = params.get("bw")
         Q = params.get("Q")
-        order = params.get("N")
-        M = np.zeros((order + 2, order + 2), dtype=float)
+        order = int(params.get("N"))
+        M = np.zeros(shape=(order + 2, order + 2), dtype=np.float32)
         for k, v in params.items():
             if k.startswith("m_"):
                 _, i, j = k.split("_")
@@ -84,9 +83,10 @@ class MWFilter(rf.Network):
             Q=Q,
             order=order,
             matrix=M,
-            file=filename
+            frequency=net.f,
+            s=net.s,
+            z0=net.z0
         )
-
 
     def write_touchstone(self, filename: str | Path = None, *args, **kwargs) -> None:
         # Собираем параметры
@@ -384,7 +384,3 @@ class MWFilter(rf.Network):
             return RespM2_gpu(M, f0, FBW, Q, frange, NRNlist, Rs, Rl, PSs)
         else:
             return RespM2_cpu(M, f0, FBW, Q, frange, NRNlist, Rs, Rl, PSs)
-    #
-    # def write(self, file: str | Path = None, *args, **kwargs) -> None:
-    #     pass
-
