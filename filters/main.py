@@ -135,7 +135,7 @@ def main():
     m_min, m_max = create_min_max_matrices(origin_matrix=origin_filter.coupling_matrix, deltas=np.array([1.5, 0.1, 0.005]))
     phase_shifts_min, phase_shifts_max = create_min_max_phase_shifts(origin_shifts=np.array([0.547, -1.0, 0.01685, 0.017]),
                                                                      deltas=np.array([0.02, 0.02, 0.005, 0.005]))
-    samplers = CMTheoreticalDataseteneratorSamplers(
+    samplers = CMTheoreticalDatasetGeneratorSamplers(
         cm_shifts=Sampler.lhs(start=m_min, stop=m_max, num=DATASET_SIZE),
         ps_shifts=Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=DATASET_SIZE)
     )
@@ -149,7 +149,7 @@ def main():
     ds_gen.generate()
 
     dm = mwlab.TouchstoneLDataModule(
-        source=ENV_DATASET_PATH,         # Путь к датасету
+        source=ds_gen.path_to_dataset,         # Путь к датасету
         codec=codec,                   # Кодек для преобразования TouchstoneData → (x, y)
         batch_size=64,                 # Размер батча
         val_ratio=0.2,                 # Доля валидационного набора
