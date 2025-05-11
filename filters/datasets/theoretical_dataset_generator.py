@@ -13,6 +13,9 @@ class CMTheoreticalDatasetGeneratorSamplers:
     ps_shifts: Sampler
 
 
+GET_FILENAME_FOR_INDEX = lambda path, idx: path+f"\\Data_{idx:04d}.s2p"
+
+
 class CMTheoreticalDatasetGenerator:
     def __init__(self,
                  path_to_save_dataset: str, # Путь к директориям с датасетами
@@ -21,12 +24,19 @@ class CMTheoreticalDatasetGenerator:
                  ):
         self._samplers = samplers
         self._origin_filter = origin_filter
-        self._path_to_save_dataset = path_to_save_dataset
-        print(f"Write data into directory: {path_to_save_dataset}")
-        if not os.path.exists(path_to_save_dataset):
-            os.makedirs(path_to_save_dataset)
+        self._dataset_size = len(samplers.ps_shifts)
+        self._path_to_save_dataset = path_to_save_dataset+f"_{self._dataset_size}"
+        self._enable_generate = True
+        print(f"Write data into directory: {self._path_to_save_dataset}")
+        if not os.path.exists(self._path_to_save_dataset):
+            os.makedirs(self._path_to_save_dataset)
+        if os.path.exists(GET_FILENAME_FOR_INDEX(self._path_to_save_dataset, 0)):
+            print(f"Directory already have dataset files!!!")
+            self._enable_generate = False
 
     def generate(self):
+        if not self._enable_generate:
+            return
         if len(self._samplers.ps_shifts) != len(self._samplers.cm_shifts):
             raise ValueError(f"Размер сэмплера с фазовыми сдвигами (ps_shifts): {len(self._samplers.ps_shifts)}"
                              f" должен равняться размеру сэмплера со сдвигами элементов матрицы связи (cm_shifts): "
@@ -42,6 +52,6 @@ class CMTheoreticalDatasetGenerator:
                      Q=self._origin_filter.Q, matrix=new_matrix, frequency=self._origin_filter.f, s=s_params, z0=50)
             # plt.figure()
             # new_filter.plot_s_db()
-            new_filter.write_touchstone(self._path_to_save_dataset+f"\\Data_{idx:04d}.s2p")
+            new_filter.write_touchstone(GET_FILENAME_FOR_INDEX(self._path_to_save_dataset, idx))
             pass
 

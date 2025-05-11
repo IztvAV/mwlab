@@ -14,8 +14,10 @@ import lightning as L
 
 from torch import nn
 
-ENV_ORIGIN_DATA_PATH = os.getcwd() + "\\Data\\origins_data"
-ENV_DATASET_PATH = os.getcwd() + "\\Data\\datasets_data"
+DATASET_SIZE = 10_000
+FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
+ENV_ORIGIN_DATA_PATH = os.getcwd() + f"\\Data\\{FILTER_NAME}\\origins_data"
+ENV_DATASET_PATH = os.getcwd() + f"\\Data\\{FILTER_NAME}\\datasets_data"
 
 
 class Simple_Opt_3(nn.Module):
@@ -133,9 +135,9 @@ def main():
     m_min, m_max = create_min_max_matrices(origin_matrix=origin_filter.coupling_matrix, deltas=np.array([1.5, 0.1, 0.005]))
     phase_shifts_min, phase_shifts_max = create_min_max_phase_shifts(origin_shifts=np.array([0.547, -1.0, 0.01685, 0.017]),
                                                                      deltas=np.array([0.02, 0.02, 0.005, 0.005]))
-    samplers = CMTheoreticalDatasetGeneratorSamplers(
-        cm_shifts=Sampler.lhs(start=m_min, stop=m_max, num=10000),
-        ps_shifts=Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=10000)
+    samplers = CMTheoreticalDataseteneratorSamplers(
+        cm_shifts=Sampler.lhs(start=m_min, stop=m_max, num=DATASET_SIZE),
+        ps_shifts=Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=DATASET_SIZE)
     )
 
     ds_gen = CMTheoreticalDatasetGenerator(
@@ -144,7 +146,7 @@ def main():
         samplers=samplers
     )
     plt.figure()
-    # ds_gen.generate()
+    ds_gen.generate()
 
     dm = mwlab.TouchstoneLDataModule(
         source=ENV_DATASET_PATH,         # Путь к датасету
