@@ -34,6 +34,10 @@ class CMTheoreticalDatasetGenerator:
             print(f"Directory already have dataset files!!!")
             self._enable_generate = False
 
+    @property
+    def path_to_dataset(self):
+        return self._path_to_save_dataset
+
     def generate(self):
         if not self._enable_generate:
             return
