@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from torchmetrics import MetricCollection, MeanSquaredError, MeanAbsoluteError
+from torchmetrics import MetricCollection, MeanSquaredError, MeanAbsoluteError, R2Score
 from typing import Optional, Callable, Any
 
 from mwlab.lightning.base_lm import BaseLModule
@@ -101,6 +101,7 @@ class BaseLMWithMetrics(BaseLModule):
             metrics = {
                 "mse": MeanSquaredError(),
                 "mae": MeanAbsoluteError(),
+                "r2" : R2Score()
             }
         if isinstance(metrics, dict):
             metrics = MetricCollection(metrics)
@@ -123,14 +124,18 @@ class BaseLMWithMetrics(BaseLModule):
     #                        validation / test loop
     # ======================================================================
     def validation_step(self, batch, batch_idx):
-        x, y, _ = self._split_batch(batch)        # метод унаследован
+        x, y, _ = self._split_batch(batch)
         preds = self(x)
         y_t = self._prepare_targets(y)
 
         loss = self.loss_fn(preds, y_t)
         self.log("val_loss", loss, on_epoch=True, prog_bar=True, batch_size=x.size(0))
 
-        metric_dict = self.val_metrics(preds, y_t)
+        # 💡 Flatten для совместимости с метриками
+        preds_flat = preds.view(preds.size(0), -1)
+        y_flat = y_t.view(y_t.size(0), -1)
+
+        metric_dict = self.val_metrics(preds_flat, y_flat)
         self.log_dict(metric_dict, on_epoch=True, prog_bar=True, batch_size=x.size(0))
         return loss
 
@@ -142,7 +147,11 @@ class BaseLMWithMetrics(BaseLModule):
         loss = self.loss_fn(preds, y_t)
         self.log("test_loss", loss, on_epoch=True, prog_bar=True, batch_size=x.size(0))
 
-        metric_dict = self.test_metrics(preds, y_t)
+        # 💡 Flatten для метрик
+        preds_flat = preds.view(preds.size(0), -1)
+        y_flat = y_t.view(y_t.size(0), -1)
+
+        metric_dict = self.test_metrics(preds_flat, y_flat)
         self.log_dict(metric_dict, on_epoch=True, prog_bar=True, batch_size=x.size(0))
         return loss
 
