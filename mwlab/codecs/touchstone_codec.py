@@ -252,15 +252,11 @@ class TouchstoneCodec:
         self,
         y_tensor: torch.Tensor,
         meta: Optional[Mapping[str, Any]] = None,
-    ) -> rf.Network | TouchstoneData:
-        """Обратное преобразование S‑тензора → ``rf.Network`` / ``TouchstoneData``.
-
-        Если в meta есть пользовательские ``params`` → возвращается `TouchstoneData`,
-        иначе только `rf.Network`.
+    ) -> rf.Network:
+        """Обратное преобразование S‑тензора → ``rf.Network``.
         """
         ts = self.decode(y_tensor, meta)
-        if meta and "params" in meta:
-            return ts
+
         return ts.network
 
     # =====================================================================
