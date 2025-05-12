@@ -30,16 +30,16 @@ def run_solver_with_params(prj: CSTProject, params: dict[str, str | float]) -> T
     """
 
     if params:
-        store_parameters(prj, params)
+        prj.store_parameters(params)
 
-    if not prj.call("RebuildOnParametricChange", False, False): # добавить этот метод в edmwe_cst
+    if not prj.rebuild_on_parametric_change(False, False): # добавить этот метод в edmwe_cst
         raise RuntimeError("rebuild failed")
 
-    if not prj.call("RunSolver"): # добавить этот метод в edmwe_cst
+    if not prj.run_solver(): # добавить этот метод в edmwe_cst
         raise RuntimeError("solver failed")
 
     network = get_last_s_params_as_network(prj, consider_run_id_0=True)
-    params = list_param_values(prj)
+    params = prj.restore_double_parameters()
 
     return TouchstoneData(network=network, params=params)
 
@@ -74,7 +74,7 @@ def get_last_s_params_as_network(prj: CSTProject, consider_run_id_0: bool = True
 
     f_unit_mult = units.get_frequency_unit_to_si()
 
-    sp_items = [item for item in list_children(rt, _S_PARAMS_TREE_ITEM)
+    sp_items = [item for item in rt.list_children(_S_PARAMS_TREE_ITEM)
                 if _is_s_param(item)]
 
     if not sp_items:
@@ -167,31 +167,3 @@ def _is_s_param(item: str) -> bool:
 # --------------------------------- #
 # Добавить всё что ниже в edmwe_cst #
 # --------------------------------- #
-
-def store_parameters(prj: CSTProject, params: dict[str, str|float]):
-    for key, value in params.items():
-        prj.store_parameter(key, value)
-
-
-def list_children(rt: ResultTree, item: str) -> list[str]:
-    if not rt.does_tree_item_exist(item):
-        return []
-
-    children = []
-    child = rt.get_first_child_name(item)
-    while child:
-        children.append(child)
-        child = rt.get_next_item_name(child)
-
-    return children
-
-
-def list_param_values(prj: CSTProject) -> dict[str, str|float]:
-    num_params = prj.get_number_of_parameters()
-
-    params = {}
-
-    for i in range(num_params):
-        params[prj.get_parameter_name(i)] = prj.get_parameter_n_value(i)
-
-    return params
