@@ -74,12 +74,12 @@ def test_ldm_repr_contains_info(sample_dir, codec):
 # 5 ─ validate / test без fit ----------------------------------------
 def test_ldm_validate_error_before_fit(sample_dir, codec):
     ldm = TouchstoneLDataModule(source=sample_dir, codec=codec)
-    with pytest.raises(RuntimeError, match=r"setup\('fit'\) должно быть вызвано перед validate"):
+    with pytest.raises(RuntimeError, match=r"setup\('fit'\) должен быть вызван до validate/test"):
         ldm.setup("validate")
 
 def test_ldm_test_error_before_fit(sample_dir, codec):
     ldm = TouchstoneLDataModule(source=sample_dir, codec=codec)
-    with pytest.raises(RuntimeError, match=r"setup\('fit'\) должно быть вызвано перед test"):
+    with pytest.raises(RuntimeError, match=r"setup\('fit'\) должен быть вызван до validate/test"):
         ldm.setup("test")
 
 
@@ -138,3 +138,23 @@ def test_ldm_predict_returns_meta(sample_dir, codec):
     assert all(isinstance(m, dict) for m in metas)
     assert all("params" in m for m in metas)
 
+def test_ldm_only_test_split(sample_dir, codec):
+    ldm = TouchstoneLDataModule(
+        source=sample_dir,
+        codec=codec,
+        val_ratio=0.0,
+        test_ratio=1.0,
+        batch_size=2,
+    )
+    ldm.setup("fit")
+
+    # train и val должны быть пустыми
+    assert len(ldm.idx_train) == 0
+    assert len(ldm.idx_val) == 0
+    assert len(ldm.idx_test) > 0
+
+    # test_dataloader корректен
+    test_loader = ldm.test_dataloader()
+    assert isinstance(test_loader, DataLoader)
+    batch = next(iter(test_loader))
+    assert isinstance(batch, (tuple, list))  # (x, y)

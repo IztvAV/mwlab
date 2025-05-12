@@ -3,26 +3,28 @@
 BaseLModule
 ===========
 
-Универсальный Lightning‑модуль MWLab, предназначенный для регрессии
-*как прямой* (X → Y), *так и обратной* (Y → X) задачи.
-Учтены следующие изменения:
+Универсальный Lightning‑модуль MWLab c поддержкой:
 
-Поддерживает:
-* прямую и обратную регрессию (флаг **swap_xy**);
-* любые скейлеры с методами `fit / forward / inverse`;
-* автоматическое декодирование S‑параметров (`TouchstoneCodec.decode`)
-  во время `predict_step`.
+* прямой (X→Y) **и** обратной (Y→X) задачи регрессии (`swap_xy`);
+* любых скейлеров (`scaler_in` / `scaler_out`) – как `nn.Module`‑подмодулей;
+* автоматического декодирования S‑параметров с помощью `TouchstoneCodec`;
+* удобных **инференс‑методов**:
+    * `predict_s(params_dict)  -> rf.Network`  — прямая задача (X→S);
+    * `predict_x(rf.Network)  -> dict`         — обратная задача (S→X).
+
 """
-
-
 from __future__ import annotations
+
+from typing import Callable, Optional, Tuple, Any, List, Mapping, Dict
 
 import torch
 import lightning as L
 from torch import nn
-from typing import Callable, Optional, Tuple, Any, List
+import skrf as rf
 
 from mwlab.codecs.touchstone_codec import TouchstoneCodec
+
+__all__ = ["BaseLModule"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -69,8 +71,8 @@ class BaseLModule(L.LightningModule):
         model: nn.Module,
         *,
         # -------- режим задачи ---------------------------------------------
-        swap_xy: bool = False,  # True → инверсная задача (Y ➜ X)
-        auto_decode: bool = True,  # декодировать ли Output → TouchstoneData
+        swap_xy: bool = False,
+        auto_decode: bool = True,
         # -------- вспомогательные модули -----------------------------------
         codec: Optional[TouchstoneCodec] = None,
         scaler_in: Optional[nn.Module] = None,
@@ -79,18 +81,18 @@ class BaseLModule(L.LightningModule):
         loss_fn: Optional[Callable] = None,
         optimizer_cfg: Optional[dict] = None,
         scheduler_cfg: Optional[dict] = None,
-    ):
+    ) -> None:
         super().__init__()
-        # — основные компоненты
+
+        # --- основные компоненты ------------------------------------------
         self.model = model
         self.swap_xy = bool(swap_xy)
         self.auto_decode = bool(auto_decode)
         self.codec = codec
-
         self.scaler_in = scaler_in
         self.scaler_out = scaler_out
 
-        # замораживаем скейлеры (не обучаются)
+        # замораживаем скейлеры (их веса не должны обучаться)
         for sc in (self.scaler_in, self.scaler_out):
             if sc is not None:
                 for p in sc.parameters():  # type: ignore[attr-defined]
@@ -98,7 +100,8 @@ class BaseLModule(L.LightningModule):
 
         self.loss_fn = loss_fn or nn.MSELoss()
 
-        # — сохраняем гиперпараметры (кроме больших объектов)
+        # --- сохраняем гиперпараметры -------------------------------------
+        # (скейлеры и codec как объекты в hparams не кладем)
         self.save_hyperparameters(
             {
                 "optimizer_cfg": optimizer_cfg or {"name": "Adam", "lr": 1e-3},
@@ -120,22 +123,16 @@ class BaseLModule(L.LightningModule):
         raise AttributeError("Scaler has neither inverse nor inverse_transform")
 
     @staticmethod
-    def _split_batch(batch) -> Tuple[torch.Tensor, torch.Tensor, Any]:
-        """
-        Поддерживаем два формата:
-            (x, y)            – без meta
-            (x, y, meta)      – с meta
-        """
+    def _split_batch(batch):
+        """Поддерживаем форматы (x,y) и (x,y,meta)."""
         if len(batch) == 3:
-            x, y, meta = batch
-        else:
-            x, y = batch
-            meta = None
-        return x, y, meta
+            return batch  # type: ignore
+        x, y = batch
+        return x, y, None
 
     # ---------------------------------------------------------------- forward
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """X → Z (с учетом scaler_in)."""
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # noqa: D401
+        """X → Z (учитываем scaler_in, если есть)."""
         if self.scaler_in is not None:
             x = self.scaler_in(x)
         return self.model(x)
@@ -144,7 +141,6 @@ class BaseLModule(L.LightningModule):
     def _shared_step(self, batch):
         x, y, _ = self._split_batch(batch)
         preds = self(x)
-
         # целевое значение всегда приводим к той же шкале, что и модель
         if self.scaler_out is not None:
             y = self.scaler_out(y)
@@ -168,40 +164,44 @@ class BaseLModule(L.LightningModule):
         loss = self._shared_step(batch)
         self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
 
-    # ---------------------------------------------------------------- predict
+    # ---------------------------------------------------------------- predict (batched через Trainer)
     @torch.no_grad()
     def predict_step(self, batch, batch_idx, dataloader_idx: int = 0):
-        """
-        * swap_xy = False → возвращает TouchstoneData (если codec+meta и auto_decode=True)
-        * swap_xy = True  → возвращает список словарей параметров или Tensor
+        """Логика batch‑predict, вызываемая Lightning‑ом.
+            * swap_xy = False → возвращает TouchstoneData (если codec+meta и auto_decode=True)
+            * swap_xy = True  → возвращает список словарей параметров или Tensor
         """
         x, _, meta = self._split_batch(batch)
         preds = self(x)
 
-        # 1) inverse‑scaling выхода (если есть)
+        # inverse‑scaling выхода (если есть)
         if self.scaler_out is not None:
             preds = self._apply_inverse(self.scaler_out, preds)
 
-        # 2) формируем вывод в зависимости от постановки
-        if self.swap_xy:
-            if self.codec is None:
-                return preds  # fallback: просто Tensor
-            # формируем по‑экземплярно
-            out: List[dict] = []
-            for row in preds:
-                out.append(
-                    {k: float(v) for k, v in zip(self.codec.x_keys, row)}
-                )
+        # ---------------- ПРЯМАЯ задача (X→S) ----------------
+        if not self.swap_xy:
+            if self.codec is None or not self.auto_decode:
+                return preds
+
+            out: List[Any] = []
+            for i in range(preds.size(0)):
+                per_pred = preds[i]
+                if meta is not None:
+                    per_meta = meta[i]  # type: ignore[index]
+                    out.append(self.codec.decode(per_pred, per_meta))  # TouchstoneData
+                else:
+                    out.append(self.codec.decode_s(per_pred))  # rf.Network
             return out
-        else:
-            if self.auto_decode and self.codec is not None and meta is not None:
-                out = []
-                for i in range(preds.size(0)):
-                    per_meta = meta[i]  # словарь для конкретного сэмпла
-                    per_pred = preds[i]
-                    out.append(self.codec.decode(per_pred, per_meta))
-                return out  # список TouchstoneData
+
+        # ---------------- ОБРАТНАЯ задача (Y→X) --------------
+        if self.codec is None:
             return preds
+
+        out: List[Dict[str, float]] = []
+        for row in preds:
+            out.append(self.codec.decode_x(row))
+
+        return out
 
     # ───────────────────────────────────────────── optim & schedulers
     def _extract_cfg(self, cfg: dict, key: str = "name"):
@@ -211,14 +211,14 @@ class BaseLModule(L.LightningModule):
         return name, params
 
     def configure_optimizers(self):
-        # --- optimizer -----------------------------------------------------
+        # optimizer
         opt_name, opt_params = self._extract_cfg(self.hparams.optimizer_cfg)
         optimizer_cls = getattr(torch.optim, opt_name, None)
         if optimizer_cls is None:
             raise ValueError(f"torch.optim has no optimizer '{opt_name}'")
         optimizer = optimizer_cls(self.parameters(), **opt_params)
 
-        # --- scheduler (optional) -----------------------------------------
+        # scheduler (optional)
         if self.hparams.scheduler_cfg is None:
             return optimizer
 
@@ -226,47 +226,80 @@ class BaseLModule(L.LightningModule):
         scheduler_cls = getattr(torch.optim.lr_scheduler, sch_name, None)
         if scheduler_cls is None:
             raise ValueError(f"torch.optim.lr_scheduler has no scheduler '{sch_name}'")
-
         scheduler = scheduler_cls(optimizer, **sch_params)
         is_plateau = sch_name.lower().endswith("plateau")
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "interval": "epoch",  # можно поменять на "step", если нужно
+                "interval": "epoch",
                 **({"monitor": "val_loss"} if is_plateau else {}),
             },
         }
 
     # ───────────────────────────────────────────── checkpoint helpers
-    def state_dict(self, *args, **kwargs):
+    def state_dict(self, *args, **kwargs):  # noqa: D401
         state = super().state_dict(*args, **kwargs)
-        # сохраняем скейлеры
-        state["mw_scalers"] = {}
-        if self.scaler_in is not None:
-            state["mw_scalers"]["in"] = self.scaler_in.state_dict()
-        if self.scaler_out is not None:
-            state["mw_scalers"]["out"] = self.scaler_out.state_dict()
-        # сохраняем TouchstoneCodec в виде bytes
+        # сохраняем TouchstoneCodec (он не nn.Module)
         if self.codec is not None:
             state["mw_codec"] = self.codec.dumps()
         return state
 
-    def load_state_dict(self, state_dict: dict, strict: bool = True):
-        scalers_state = state_dict.pop("mw_scalers", {})
-        if "in" in scalers_state and self.scaler_in is not None:
-            self.scaler_in.load_state_dict(scalers_state["in"])
-        if "out" in scalers_state and self.scaler_out is not None:
-            self.scaler_out.load_state_dict(scalers_state["out"])
+    def load_state_dict(self, state_dict: dict, strict: bool = True):  # noqa: D401
+        # восстанавливаем codec (до вызова super, чтобы predict_step уже знал)
         if "mw_codec" in state_dict:
             self.codec = TouchstoneCodec.loads(state_dict.pop("mw_codec"))
         super().load_state_dict(state_dict, strict=strict)
 
+    # =====================================================================
+    #                           PUBLIC inference API
+    # =====================================================================
+    @torch.no_grad()
+    def predict_s(self, params: Mapping[str, float]) -> rf.Network:
+        """Прямая задача **X→S** для одного экземпляра.
+
+        *Требует* `swap_xy=False` и наличия `self.codec`.
+        """
+        if self.swap_xy:
+            raise RuntimeError("predict_s можно вызывать только при swap_xy=False")
+        if self.codec is None:
+            raise RuntimeError("predict_s требует, чтобы в модуле был codec")
+
+        self.eval()
+        x_t = self.codec.encode_x(params).to(self.device).unsqueeze(0)
+        y_t = self(x_t)
+        if self.scaler_out is not None:
+            y_t = self._apply_inverse(self.scaler_out, y_t)
+        return self.codec.decode_s(y_t[0])
+
+    @torch.no_grad()
+    def predict_x(self, net: rf.Network) -> Dict[str, float]:
+        """Обратная задача **S→X** (swap_xy=True) для одного экземпляра."""
+        if not self.swap_xy:
+            raise RuntimeError("predict_x можно вызывать только при swap_xy=True")
+        if self.codec is None:
+            raise RuntimeError("predict_x требует, чтобы в модуле был codec")
+
+        self.eval()
+        y_t, meta = self.codec.encode_s(net)
+        y_t = y_t.to(self.device)
+        if y_t.dim() == 2:                     # (C,F)
+            y_in = y_t.flatten(start_dim=0).unsqueeze(0)  # (1, C*F)
+        else:  # fallback
+            y_in = y_t.view(1, -1)
+        x_pred = self(y_in)[0]
+
+        if self.scaler_out is not None:
+            x_pred = self._apply_inverse(self.scaler_out, x_pred)
+        return self.codec.decode_x(x_pred)
+
     # ---------------------------------------------------------------- repr
-    def extra_repr(self) -> str:  # pragma: no cover
+    def extra_repr(self) -> str:  # noqa: D401
         task = "inverse (Y→X)" if self.swap_xy else "direct (X→Y)"
         codec_str = "yes" if self.codec else "—"
         return (
             f"task={task}, model={self.model.__class__.__name__}, "
             f"codec={codec_str}, auto_decode={self.auto_decode}"
         )
+
+    __str__ = extra_repr

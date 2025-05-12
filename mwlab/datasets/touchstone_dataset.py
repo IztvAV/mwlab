@@ -21,19 +21,19 @@ from typing import Callable, Optional
 
 from mwlab.io.backends import StorageBackend, FileBackend, HDF5Backend
 
-def get_backend(path: pathlib.Path,
-                pattern: str = "*.s?p") -> StorageBackend:
+def get_backend(path: pathlib.Path, **backend_kwargs) -> StorageBackend:
     """
-    Возвращает подходящий backend по типу *path*.
-    • Каталог           → FileBackend(root)
-    • .h5 / .hdf5       → HDF5Backend(path, 'r')
-    • .zarr             → ZarrBackend(path, 'r')   # когда появится
-    • иначе ValueError
+    Автоматически выбирает backend по типу *path*.
+    • Каталог           → FileBackend(root, pattern=...)
+    • .h5 / .hdf5       → HDF5Backend(path, **kwargs)
+    • .zarr             → ZarrBackend(path, **kwargs)  # in future
     """
     if path.is_dir():
+        # для FileBackend оставляем только 'pattern', остальное игнорируем
+        pattern = backend_kwargs.pop("pattern", "*.s[0-9]*p")
         return FileBackend(path, pattern)
     if path.suffix in (".h5", ".hdf5"):
-        return HDF5Backend(str(path), mode="r")
+        return HDF5Backend(str(path), **backend_kwargs)
     raise ValueError(f"Не знаю, какой backend выбрать для {path}")
 
 
@@ -53,12 +53,12 @@ class TouchstoneDataset(Dataset):
             x_keys=None,
             x_tf=None,
             s_tf=None,
-            pattern="*.s?p"
+            **backend_kwargs
     ):
         if isinstance(source, (str, pathlib.Path)):
-            backend = get_backend(pathlib.Path(source), pattern)
+            backend = get_backend(pathlib.Path(source), **backend_kwargs)
         else:
-            backend = source   # уже готовый backend
+            backend = source # уже готовый backend
 
         self.backend = backend
         self.x_keys = x_keys

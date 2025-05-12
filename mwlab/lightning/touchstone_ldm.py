@@ -15,9 +15,9 @@ TouchstoneLDataModule
 * умеет работать в «прямой» *(X → Y)* и «обратной» *(Y → X)* постановке
   (`swap_xy=True`);
 * по запросу подготавливает **скейлеры** (`scaler_in`, `scaler_out`);
-* в режиме *predict* отдает `meta`, чтобы
-  `LightningModule.predict_step()` мог сразу вызвать
-  `TouchstoneCodec.decode()`.
+* дополнительно предоставляет публичные методы:
+   - ``get_dataset(split="train", meta=False)``
+   - ``get_dataloader(split="val", meta=True, shuffle=False)``
 
 > **Внимание:** модуль не знает, какие именно тензоры внутри —
 > эту ответственность берет на себя `TouchstoneCodec`.
@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Union, Optional, Dict, Any, List
+from typing import Union, Optional, Dict, Any, List, Sequence
 
 import torch
-from torch.utils.data import Dataset, DataLoader, Subset, random_split
+from torch.utils.data import (
+    Dataset, DataLoader, Subset
+)
 from torch.utils.data._utils.collate import default_collate
 
 import lightning as L
@@ -45,7 +47,7 @@ from mwlab.io.backends import StorageBackend
 # ─────────────────────────────────────────────────────────────────────────────
 class TouchstoneLDataModule(L.LightningDataModule):
     """
-    Lightning‑обёртка вокруг `TouchstoneTensorDataset`.
+    Lightning‑обертка вокруг `TouchstoneTensorDataset`.
 
     Параметры
     ---------
@@ -99,134 +101,186 @@ class TouchstoneLDataModule(L.LightningDataModule):
         base_ds_kwargs: Optional[dict] = None,
     ):
         super().__init__()
-        # ---- user‑defined --------------------------------------------------
+
+        # ------------- пользовательские аргументы ------------------------
         self.source = source
         self.codec = codec
 
-        self.batch_size = int(batch_size)
-        self.num_workers = int(num_workers)
-        self.pin_memory = bool(pin_memory)
+        self.batch_size   = int(batch_size)
+        self.num_workers  = int(num_workers)
+        self.pin_memory   = bool(pin_memory)
 
-        self.val_ratio = float(val_ratio)
-        self.test_ratio = float(test_ratio)
+        self.val_ratio    = float(val_ratio)
+        self.test_ratio   = float(test_ratio)
         if self.val_ratio + self.test_ratio > 1.0:
-            raise ValueError("val_ratio + test_ratio must be <= 1.0")
+            raise ValueError("val_ratio + test_ratio must be <= 1")
 
-        self.max_samples = max_samples
-        self.seed = int(seed)
+        self.max_samples  = max_samples
+        self.seed         = int(seed)
 
-        self.swap_xy = bool(swap_xy)
-        self.cache_size = cache_size
-        self.base_kwargs = base_ds_kwargs or {}
+        self.swap_xy      = bool(swap_xy)
+        self.cache_size   = cache_size
+        self.base_kwargs  = base_ds_kwargs or {}
 
-        self.scaler_in = scaler_in
-        self.scaler_out = scaler_out
+        self.scaler_in    = scaler_in
+        self.scaler_out   = scaler_out
 
-        # ---- will be filled in setup() ------------------------------------
-        self.train_ds: Optional[Dataset] = None
-        self.val_ds: Optional[Dataset] = None
-        self.test_ds: Optional[Dataset] = None
-        self.predict_ds: Optional[Dataset] = None
+        # ------------- будут заполнены в setup() -------------------------
+        self.idx_train: List[int] | None = None
+        self.idx_val:   List[int] | None = None
+        self.idx_test:  List[int] | None = None
 
-    # ---------------------------------------------------------------- utils
-    def _make_dataset(self, *, return_meta: bool) -> TouchstoneTensorDataset:
-        """Фабрика датасета с нужными флагами."""
+        self.train_ds:    Dataset | None = None
+        self.val_ds:      Dataset | None = None
+        self.test_ds:     Dataset | None = None
+        self.predict_ds:  Dataset | None = None
+
+    # ======================================================================
+    #                         HELPERS
+    # ======================================================================
+    def _build_base(self, *, meta: bool) -> TouchstoneTensorDataset:
+        """
+        Конструирует *новый* TouchstoneTensorDataset
+        с нужным флагом `return_meta`.
+        """
         return TouchstoneTensorDataset(
-            source=self.source,
-            codec=self.codec,
-            swap_xy=self.swap_xy,
-            return_meta=return_meta,
-            cache_size=self.cache_size,
-            base_kwargs=self.base_kwargs,
+            source       = self.source,
+            codec        = self.codec,
+            swap_xy      = self.swap_xy,
+            return_meta  = meta,
+            cache_size   = self.cache_size,
+            base_kwargs  = self.base_kwargs,
         )
 
-    # custom collate that keeps meta safe ---------------------------------
-    @staticmethod
-    def _collate_with_meta(batch: List[tuple]) -> tuple[torch.Tensor, torch.Tensor, Dict[str, Any]]:
-        xs, ys, metas = zip(*batch)  # type: ignore
-        x_coll = default_collate(xs)
-        y_coll = default_collate(ys)
-        return x_coll, y_coll, list(metas)  # список длиной batch
-
-    def _fit_scaler(
-        self, scaler: torch.nn.Module, ds: Dataset, *, take: str
-    ) -> None:
+    def _view(self, idxs: Sequence[int], *, meta: bool) -> Dataset:
         """
-        Итеративно подгоняет скейлер без загрузки всего датасета в память.
+        Возвращает `Subset(base_dataset, idxs)`.
+        Базовый датасет создаётся с флагом `meta`.
+        """
+        return Subset(self._build_base(meta=meta), list(idxs))
 
-        Parameters
-        ----------
-        scaler  : объект с методом `.fit(tensor)`
-        ds : выборка (обычно train_ds)
-        take    : 'x' | 'y' — какую часть батча использовать
+    @staticmethod
+    def _collate_with_meta(batch: List[tuple]
+                           ) -> tuple[torch.Tensor, torch.Tensor, List[Dict[str,Any]]]:
+        xs, ys, metas = zip(*batch)        # type: ignore
+        return default_collate(xs), default_collate(ys), list(metas)
+
+    def _fit_scaler(self, scaler: torch.nn.Module, ds: Dataset, *, take: str):
+        """
+        Однопроходный `scaler.fit` без загрузки всего ds в память.
         """
         loader = DataLoader(
-            ds,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
+            ds, batch_size=self.batch_size, shuffle=False,
+            num_workers=self.num_workers, pin_memory=self.pin_memory,
             persistent_workers=self.num_workers > 0,
         )
         with torch.no_grad():
-            bufs: List[torch.Tensor] = []
-            for b in loader:
-                bufs.append(b[0] if take == "x" else b[1])
-            data = torch.cat(bufs, dim=0)
-            scaler.fit(data)
+            bufs = []
+            for x, y in loader:
+                bufs.append(x if take == "x" else y)
+            scaler.fit(torch.cat(bufs, dim=0))
 
-    # ================================================================= setup
+    # ======================================================================
+    #                                 setup
+    # ======================================================================
     def setup(self, stage: str | None = None):
         """
-        * **fit** / `None` — строит train/val/test + фит скейлеров;
-        * **validate**/**test** — наборы должны быть готовы после fit;
-        * **predict** — отдельный датасет с meta.
+        * **fit** / `None` — создает split (индексы) + фит скейлеров;
+        * **validate**/**test** — split уже готов; просто собираем view‑ы;
+        * **predict** — полный датасет с meta.
         """
-        if stage in ("fit", None):
-            full_ds: Dataset = self._make_dataset(return_meta=False)
 
-            # ограничиваем количество примеров (debug/fast_dev)
-            if self.max_samples is not None:
-                full_ds = Subset(
-                    full_ds, range(min(len(full_ds), int(self.max_samples)))
-                )
+        # ------------------------ FIT -------------------------------------
+        if stage in (None, "fit"):
+            # ---- если split еще не строили → строим ----------------------
+            if self.idx_train is None:
+                base_no_meta = self._build_base(meta=False)
 
-            # защита «пустой датасет»
-            if len(full_ds) == 0:
-                raise ValueError("TouchstoneLDataModule: датасет пуст")
+                # ограничение общего числа сэмплов
+                if self.max_samples is not None:
+                    base_no_meta = Subset(
+                        base_no_meta,
+                        range(min(len(base_no_meta), int(self.max_samples)))
+                    )
 
-            # — train / val / test split
-            n_total = len(full_ds)
-            n_val = math.floor(n_total * self.val_ratio)
-            n_test = math.floor(n_total * self.test_ratio)
-            n_train = n_total - n_val - n_test
+                if len(base_no_meta) == 0:
+                    raise ValueError("TouchstoneLDataModule: датасет пуст")
 
-            self.train_ds, self.val_ds, self.test_ds = random_split(
-                full_ds,
-                lengths=[n_train, n_val, n_test],
-                generator=torch.Generator().manual_seed(self.seed),
-            )
+                # --------- random split (но сохраняем индексы!) ----------
+                n_total = len(base_no_meta)
+                n_val   = math.floor(n_total * self.val_ratio)
+                n_test  = math.floor(n_total * self.test_ratio)
+                n_train = n_total - n_val - n_test
 
-            # — подгоняем скейлеры (считаем статистики)
-            if self.scaler_in is not None:
-                self._fit_scaler(self.scaler_in, self.train_ds, take="x")
+                g = torch.Generator().manual_seed(self.seed)
+                perm = torch.randperm(n_total, generator=g).tolist()
 
-            if self.scaler_out is not None:
-                self._fit_scaler(self.scaler_out, self.train_ds, take="y")
+                self.idx_train = perm[:n_train]
+                self.idx_val   = perm[n_train:n_train + n_val]
+                self.idx_test  = perm[n_train + n_val:]
 
-        # validate/test вызываются после fit → наборы уже существуют
-        if stage == "validate" and self.val_ds is None:
-            raise RuntimeError("setup('fit') должно быть вызвано перед validate")
+                # скейлеры считаем по train‑части
+                if self.scaler_in or self.scaler_out:
+                    tmp_train = self._view(self.idx_train, meta=False)
+                    if self.scaler_in:
+                        self._fit_scaler(self.scaler_in, tmp_train, take="x")
+                    if self.scaler_out:
+                        self._fit_scaler(self.scaler_out, tmp_train, take="y")
 
-        if stage == "test" and self.test_ds is None:
-            raise RuntimeError("setup('fit') должно быть вызвано перед test")
+            # -------- собираем view‑датасеты (meta=False) ---------------
+            self.train_ds = self._view(self.idx_train, meta=False)
+            self.val_ds   = self._view(self.idx_val,   meta=False)
+            self.test_ds  = self._view(self.idx_test,  meta=False)
 
-        # — predict
+        # ------------------------ VALIDATE / TEST -------------------------
+        if stage in ("validate", "test"):
+            if self.idx_train is None:
+                raise RuntimeError("setup('fit') должен быть вызван до validate/test")
+
+        # ------------------------ PREDICT ---------------------------------
         if stage == "predict" and self.predict_ds is None:
-            self.predict_ds = self._make_dataset(return_meta=True)
+            # здесь нужен meta=True для auto_decode
+            self.predict_ds = self._build_base(meta=True)
 
+    # ======================================================================
+    #                    PUBLIC helpers
+    # ======================================================================
+    def get_dataset(self, split: str = "train", *, meta: bool = False) -> Dataset:
+        """
+        Возвращает датасет нужного сплита.
 
-    # ================================================================= loaders
+        split ∈ {'train','val','test','full'}
+        meta  – передавать ли Touchstone‑meta (нужно для codec.decode()).
+        """
+        mapping = {
+            "train": self.idx_train,
+            "val":   self.idx_val,
+            "test":  self.idx_test,
+            "full":  (self.idx_train or []) + (self.idx_val or []) + (self.idx_test or []),
+        }
+        if mapping[split] is None:
+            raise RuntimeError("setup('fit') еще не выполнялся")
+        return self._view(mapping[split], meta=meta)
+
+    def get_dataloader(
+        self,
+        split: str = "train",
+        *,
+        meta: bool = False,
+        shuffle: bool | None = None,
+    ) -> DataLoader:
+        """
+        Быстро получить DataLoader для нужного сплита.
+        shuffle по‑умолчанию включается *только* для train.
+        """
+        if shuffle is None:
+            shuffle = (split == "train")
+        ds = self.get_dataset(split, meta=meta)
+        return self._loader(ds, shuffle=shuffle, with_meta=meta)
+
+    # ======================================================================
+    #                            loaders
+    # ======================================================================
     def _loader(self, ds: Dataset, *, shuffle: bool = False, with_meta: bool = False):
         return DataLoader(
             ds,
@@ -235,27 +289,17 @@ class TouchstoneLDataModule(L.LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.num_workers > 0,
-            collate_fn=self._collate_with_meta if with_meta else None,
+            collate_fn = (self._collate_with_meta if with_meta else None)
         )
 
-    def train_dataloader(self):
-        return self._loader(self.train_ds, shuffle=True)
-
-    def val_dataloader(self):
-        return self._loader(self.val_ds)
-
-    def test_dataloader(self):
-        return self._loader(self.test_ds)
-
-    def predict_dataloader(self):
-        return self._loader(self.predict_ds, with_meta=True)
+    # -------- интерфейсы Lightning (оставлены для совместимости) ----------
+    def train_dataloader(self):   return self._loader(self.train_ds, shuffle=True)
+    def val_dataloader(self):     return self._loader(self.val_ds)
+    def test_dataloader(self):    return self._loader(self.test_ds)
+    def predict_dataloader(self): return self._loader(self.predict_ds, with_meta=True)
 
     # ---------------------------------------------------------------- repr
-    def __repr__(self) -> str:  # pragma: no cover
-        return (
-            f"{self.__class__.__name__}(source={self.source}, "
-            f"samples={self.max_samples or 'all'}, "
-            f"batch={self.batch_size}, "
-            f"val={self.val_ratio}, test={self.test_ratio}, "
-            f"swap_xy={self.swap_xy})"
-        )
+    def __repr__(self):  # pragma: no cover
+        return (f"{self.__class__.__name__}(source={self.source}, "
+                f"samples={self.max_samples or 'all'}, batch={self.batch_size}, "
+                f"val={self.val_ratio}, test={self.test_ratio}, swap_xy={self.swap_xy})")

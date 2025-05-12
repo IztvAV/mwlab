@@ -15,11 +15,15 @@ from .base import StorageBackend
 
 
 class FileBackend(StorageBackend):
-    """Backend, который хранит набор путей к *.sNp."""
+    """Backend, который хранит набор путей к *.sNp.*
+       По умолчанию ищет все варианты **s1p…s12p** (`*.s[0-9]*p`)."""
 
-    def __init__(self, root: str | pathlib.Path, pattern: str = "*.s?p"):
+    def __init__(self, root: str | pathlib.Path, pattern: str = "*.s[0-9]*p"):
         self.root = pathlib.Path(root)
-        self.paths: list[pathlib.Path] = sorted(self.root.rglob(pattern))
+        # rglob‑паттерн чувствителен к регистру → добавляем оба
+        self.paths = sorted(
+            {*self.root.rglob(pattern), *self.root.rglob(pattern.upper())}
+        )
         if not self.paths:
             raise FileNotFoundError(f"В каталоге {root!s} нет файлов {pattern}")
 

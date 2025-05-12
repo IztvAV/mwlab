@@ -115,9 +115,11 @@ class S_Resample:
 
         # array‑like → переводим в Гц
         if isinstance(arg, (list, tuple, np.ndarray)):
-            unit = network.frequency.unit or "Hz"
-            mult = skrf.frequency.Frequency.multiplier_dict[unit.lower()]
-            arg = np.asarray(arg) * mult
+            unit = (network.frequency.unit or "Hz").lower()
+            mult = skrf.frequency.Frequency.multiplier_dict.get(unit)
+            if mult is None:
+                raise ValueError(f"S_Resample: неизвестная единица «{unit}»")
+            arg = np.asarray(arg, dtype=float) * mult
 
         ntwk.resample(arg, **self.kwargs)
         return ntwk
@@ -164,13 +166,20 @@ class S_AddNoise:
             )
             ntwk.s = s + noise
         else:
-            σ_db = self.sigma_db_sampler()
+            σ_db  = self.sigma_db_sampler()
             σ_deg = self.sigma_deg_sampler()
-            mag_noise = 10 ** (np.random.normal(0, σ_db, size=s.shape) / 20)
-            phase_noise = np.deg2rad(
-                np.random.normal(0, σ_deg, size=s.shape)
-            )
-            ntwk.s = s * mag_noise * np.exp(1j * phase_noise)
+
+            # ‑‑ независимо задаем шум модуля и фазы
+            out = s.copy()
+            if σ_db != 0:
+                mag_noise = 10 ** (np.random.normal(0, σ_db, size=s.shape) / 20)
+                out *= mag_noise
+
+            if σ_deg != 0:
+                phase_noise = np.deg2rad(np.random.normal(0, σ_deg, size=s.shape))
+                out *= np.exp(1j * phase_noise)
+
+            ntwk.s = out
 
         return ntwk
 
