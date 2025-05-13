@@ -1,8 +1,10 @@
 from pathlib import Path
 
+import mwlab
 import skrf as rf
 import re
 import numpy as np
+from mwlab import TouchstoneData
 from .couplilng_matrix import CouplingMatrix
 from copy import deepcopy as copy
 import torch
@@ -18,47 +20,49 @@ class MWFilter(rf.Network):
         self._Q: float = Q
         self._coupling_matrix: CouplingMatrix = CouplingMatrix(matrix)
 
+    @staticmethod
+    def matrix_from_touchstone_data_parameters(params: dict) -> np.array:
+        N = int(params.get("N"))
+        M = np.zeros((N + 2, N + 2), dtype=float)
+        for k, v in params.items():
+            if k.startswith("m_"):
+                _, i, j = k.split("_")
+                M[int(i), int(j)] = v
+                M[int(j), int(i)] = v  # предполагается симметричность
+        return M
+
+    def to_touchstone_data(self, path=None) -> mwlab.TouchstoneData:
+        params = {"f0": self.f0, "bw": self.bw, "Q": self.Q, "N": self.order}
+        # Добавляем элементы матрицы связи
+        M = self.coupling_matrix.matrix
+        for i in range(M.shape[0]):
+            for j in range(i, M.shape[1]):  # верхняя треугольная часть (или вся)
+                val = M[i, j]
+                if abs(val) > 1e-12:  # пропускаем нули
+                    params.update({f"m_{i}_{j}": val})
+        td = mwlab.TouchstoneData(network=self, params=params, path=path)
+        return td
+
+
     @classmethod
     def from_file(cls, filename: str):
         """
                 Считывает матричные элементы, сохранённые в одной строке комментария.
                 Возвращает: словарь {(i, j): значение}
                 """
-        net = rf.Network(filename)
-        lines = net.comments
-
-        # Ищем строку с параметрами
-        for line in lines.split("\n"):
-            if line.startswith(" Parameters"):
-                # Убираем начальные символы и фигурные скобки
-                match = re.search(r"\{(.+?)\}", line)
-                if not match:
-                    raise ValueError("Malformed parameter line")
-                param_str = match.group(1)
-
-                # Разбираем параметры
-                params = {}
-                for part in param_str.split(";"):
-                    if "=" in part:
-                        k, v = part.split("=")
-                        k, v = k.strip(), float(v.strip())
-                        params[k] = v
-
-                # Собираем матрицу связи
-                N = int(params["N"])
-                M = np.zeros((N + 2, N + 2), dtype=float)
-                for k, v in params.items():
-                    if k.startswith("m_"):
-                        _, i, j = k.split("_")
-                        M[int(i), int(j)] = v
-                        M[int(j), int(i)] = v  # предполагается симметричность
+        td = TouchstoneData.load(filename)
+        net = td.network
+        params = td.params
+        matrix = MWFilter.matrix_from_touchstone_data_parameters(params)
         return cls(
             f0=params.get("f0"),
             bw=params.get("bw"),
             Q=params.get("Q"),
-            order=N,
-            matrix=M,
-            file=filename
+            order=params.get("N"),
+            matrix=matrix,
+            frequency=net.f,
+            s=net.s,
+            z0=net.z0
         )
 
     @classmethod
@@ -68,13 +72,8 @@ class MWFilter(rf.Network):
         bw = params.get("bw")
         Q = params.get("Q")
         order = int(params.get("N"))
-        M = np.zeros(shape=(order + 2, order + 2), dtype=np.float32)
-        for k, v in params.items():
-            if k.startswith("m_"):
-                _, i, j = k.split("_")
-                M[int(i), int(j)] = v
-                M[int(j), int(i)] = v  # предполагается симметричность
-        if f0 is None or bw is None or Q is None or order is None or M is None:
+        matrix = MWFilter.matrix_from_touchstone_data_parameters(params)
+        if f0 is None or bw is None or Q is None or order is None or matrix is None:
             raise ValueError(f"Некорректные параметры для инициализации класса: f0={f0}, bw={bw}, Q={Q}, "
                              f"order={order}, \nM={M}")
         return cls(
@@ -82,7 +81,7 @@ class MWFilter(rf.Network):
             bw=bw,
             Q=Q,
             order=order,
-            matrix=M,
+            matrix=matrix,
             frequency=net.f,
             s=net.s,
             z0=net.z0
