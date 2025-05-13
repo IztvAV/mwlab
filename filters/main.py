@@ -111,26 +111,11 @@ def main():
         S_Resample(301)
     ])
     tds_transformed = mwlab.TouchstoneDataset(source=ENV_ORIGIN_DATA_PATH, s_tf=y_transform)
-    codec = mwlab.TouchstoneCodec.from_dataset(tds_transformed)
-    print(codec)
-    codec.y_channels = ['S1_1.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S2_1.imag', 'S2_2.imag']
-
-    # Исключаем из анализа ненужные x-параметры
-    keys_to_exclude = ["f0", "bw", "N", "Q"]  # Q исключаю сейчас для простоты
-    codec.x_keys = list(filter(lambda x: x not in keys_to_exclude, codec.x_keys))
-    print("Каналы:", codec.y_channels)
-    print("Количество каналов:", len(codec.y_channels))
 
     # Пример кодирования и декодирования
     origin_filter = MWFilter.from_touchstone_dataset_item(tds_transformed[0])
     prms, _ = tds_transformed[0]  # Используем первый файл набора
     ts = mwlab.TouchstoneData(origin_filter, prms)  # Создаем объект TouchstoneData
-
-    # Кодирование
-    x, y, meta = codec.encode(ts)
-    print("x-параметры:\n", x)
-    print("y-параметры:\n", y)
-    print("Метаданные:\n" + str(meta))
 
     m_min, m_max = create_min_max_matrices(origin_matrix=origin_filter.coupling_matrix, deltas=np.array([1.5, 0.1, 0.005]))
     phase_shifts_min, phase_shifts_max = create_min_max_phase_shifts(origin_shifts=np.array([0.547, -1.0, 0.01685, 0.017]),
@@ -147,6 +132,22 @@ def main():
     )
     plt.figure()
     ds_gen.generate()
+
+    codec = mwlab.TouchstoneCodec.from_dataset(mwlab.TouchstoneDataset(source=ds_gen.path_to_dataset, in_memory=True))
+    print(codec)
+    codec.y_channels = ['S1_1.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S2_1.imag', 'S2_2.imag']
+
+    # Исключаем из анализа ненужные x-параметры
+    keys_to_exclude = ["f0", "bw", "N", "Q"]  # Q исключаю сейчас для простоты
+    codec.x_keys = list(filter(lambda x: x not in keys_to_exclude, codec.x_keys))
+    print("Каналы:", codec.y_channels)
+    print("Количество каналов:", len(codec.y_channels))
+
+    # Кодирование
+    x, y, meta = codec.encode(ts)
+    print("x-параметры:\n", x)
+    print("y-параметры:\n", y)
+    print("Метаданные:\n" + str(meta))
 
     dm = mwlab.TouchstoneLDataModule(
         source=ds_gen.path_to_dataset,         # Путь к датасету
