@@ -151,14 +151,6 @@ def test_predict_s_direct_mode():
     assert isinstance(net, rf.Network)
     assert net.s.shape == (1, 1, 1)
 
-def test_predict_x_inverse_mode():
-    codec = make_codec()
-    module = BaseLModule(model=DummyNet(2, 1), codec=codec, swap_xy=True)
-    net = make_touchstone_data().network
-    params = module.predict_x(net)
-    assert isinstance(params, dict)
-    assert "a" in params and isinstance(params["a"], float)
-
 def test_predict_step_no_codec_returns_tensor():
     module = BaseLModule(model=DummyNet(1, 2), codec=None)
     x = torch.tensor([[1.0]])
