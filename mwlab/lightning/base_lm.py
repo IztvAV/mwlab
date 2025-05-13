@@ -15,6 +15,8 @@ BaseLModule
 """
 from __future__ import annotations
 
+import importlib
+import pydoc
 from typing import Callable, Optional, Tuple, Any, List, Mapping, Dict
 
 import torch
@@ -26,6 +28,20 @@ from mwlab.codecs.touchstone_codec import TouchstoneCodec
 
 __all__ = ["BaseLModule"]
 
+# ─────────────────────────────────────────────────────────────────────────────
+#                            helpers: class import
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _locate_class(path: str):
+    """Импортирует класс по строке ``pkg.sub:Cls`` или ``pkg.sub.Cls``."""
+    if ":" in path:
+        module_path, cls_name = path.split(":", 1)
+        module = importlib.import_module(module_path)
+        return getattr(module, cls_name)
+    obj = pydoc.locate(path)
+    if obj is None:
+        raise ImportError(f"Не удалось импортировать класс {path!r}")
+    return obj
 
 # ─────────────────────────────────────────────────────────────────────────────
 #                                  BaseLModule
@@ -238,17 +254,43 @@ class BaseLModule(L.LightningModule):
         }
 
     # ───────────────────────────────────────────── checkpoint helpers
+    @staticmethod
+    def _dump_scaler(scaler: nn.Module) -> Dict[str, Any]:
+        return {
+            "path": f"{scaler.__class__.__module__}:{scaler.__class__.__qualname__}",
+            "kwargs": getattr(scaler, "_init_kwargs", {}),
+            "state": scaler.state_dict(),
+        }
+
+    @staticmethod
+    def _load_scaler(payload: Dict[str, Any]) -> nn.Module:
+        cls = _locate_class(payload["path"])
+        scaler = cls(**payload.get("kwargs", {}))
+        scaler.load_state_dict(payload["state"])
+        for p in scaler.parameters():  # type: ignore[attr-defined]
+            p.requires_grad_(False)
+        return scaler
+
     def state_dict(self, *args, **kwargs):  # noqa: D401
         state = super().state_dict(*args, **kwargs)
         # сохраняем TouchstoneCodec (он не nn.Module)
         if self.codec is not None:
             state["mw_codec"] = self.codec.dumps()
+        if self.scaler_in is not None:
+            state["mw_scaler_in"] = self._dump_scaler(self.scaler_in)
+        if self.scaler_out is not None:
+            state["mw_scaler_out"] = self._dump_scaler(self.scaler_out)
+
         return state
 
     def load_state_dict(self, state_dict: dict, strict: bool = True):  # noqa: D401
         # восстанавливаем codec (до вызова super, чтобы predict_step уже знал)
         if "mw_codec" in state_dict:
             self.codec = TouchstoneCodec.loads(state_dict.pop("mw_codec"))
+        if "mw_scaler_in" in state_dict and self.scaler_in is None:
+            self.scaler_in = self._load_scaler(state_dict.pop("mw_scaler_in"))
+        if "mw_scaler_out" in state_dict and self.scaler_out is None:
+            self.scaler_out = self._load_scaler(state_dict.pop("mw_scaler_out"))
         super().load_state_dict(state_dict, strict=strict)
 
     # =====================================================================
