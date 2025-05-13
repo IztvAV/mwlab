@@ -1,20 +1,23 @@
 import os
 import mwlab
-from mwlab.transforms.s_transforms import S_Crop, S_Resample
-from mwlab.transforms import TComposite
 from mwlab.nn.scalers import MinMaxScaler
 
 from filters import TouchstoneMWFilterDataset, MWFilter, CouplingMatrix
 from filters import CMTheoreticalDatasetGenerator, CMTheoreticalDatasetGeneratorSamplers
 from filters import Sampler, SamplerTypes
+from filters.codecs import MWFilterTouchstoneCodec
+
+from filters.datasets.theoretical_dataset_generator import CMShifts, PSShift
 
 import matplotlib.pyplot as plt
 import numpy as np
 import lightning as L
+from sympy.diffgeom.rn import theta
 
 from torch import nn
+from dataclasses import dataclass
 
-DATASET_SIZE = 10_000
+DATASET_SIZE = 1_000
 FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
 ENV_ORIGIN_DATA_PATH = os.getcwd() + f"\\Data\\{FILTER_NAME}\\origins_data"
 ENV_DATASET_PATH = os.getcwd() + f"\\Data\\{FILTER_NAME}\\datasets_data"
@@ -73,88 +76,55 @@ class Simple_Opt_3(nn.Module):
         return encoded
 
 
-def create_min_max_matrices(origin_matrix: CouplingMatrix, deltas: np.array):
-    Mmin = origin_matrix.matrix
-    Mmax = origin_matrix.matrix
-
-    for (i, j) in origin_matrix.links:
-        if i == j:
-            Mmin[i][j] -= deltas[0]
-            Mmax[i][j] += deltas[0]
-        elif j == (i + 1):
-            Mmin[i][j] -= deltas[1]
-            Mmin[j][i] -= deltas[1]
-            Mmax[i][j] += deltas[1]
-            Mmax[j][i] += deltas[1]
-        else:
-            Mmin[i][j] -= deltas[2]
-            Mmin[j][i] -= deltas[2]
-            Mmax[i][j] += deltas[2]
-            Mmax[j][i] += deltas[2]
-    return Mmin, Mmax
-
-
-def create_min_max_phase_shifts(origin_shifts: np.array, deltas):
-    phase_shifts_min = origin_shifts - deltas
-    phase_shifts_max = origin_shifts + deltas
-    return phase_shifts_min, phase_shifts_max
-
-
 def main():
-    tds = mwlab.TouchstoneDataset(source=ENV_ORIGIN_DATA_PATH)
-    print(f"Загружено файлов: {len(tds)}")
-    print("Пример параметров из первого файла:")
-    print(tds[0][0], "\n")
-    origin_filter: MWFilter = MWFilter.from_touchstone_dataset_item(tds[0])
-    y_transform = TComposite([
-        S_Crop(f_start=origin_filter.f0-origin_filter.bw*1.2, f_stop=origin_filter.f0+origin_filter.bw*1.2, unit='MHz'),
-        S_Resample(301)
-    ])
-    tds_transformed = mwlab.TouchstoneDataset(source=ENV_ORIGIN_DATA_PATH, s_tf=y_transform)
-
-    # Пример кодирования и декодирования
-    origin_filter = MWFilter.from_touchstone_dataset_item(tds_transformed[0])
-    prms, _ = tds_transformed[0]  # Используем первый файл набора
-    ts = mwlab.TouchstoneData(origin_filter, prms)  # Создаем объект TouchstoneData
-
-    m_min, m_max = create_min_max_matrices(origin_matrix=origin_filter.coupling_matrix, deltas=np.array([1.5, 0.1, 0.005]))
-    phase_shifts_min, phase_shifts_max = create_min_max_phase_shifts(origin_shifts=np.array([0.547, -1.0, 0.01685, 0.017]),
-                                                                     deltas=np.array([0.02, 0.02, 0.005, 0.005]))
-    samplers = CMTheoreticalDatasetGeneratorSamplers(
-        cm_shifts=Sampler.lhs(start=m_min, stop=m_max, num=DATASET_SIZE),
-        ps_shifts=Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=DATASET_SIZE)
-    )
+    # tds = mwlab.TouchstoneDataset(source=ENV_ORIGIN_DATA_PATH)
+    # print(f"Загружено файлов: {len(tds)}")
+    # print("Пример параметров из первого файла:")
+    # print(tds[0][0], "\n")
+    # origin_filter: MWFilter = MWFilter.from_touchstone_dataset_item(tds[0])
+    # y_transform = TComposite([
+    #     S_Crop(f_start=origin_filter.f0-origin_filter.bw*1.2, f_stop=origin_filter.f0+origin_filter.bw*1.2, unit='MHz'),
+    #     S_Resample(301)
+    # ])
+    # tds_transformed = mwlab.TouchstoneDataset(source=ENV_ORIGIN_DATA_PATH, s_tf=y_transform)
+    #
+    # # Пример кодирования и декодирования
+    # origin_filter = MWFilter.from_touchstone_dataset_item(tds_transformed[0])
+    # prms, _ = tds_transformed[0]  # Используем первый файл набора
+    #
+    # m_min, m_max = create_min_max_matrices(origin_matrix=origin_filter.coupling_matrix, deltas=np.array([1.5, 0.1, 0.005]))
+    # phase_shifts_min, phase_shifts_max = create_min_max_phase_shifts(origin_shifts=np.array([0.547, -1.0, 0.01685, 0.017]),
+    #                                                                  deltas=np.array([0.02, 0.02, 0.005, 0.005]))
+    # samplers = CMTheoreticalDatasetGeneratorSamplers(
+    #     cm_shifts=Sampler.lhs(start=m_min, stop=m_max, num=DATASET_SIZE),
+    #     ps_shifts=Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=DATASET_SIZE)
+    # )
 
     ds_gen = CMTheoreticalDatasetGenerator(
+        path_to_origin_filter=ENV_ORIGIN_DATA_PATH,
         path_to_save_dataset=ENV_DATASET_PATH,
-        origin_filter=origin_filter,
-        samplers=samplers
+        pss_origin=PSShift(phi11=0.547, phi21=-1.0, theta11=0.01685, theta21=0.017),
+        pss_shifts_delta=PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
+        cm_shifts_delta=CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=0.005),
+        samplers_size=DATASET_SIZE,
     )
-    plt.figure()
     ds_gen.generate()
 
-    codec = mwlab.TouchstoneCodec.from_dataset(mwlab.TouchstoneDataset(source=ds_gen.path_to_dataset, in_memory=True))
+    codec = MWFilterTouchstoneCodec.from_dataset(mwlab.TouchstoneDataset(source=ds_gen.path_to_dataset, in_memory=True, s_tf=ds_gen.y_transform))
+    codec.exclude_keys(["f0", "bw", "N", "Q"])
     print(codec)
     codec.y_channels = ['S1_1.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S2_1.imag', 'S2_2.imag']
 
     # Исключаем из анализа ненужные x-параметры
-    keys_to_exclude = ["f0", "bw", "N", "Q"]  # Q исключаю сейчас для простоты
-    codec.x_keys = list(filter(lambda x: x not in keys_to_exclude, codec.x_keys))
     print("Каналы:", codec.y_channels)
     print("Количество каналов:", len(codec.y_channels))
-
-    # Кодирование
-    x, y, meta = codec.encode(ts)
-    print("x-параметры:\n", x)
-    print("y-параметры:\n", y)
-    print("Метаданные:\n" + str(meta))
 
     dm = mwlab.TouchstoneLDataModule(
         source=ds_gen.path_to_dataset,         # Путь к датасету
         codec=codec,                   # Кодек для преобразования TouchstoneData → (x, y)
         batch_size=64,                 # Размер батча
         val_ratio=0.2,                 # Доля валидационного набора
-        test_ratio=0.1,                # Доля тестового набора
+        test_ratio=0.05,                # Доля тестового набора
         cache_size=None,
         scaler_in=MinMaxScaler(dim=(0, 2)),                          # Скейлер для входных данных
         scaler_out=MinMaxScaler(dim=0, feature_range=(-0.5, 0.5)),  # Скейлер для выходных данных
@@ -162,13 +132,15 @@ def main():
         # Параметры базового датасета:
         base_ds_kwargs={
             # "x_tf": x_transform,       # Предобработка входных данных
-            "s_tf": y_transform        # Предобработка выходных данных
+            "s_tf": ds_gen.y_transform,        # Предобработка выходных данных
+            "in_memory": True
         }
     )
 
     dm.setup("fit")
 
     # Декодирование
+    _, __, meta = dm.get_dataset(split="train", meta=True)[0]
     ts_rec = codec.decode(dm.train_ds.dataset[0][0], meta)
     plt.figure()
     ts_rec.network.plot_s_db(m=0, n=0, label='S11 from dataset')
@@ -179,9 +151,10 @@ def main():
     print(f"Размер валидационного набора: {len(dm.val_ds)}")
     print(f"Размер тестового набора: {len(dm.test_ds)}")
 
-    model = Simple_Opt_3(len(origin_filter.coupling_matrix.links))
+    model = Simple_Opt_3(len(ds_gen.origin_filter.coupling_matrix.links))
     lit_model = mwlab.BaseLModule(
         model=model,  # Наша нейросетевая модель
+        swap_xy=True,
         scaler_in=dm.scaler_in,  # Скейлер для входных данных
         scaler_out=dm.scaler_out,  # Скейлер для выходных данных
         codec=codec,  # Кодек для преобразования данных
@@ -203,36 +176,24 @@ def main():
 
     # Запуск процесса обучения
     trainer.fit(lit_model, dm)
-    dm.setup("predict")
-    prediction = trainer.predict(lit_model, datamodule=dm)
 
-    # Извлекаем предсказания для первого файла
-    pred_ts = prediction[0][0]
+    # Возьмем для примера первый touchstone-файл из тестового набора данных
+    test_tds = dm.get_dataset(split="test", meta=True)
+    # Поскольку swap_xy=True, то датасет меняет местами пары (y, x)
+    y_t, x_t, meta = test_tds[0]  # Используем первый файл набора данных
 
-    # Оригинальные и предсказанные S-параметры
-    orig = codec.decode(dm.predict_ds[0][0], meta=dm.predict_ds[0][-1]).network
-    pred = pred_ts.network
+    # Декодируем данные
+    orig_prms = dm.codec.decode_x(x_t)  # Создаем словарь параметров
+    net = dm.codec.decode_s(y_t, meta)  # Создаем объект skrf.Network
 
-    # Устанавливаем единицы измерения частоты в ГГц
-    orig.frequency.unit = "GHz"
-    pred.frequency.unit = "GHz"
+    # Предсказанные S-параметры
+    pred_prms = lit_model.predict_x(net)
 
-    # Построение графиков для сравнения S11 и S21
-    plt.figure()
+    print(f"Исходные параметры: {orig_prms}")
+    print(f"Предсказанные параметры: {pred_prms}")
 
-    # S11: оригинал и предсказание
-    orig.plot_s_db(m=0, n=0, color='r', label='S11 original')
-    pred.plot_s_db(m=0, n=0, color='b', ls=':', label='S11 predicted')
-
-    # S21: оригинал и предсказание
-    orig.plot_s_db(m=0, n=1, color='m', label='S21 original')
-    pred.plot_s_db(m=0, n=1, color='k', ls=':', label='S21 predicted')
-
-    plt.legend()
-    plt.title("Сравнение оригинальных и предсказанных S-параметров")
-    plt.xlabel("Частота (ГГц)")
-    plt.ylabel("Амплитуда (дБ)")
-    plt.grid(True)
+    orig_cm = MWFilter.matrix_from_touchstone_data_parameters(orig_prms)
+    pred_cm = MWFilter.matrix_from_touchstone_data_parameters(pred_prms)
     plt.show()
 
 
