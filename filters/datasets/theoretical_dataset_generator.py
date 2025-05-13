@@ -39,7 +39,7 @@ class CMTheoreticalDatasetGenerator:
 
     @property
     def path_to_dataset(self):
-        return self._path_to_save_dataset
+        return GET_HDF5_FILENAME(self._path_to_save_dataset)
 
     def generate(self):
         if not self._enable_generate:
