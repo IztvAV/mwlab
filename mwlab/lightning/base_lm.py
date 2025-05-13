@@ -274,25 +274,17 @@ class BaseLModule(L.LightningModule):
 
     @torch.no_grad()
     def predict_x(self, net: rf.Network) -> Dict[str, float]:
-        """Обратная задача **S→X** (swap_xy=True) для одного экземпляра."""
         if not self.swap_xy:
-            raise RuntimeError("predict_x можно вызывать только при swap_xy=True")
+            raise RuntimeError("predict_x доступен только при swap_xy=True")
         if self.codec is None:
-            raise RuntimeError("predict_x требует, чтобы в модуле был codec")
-
+            raise RuntimeError("predict_x требует codec")
         self.eval()
-        y_t, meta = self.codec.encode_s(net)
-        y_t = y_t.to(self.device)
-        if y_t.dim() == 2:                     # (C,F)
-            y_in = y_t.flatten(start_dim=0).unsqueeze(0)  # (1, C*F)
-        else:  # fallback
-            y_in = y_t.view(1, -1)
-        x_pred = self(y_in)[0]
-
+        y_t, _ = self.codec.encode_s(net)
+        y_t = y_t.to(self.device).unsqueeze(0)
+        x_pred = self(y_t)[0]
         if self.scaler_out is not None:
             x_pred = self._apply_inverse(self.scaler_out, x_pred)
         return self.codec.decode_x(x_pred)
-
     # ---------------------------------------------------------------- repr
     def extra_repr(self) -> str:  # noqa: D401
         task = "inverse (Y→X)" if self.swap_xy else "direct (X→Y)"
