@@ -266,9 +266,16 @@ class BaseLModule(L.LightningModule):
     def _load_scaler(payload: Dict[str, Any]) -> nn.Module:
         cls = _locate_class(payload["path"])
         scaler = cls(**payload.get("kwargs", {}))
-        scaler.load_state_dict(payload["state"])
+        # безопасно переносим буферы произвольной формы
+        for name, buf in payload["state"].items():
+            if name in scaler._buffers and scaler._buffers[name].shape == buf.shape:
+                scaler._buffers[name].copy_(buf)
+            else:
+                scaler.register_buffer(name, buf.clone())
+
         for p in scaler.parameters():  # type: ignore[attr-defined]
             p.requires_grad_(False)
+
         return scaler
 
     def state_dict(self, *args, **kwargs):  # noqa: D401
