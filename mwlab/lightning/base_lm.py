@@ -15,6 +15,8 @@ BaseLModule
 """
 from __future__ import annotations
 
+import importlib
+import pydoc
 from typing import Callable, Optional, Tuple, Any, List, Mapping, Dict
 
 import torch
@@ -26,6 +28,20 @@ from mwlab.codecs.touchstone_codec import TouchstoneCodec
 
 __all__ = ["BaseLModule"]
 
+# ─────────────────────────────────────────────────────────────────────────────
+#                            helpers: class import
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _locate_class(path: str):
+    """Импортирует класс по строке ``pkg.sub:Cls`` или ``pkg.sub.Cls``."""
+    if ":" in path:
+        module_path, cls_name = path.split(":", 1)
+        module = importlib.import_module(module_path)
+        return getattr(module, cls_name)
+    obj = pydoc.locate(path)
+    if obj is None:
+        raise ImportError(f"Не удалось импортировать класс {path!r}")
+    return obj
 
 # ─────────────────────────────────────────────────────────────────────────────
 #                                  BaseLModule
@@ -238,17 +254,50 @@ class BaseLModule(L.LightningModule):
         }
 
     # ───────────────────────────────────────────── checkpoint helpers
+    @staticmethod
+    def _dump_scaler(scaler: nn.Module) -> Dict[str, Any]:
+        return {
+            "path": f"{scaler.__class__.__module__}:{scaler.__class__.__qualname__}",
+            "kwargs": getattr(scaler, "_init_kwargs", {}),
+            "state": scaler.state_dict(),
+        }
+
+    @staticmethod
+    def _load_scaler(payload: Dict[str, Any]) -> nn.Module:
+        cls = _locate_class(payload["path"])
+        scaler = cls(**payload.get("kwargs", {}))
+        # безопасно переносим буферы произвольной формы
+        for name, buf in payload["state"].items():
+            if name in scaler._buffers and scaler._buffers[name].shape == buf.shape:
+                scaler._buffers[name].copy_(buf)
+            else:
+                scaler.register_buffer(name, buf.clone())
+
+        for p in scaler.parameters():  # type: ignore[attr-defined]
+            p.requires_grad_(False)
+
+        return scaler
+
     def state_dict(self, *args, **kwargs):  # noqa: D401
         state = super().state_dict(*args, **kwargs)
         # сохраняем TouchstoneCodec (он не nn.Module)
         if self.codec is not None:
             state["mw_codec"] = self.codec.dumps()
+        if self.scaler_in is not None:
+            state["mw_scaler_in"] = self._dump_scaler(self.scaler_in)
+        if self.scaler_out is not None:
+            state["mw_scaler_out"] = self._dump_scaler(self.scaler_out)
+
         return state
 
     def load_state_dict(self, state_dict: dict, strict: bool = True):  # noqa: D401
         # восстанавливаем codec (до вызова super, чтобы predict_step уже знал)
         if "mw_codec" in state_dict:
             self.codec = TouchstoneCodec.loads(state_dict.pop("mw_codec"))
+        if "mw_scaler_in" in state_dict and self.scaler_in is None:
+            self.scaler_in = self._load_scaler(state_dict.pop("mw_scaler_in"))
+        if "mw_scaler_out" in state_dict and self.scaler_out is None:
+            self.scaler_out = self._load_scaler(state_dict.pop("mw_scaler_out"))
         super().load_state_dict(state_dict, strict=strict)
 
     # =====================================================================
@@ -274,25 +323,17 @@ class BaseLModule(L.LightningModule):
 
     @torch.no_grad()
     def predict_x(self, net: rf.Network) -> Dict[str, float]:
-        """Обратная задача **S→X** (swap_xy=True) для одного экземпляра."""
         if not self.swap_xy:
-            raise RuntimeError("predict_x можно вызывать только при swap_xy=True")
+            raise RuntimeError("predict_x доступен только при swap_xy=True")
         if self.codec is None:
-            raise RuntimeError("predict_x требует, чтобы в модуле был codec")
-
+            raise RuntimeError("predict_x требует codec")
         self.eval()
-        y_t, meta = self.codec.encode_s(net)
-        y_t = y_t.to(self.device)
-        if y_t.dim() == 2:                     # (C,F)
-            y_in = y_t.flatten(start_dim=0).unsqueeze(0)  # (1, C*F)
-        else:  # fallback
-            y_in = y_t.view(1, -1)
-        x_pred = self(y_in)[0]
-
+        y_t, _ = self.codec.encode_s(net)
+        y_t = y_t.to(self.device).unsqueeze(0)
+        x_pred = self(y_t)[0]
         if self.scaler_out is not None:
             x_pred = self._apply_inverse(self.scaler_out, x_pred)
         return self.codec.decode_x(x_pred)
-
     # ---------------------------------------------------------------- repr
     def extra_repr(self) -> str:  # noqa: D401
         task = "inverse (Y→X)" if self.swap_xy else "direct (X→Y)"
