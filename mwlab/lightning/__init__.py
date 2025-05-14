@@ -1,4 +1,4 @@
-# mwlab/lightning/__init__.py
+# mwlab/mwfilter_lightning/__init__.py
 """
 Под‑пакет MWLab для PyTorch Lightning.
 """

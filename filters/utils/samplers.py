@@ -20,17 +20,6 @@ class Sampler:
         space = np.linspace(start, stop, num)
         return cls(type=SamplerTypes.SAMPLER_UNIFORM, space=space)
 
-    # @classmethod
-    # def lhs(cls, start: np.array, stop: np.array, num: int):
-    #     start_flatten = start.flatten()
-    #     stop_flatten = stop.flatten()
-    #     dim = start_flatten.size
-    #     sampler = qmc.LatinHypercube(d=dim)
-    #     sample = sampler.random(n=num)
-    #     scaled = qmc.scale(sample, l_bounds=start_flatten, u_bounds=stop_flatten)
-    #     space = scaled.reshape(num, *start.shape)
-    #     return cls(type=SamplerTypes.SAMPLER_LATIN_HYPERCUBE, space=space)
-
     @classmethod
     def lhs(cls, start, stop, num):
         start = np.asarray(start, dtype=float)

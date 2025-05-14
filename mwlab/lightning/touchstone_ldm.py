@@ -1,9 +1,9 @@
-# mwlab/lightning/touchstone_ldm.py
+# mwlab/mwfilter_lightning/touchstone_ldm.py
 """
 TouchstoneLDataModule
 =====================
 
-Обертка Lightning **(PyTorch Lightning ≥ 2.1, импорт `lightning as L`)**
+Обертка Lightning **(PyTorch Lightning ≥ 2.1, импорт `mwfilter_lightning as L`)**
 над `TouchstoneTensorDataset`.  Датамодуль решает всю «рутину» вокруг
 *.sNp/Touchstone*‑файлов:
 

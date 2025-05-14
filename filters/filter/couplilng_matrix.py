@@ -36,6 +36,15 @@ class CouplingMatrix:
         return cls(sym_matrix)
 
     @staticmethod
+    def from_factors(factors, links, matrix_order):
+        M = np.zeros(shape=(matrix_order, matrix_order), dtype=float)
+        rows, cols = zip(*links)
+        M[rows, cols] = factors
+        M[cols, rows] = factors
+        return M
+
+
+    @staticmethod
     def get_links_from_matrix(matrix):
         return list(zip(*np.where(np.triu(matrix) != 0)))
 
