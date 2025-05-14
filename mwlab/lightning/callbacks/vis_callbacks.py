@@ -1,4 +1,4 @@
-# mwlab/lightning/callbacks/vis_callbacks.py
+# mwlab/mwfilter_lightning/callbacks/vis_callbacks.py
 """
 vis_callbacks.py
 ================

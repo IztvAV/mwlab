@@ -2,7 +2,7 @@ import os
 import numpy as np
 from mwlab import TouchstoneData, TouchstoneDataset
 from ..filter import MWFilter, CouplingMatrix
-from ..utils import Sampler
+from ..utils import Sampler, SamplerTypes
 from dataclasses import dataclass
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -32,8 +32,8 @@ class PSShift:
 
 @dataclass
 class CMTheoreticalDatasetGeneratorSamplers:
-    cm_shifts: Sampler
-    ps_shifts: Sampler
+    cms: Sampler
+    pss: Sampler
 
 
 GET_S2P_FILENAME_FOR_INDEX = lambda path, idx: path + f"\\Data_{idx:04d}.s2p"
@@ -53,6 +53,16 @@ class CMTheoreticalDatasetGenerator:
                  f_stop: float|None = None,  # Полоса до которой обрезаем
                  f_unit: str|None = None
                  ):
+
+        self._dataset_size = samplers_size
+        self._path_to_save_dataset = path_to_save_dataset+f"_{self._dataset_size}"
+        self._enable_generate = True
+        print(f"Write data into directory: {self._path_to_save_dataset}")
+        if not os.path.exists(self._path_to_save_dataset):
+            os.makedirs(self._path_to_save_dataset)
+        if os.path.exists(GET_HDF5_FILENAME(self._path_to_save_dataset)):
+            print(f"Directory already have dataset files!!!")
+            self._enable_generate = False
         tds = TouchstoneDataset(source=path_to_origin_filter)
         origin_filter_ = MWFilter.from_touchstone_dataset_item(tds[0])
         f0 = origin_filter_.f0
@@ -73,20 +83,17 @@ class CMTheoreticalDatasetGenerator:
                                                deltas=cm_shifts_delta)
         phase_shifts_min, phase_shifts_max = self.create_min_max_phase_shifts(
             origin_shifts=pss_origin, deltas=pss_shifts_delta)
+
+        cms_factors = Sampler.lhs(start=CouplingMatrix(matrix=m_min).factors, stop=CouplingMatrix(matrix=m_max).factors,
+                    num=samplers_size)
+        cm_sampler_space = np.zeros(shape=(len(cms_factors), *self._origin_filter.coupling_matrix.matrix.shape), dtype=float)
+        for cm_factors, idx in tuple(zip(cms_factors, range(len(cms_factors)))):
+            cm_sampler_space[idx] = CouplingMatrix.from_factors(cm_factors, self._origin_filter.coupling_matrix.links, self._origin_filter.order+2)
         self._samplers = CMTheoreticalDatasetGeneratorSamplers(
-            cm_shifts=Sampler.lhs(start=m_min, stop=m_max, num=samplers_size),
-            ps_shifts=Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=samplers_size)
+            cms=Sampler(space=cm_sampler_space, type=SamplerTypes.SAMPLER_LATIN_HYPERCUBE),
+            pss=Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=samplers_size)
         )
 
-        self._dataset_size = samplers_size
-        self._path_to_save_dataset = path_to_save_dataset+f"_{self._dataset_size}"
-        self._enable_generate = True
-        print(f"Write data into directory: {self._path_to_save_dataset}")
-        if not os.path.exists(self._path_to_save_dataset):
-            os.makedirs(self._path_to_save_dataset)
-        if os.path.exists(GET_HDF5_FILENAME(self._path_to_save_dataset)):
-            print(f"Directory already have dataset files!!!")
-            self._enable_generate = False
 
     @staticmethod
     def create_min_max_matrices(origin_matrix: CouplingMatrix, deltas: CMShifts):
@@ -130,22 +137,22 @@ class CMTheoreticalDatasetGenerator:
     def generate(self):
         if not self._enable_generate:
             return
-        if len(self._samplers.ps_shifts) != len(self._samplers.cm_shifts):
-            raise ValueError(f"Размер сэмплера с фазовыми сдвигами (ps_shifts): {len(self._samplers.ps_shifts)}"
+        if len(self._samplers.pss) != len(self._samplers.cms):
+            raise ValueError(f"Размер сэмплера с фазовыми сдвигами (ps_shifts): {len(self._samplers.pss)}"
                              f" должен равняться размеру сэмплера со сдвигами элементов матрицы связи (cm_shifts): "
-                             f"{len(self._samplers.cm_shifts)}")
-        size = len(self._samplers.cm_shifts)
+                             f"{len(self._samplers.cms)}")
+        size = len(self._samplers.cms)
         with HDF5Backend(GET_HDF5_FILENAME(self._path_to_save_dataset), mode="w") as h5b:
             for idx in tqdm(range(size), desc=f"Генерация датасета в путь: {self._path_to_save_dataset}"):
-                new_matrix = self._samplers.cm_shifts[idx]
-                ps_shifts = self._samplers.ps_shifts[idx]
+                new_matrix = self._samplers.cms[idx]
+                ps_shifts = self._samplers.pss[idx]
                 s_params = MWFilter.response_from_coupling_matrix(M=new_matrix, f0=self._origin_filter.f0,
                                                            FBW=self._origin_filter.fbw, Q=self._origin_filter.Q,
                                                            frange=self._origin_filter.f/1e6, PSs=ps_shifts)
                 new_filter = MWFilter(f0=self._origin_filter.f0, order=self._origin_filter.order, bw=self._origin_filter.bw,
                          Q=self._origin_filter.Q, matrix=new_matrix, frequency=self._origin_filter.f, s=s_params, z0=50)
                 ts = new_filter.to_touchstone_data()
-                new_filter.write_touchstone(GET_S2P_FILENAME_FOR_INDEX(self._path_to_save_dataset, idx))
+                # new_filter.write_touchstone(GET_S2P_FILENAME_FOR_INDEX(self._path_to_save_dataset, idx))
                 h5b.append(ts)
                 pass
 

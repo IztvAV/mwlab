@@ -21,8 +21,9 @@ class MWFilter(rf.Network):
         self._coupling_matrix: CouplingMatrix = CouplingMatrix(matrix)
 
     @staticmethod
-    def matrix_from_touchstone_data_parameters(params: dict) -> np.array:
-        N = int(params.get("N"))
+    def matrix_from_touchstone_data_parameters(params: dict, N=None) -> np.array:
+        if N is None:
+            N = int(params.get("N"))
         M = np.zeros((N + 2, N + 2), dtype=float)
         for k, v in params.items():
             if k.startswith("m_"):
@@ -42,7 +43,6 @@ class MWFilter(rf.Network):
                     params.update({f"m_{i}_{j}": val})
         td = mwlab.TouchstoneData(network=self, params=params, path=path)
         return td
-
 
     @classmethod
     def from_file(cls, filename: str):
@@ -75,7 +75,7 @@ class MWFilter(rf.Network):
         matrix = MWFilter.matrix_from_touchstone_data_parameters(params)
         if f0 is None or bw is None or Q is None or order is None or matrix is None:
             raise ValueError(f"Некорректные параметры для инициализации класса: f0={f0}, bw={bw}, Q={Q}, "
-                             f"order={order}, \nM={M}")
+                             f"order={order}, \nM={matrix}")
         return cls(
             f0=f0,
             bw=bw,

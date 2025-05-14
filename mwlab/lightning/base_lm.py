@@ -1,4 +1,4 @@
-# mwlab/lightning/base_lm.py
+# mwlab/mwfilter_lightning/base_lm.py
 """
 BaseLModule
 ===========
