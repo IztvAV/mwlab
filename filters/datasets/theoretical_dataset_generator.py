@@ -36,7 +36,7 @@ class CMTheoreticalDatasetGeneratorSamplers:
     pss: Sampler
 
 
-GET_S2P_FILENAME_FOR_INDEX = lambda path, idx: path + f"\\Data_{idx:04d}.s2p"
+GET_S2P_FILENAME_FOR_INDEX = lambda path, idx: path + f"\\{idx:04d}.s2p"
 GET_HDF5_FILENAME = lambda path: path + f"\\Dataset.h5"
 
 
@@ -51,9 +51,10 @@ class CMTheoreticalDatasetGenerator:
                  resample_scale: int = 301,  # Значение для ресемплинга
                  f_start: float|None = None,  # Полоса откуда обрезаем
                  f_stop: float|None = None,  # Полоса до которой обрезаем
-                 f_unit: str|None = None
+                 f_unit: str|None = None,
+                 save_s2p: bool = False
                  ):
-
+        self._save_s2p = save_s2p
         self._dataset_size = samplers_size
         self._path_to_save_dataset = path_to_save_dataset+f"_{self._dataset_size}"
         self._enable_generate = True
@@ -149,10 +150,11 @@ class CMTheoreticalDatasetGenerator:
                 s_params = MWFilter.response_from_coupling_matrix(M=new_matrix, f0=self._origin_filter.f0,
                                                            FBW=self._origin_filter.fbw, Q=self._origin_filter.Q,
                                                            frange=self._origin_filter.f/1e6, PSs=ps_shifts)
-                new_filter = MWFilter(f0=self._origin_filter.f0, order=self._origin_filter.order, bw=self._origin_filter.bw,
-                         Q=self._origin_filter.Q, matrix=new_matrix, frequency=self._origin_filter.f, s=s_params, z0=50)
+                new_filter = self.y_transform(MWFilter(f0=self._origin_filter.f0, order=self._origin_filter.order, bw=self._origin_filter.bw,
+                         Q=self._origin_filter.Q, matrix=new_matrix, frequency=self._origin_filter.f, s=s_params, z0=50))
                 ts = new_filter.to_touchstone_data()
-                # new_filter.write_touchstone(GET_S2P_FILENAME_FOR_INDEX(self._path_to_save_dataset, idx))
+                if self._save_s2p:
+                    new_filter.write_touchstone(GET_S2P_FILENAME_FOR_INDEX(self._path_to_save_dataset, idx))
                 h5b.append(ts)
                 pass
 

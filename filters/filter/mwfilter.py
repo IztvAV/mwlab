@@ -206,6 +206,7 @@ class MWFilter(rf.Network):
         return resp
 
     @staticmethod
+    @torch.no_grad()
     def response_from_coupling_matrix(M, f0, FBW, Q, frange, NRNlist=[], Rs=1, Rl=1, PSs=None):
         """
         Векторизованный расчёт S-параметров фильтра из матрицы связи на GPU/CPU.
@@ -303,11 +304,11 @@ class MWFilter(rf.Network):
             if n != n2:
                 print("ERROR: M is not Square")
                 return (1)
-            # for row in range(n):
-            #     for col in range(n):
-            #         if M[row, col] != M[col, row]:
-            #             print("ERROR: M is not symmetric about diagonal")
-            #             return (1)
+            for row in range(n):
+                for col in range(n):
+                    if M[row, col] != M[col, row]:
+                        print("ERROR: M is not symmetric about diagonal")
+                        return (1)
 
             ######## Q Vector Setup ################
 

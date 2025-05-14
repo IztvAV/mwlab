@@ -1,0 +1,272 @@
+import torch
+from torch import nn
+
+
+class LSTM(nn.Module):
+    def __init__(self, input_size=8, hidden_size=64, num_layers=2, output_size=10, bidirectional=False):
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            bidirectional=bidirectional
+        )
+        direction_mult = 2 if bidirectional else 1
+        self.fc = nn.Linear(hidden_size * direction_mult, output_size)
+
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        out = out[:, -1, :]
+        return self.fc(out)
+
+
+class GRU(nn.Module):
+    def __init__(self, input_size=8, hidden_size=64, num_layers=2, output_size=10):
+        super().__init__()
+        self.gru = nn.GRU(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True
+        )
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        out, _ = self.gru(x)
+        out = out[:, -1, :]
+        return self.fc(out)
+
+
+class BiRNN(nn.Module):
+    def __init__(self, in_channels=8, hidden_size=64, num_layers=3, out_channels=10, rnn_type='lstm'):
+        super().__init__()
+        rnn_class = nn.LSTM if rnn_type == 'lstm' else nn.GRU if rnn_type == 'gru' else nn.RNN
+        self.rnn = rnn_class(
+            input_size=in_channels,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            bidirectional=True
+        )
+        self.fc = nn.Linear(hidden_size * 2, out_channels)
+        self.hidden_size = hidden_size
+
+    def forward(self, x):
+        out, _ = self.rnn(x)
+        # Конкатенируем прямое и обратное направления
+        out = torch.cat([out[:, -1, :self.hidden_size], out[:, 0, self.hidden_size:]], dim=1)
+        return self.fc(out)
+
+
+class Seq2Seq(nn.Module):
+    def __init__(self, input_size=8, hidden_size=64, output_size=10):
+        super().__init__()
+        self.encoder = nn.LSTM(input_size, hidden_size, batch_first=True)
+        self.decoder = nn.LSTM(hidden_size, hidden_size, batch_first=True)
+        self.fc = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x, target_len=1):
+        # Кодирование
+        _, (hidden, cell) = self.encoder(x)
+
+        # Декодирование (авторегрессионное)
+        decoder_input = torch.zeros(x.size(0), 1, x.size(2)).to(x.device)
+        outputs = []
+        for _ in range(target_len):
+            out, (hidden, cell) = self.decoder(decoder_input, (hidden, cell))
+            out = self.fc(out.squeeze(1))
+            outputs.append(out)
+            decoder_input = out.unsqueeze(1).unsqueeze(2)
+
+        return torch.stack(outputs, dim=1)
+
+
+class VGG1D(nn.Module):
+    def __init__(self, in_channels=8, out_channels=10):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv1d(in_channels, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(64, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+
+            nn.Conv1d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(128, 128, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+
+            nn.Conv1d(128, 256, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(256, 256, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2),
+        )
+        self.avgpool = nn.AdaptiveAvgPool1d(1)
+        self.classifier = nn.Sequential(
+            nn.Linear(256, 4096),
+            nn.ReLU(),
+            nn.Dropout(),
+            nn.Linear(4096, 4096),
+            nn.ReLU(),
+            nn.Dropout(),
+            nn.Linear(4096, out_channels),
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        x = self.classifier(x)
+        return x
+
+
+class BasicBlock1D(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1):
+        super().__init__()
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1)
+        self.bn1 = nn.BatchNorm1d(out_channels)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm1d(out_channels)
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride),
+                nn.BatchNorm1d(out_channels),
+            )
+
+    def forward(self, x):
+        out = nn.ReLU()(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += self.shortcut(x)  # Residual connection
+        out = nn.ReLU()(out)
+        return out
+
+
+class ResNet1D(nn.Module):
+    def __init__(self, in_channels=8, out_channels=10):
+        super().__init__()
+        self.in_channels = 64
+        self.conv1 = nn.Conv1d(in_channels, 64, kernel_size=7, stride=2, padding=3)
+        self.bn1 = nn.BatchNorm1d(64)
+        self.maxpool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
+        self.layer1 = self._make_layer(64, 64, 2, stride=1)
+        self.layer2 = self._make_layer(64, 128, 2, stride=2)
+        self.layer3 = self._make_layer(128, 256, 2, stride=2)
+        self.layer4 = self._make_layer(256, 512, 2, stride=2)
+        self.avgpool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Linear(512, out_channels)
+
+    def _make_layer(self, in_channels, out_channels, num_blocks, stride):
+        layers = [BasicBlock1D(in_channels, out_channels, stride)]
+        for _ in range(1, num_blocks):
+            layers.append(BasicBlock1D(out_channels, out_channels, stride=1))
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = nn.ReLU()(self.bn1(self.conv1(x)))
+        x = self.maxpool(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+        return x
+
+
+class LeNet1D(nn.Module):
+    def __init__(self, in_channels=8, num_points=301, out_channels=10):
+        super().__init__()
+
+        # Свёрточные слои (1D вместо 2D)
+        self.features = nn.Sequential(
+            nn.Conv1d(in_channels, 6, kernel_size=5, padding=2),  # [B, 8, 301] -> [B, 6, 301]
+            nn.ReLU(),
+            nn.AvgPool1d(kernel_size=2),  # -> [B, 6, 150]
+
+            nn.Conv1d(6, 16, kernel_size=5, padding=2),  # -> [B, 16, 150]
+            nn.ReLU(),
+            nn.AvgPool1d(kernel_size=2),  # -> [B, 16, 75]
+        )
+
+        # Автоматический расчёт размера перед полносвязными слоями
+        self.flatten_size = self._get_flatten_size(in_channels, num_points)
+
+        # Полносвязные слои
+        self.classifier = nn.Sequential(
+            nn.Linear(self.flatten_size, 120),
+            nn.ReLU(),
+            nn.Linear(120, 84),
+            nn.ReLU(),
+            nn.Linear(84, out_channels),
+        )
+
+    def _get_flatten_size(self, input_channels, num_points):
+        """Вычисляет размер данных перед полносвязными слоями."""
+        x = torch.zeros(1, input_channels, num_points)  # Пробный тензор
+        x = self.features(x)
+        return x.numel()  # Размер после flatten (batch_size=1)
+
+    def forward(self, x):
+        x = self.features(x)  # [B, C, L] -> [B, 16, 75]
+        x = x.view(x.size(0), -1)  # Flatten: [B, 16*75]
+        x = self.classifier(x)
+        return x
+
+
+class Simple_Opt_3(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super(Simple_Opt_3, self).__init__()
+        # Количество выходных аргументов
+        self.nargout = 1
+        # Количество выходных каналов
+
+        # --------------------------  1 conv-слой ---------------------------
+        self.conv1 = nn.Conv1d(in_channels=self.in_channels, out_channels=64, kernel_size=7, stride=1, padding='same')
+        # --------------------------  2 conv-слой ---------------------------
+        self.conv2 = nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same')
+        # --------------------------  3 conv-слой ---------------------------
+        self.conv3 = nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same')
+        # --------------------------  4 conv-слой ---------------------------
+        self.conv4 = nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same')
+        self.seq_conv = nn.Sequential(
+            # --------------------------  1 conv-слой ---------------------------
+            self.conv1,
+            nn.ReLU(),
+            nn.AvgPool1d(kernel_size=3, stride=3, padding=1),
+            # --------------------------  2 conv-слой ---------------------------
+            self.conv2,
+            nn.ReLU(),
+            self.conv2,
+            nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
+            # --------------------------  3 conv-слой ---------------------------
+            self.conv3,
+            nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
+            # --------------------------  4 conv-слой ---------------------------
+            self.conv4,
+        )
+        self.seq_fc = nn.Sequential(
+            # --------------------------  fc-слои ---------------------------
+            nn.Linear(64 * 26, 2048),
+            nn.ReLU(),
+            nn.Linear(2048, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, 512),
+            nn.ReLU(),
+            nn.Linear(512, out_channels), # N - количество ненулевых элементов матрицы связи
+            nn.Tanh()
+        )
+
+    def encode(self, x):
+        conv_x = self.seq_conv(x)
+        conv_x_reshaped = conv_x.view(conv_x.size(0), -1)
+        fc_x = self.seq_fc(conv_x_reshaped)
+        return fc_x
+
+    def forward(self, x):
+        encoded = self.encode(x)
+        return encoded

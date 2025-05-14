@@ -1,6 +1,6 @@
 import os
-from mwlab.nn.scalers import MinMaxScaler
-from mwlab import TouchstoneData, TouchstoneDataset, TouchstoneLDataModule
+from ..mwlab.nn.scalers import MinMaxScaler
+from ..mwlab import TouchstoneDataset, TouchstoneLDataModule
 
 from filters import CMTheoreticalDatasetGenerator
 from filters.codecs import MWFilterTouchstoneCodec
@@ -9,69 +9,17 @@ from filters.mwfilter_lightning import MWFilterBaseLModule
 from filters.datasets.theoretical_dataset_generator import CMShifts, PSShift
 
 import matplotlib.pyplot as plt
-import numpy as np
 import lightning as L
 
 from torch import nn
+import models
 
 
-class Simple_Opt_3(nn.Module):
-    def __init__(self, N):
-        super(Simple_Opt_3, self).__init__()
-        # Количество выходных аргументов
-        self.nargout = 1
-        # Количество выходных каналов
-        self.in_channels=6
-
-        # --------------------------  1 conv-слой ---------------------------
-        self.conv1 = nn.Conv1d(in_channels=self.in_channels, out_channels=64, kernel_size=7, stride=1, padding='same')
-        # --------------------------  2 conv-слой ---------------------------
-        self.conv2 = nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same')
-        # --------------------------  3 conv-слой ---------------------------
-        self.conv3 = nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same')
-        # --------------------------  4 conv-слой ---------------------------
-        self.conv4 = nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same')
-        self.seq_conv = nn.Sequential(
-            # --------------------------  1 conv-слой ---------------------------
-            self.conv1,
-            nn.ReLU(),
-            nn.AvgPool1d(kernel_size=3, stride=3, padding=1),
-            # --------------------------  2 conv-слой ---------------------------
-            self.conv2,
-            nn.ReLU(),
-            self.conv2,
-            nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
-            # --------------------------  3 conv-слой ---------------------------
-            self.conv3,
-            nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
-            # --------------------------  4 conv-слой ---------------------------
-            self.conv4,
-        )
-        self.seq_fc = nn.Sequential(
-            # --------------------------  fc-слои ---------------------------
-            nn.Linear(64 * 26, 512),
-            nn.ReLU(),
-            nn.Linear(512, 512),
-            nn.ReLU(),
-            nn.Linear(512, N), # N - количество ненулевых элементов матрицы связи
-            nn.Tanh()
-        )
-
-    def encode(self, x):
-        conv_x = self.seq_conv(x)
-        conv_x_reshaped = conv_x.view(conv_x.size(0), -1)
-        fc_x = self.seq_fc(conv_x_reshaped)
-        return fc_x
-
-    def forward(self, x):
-        encoded = self.encode(x)
-        return encoded
-
-
-DATASET_SIZE = 100_000
+BATCH_SIZE = 64
+DATASET_SIZE = 1_000
 FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
-ENV_ORIGIN_DATA_PATH = os.getcwd() + f"\\Data\\{FILTER_NAME}\\origins_data"
-ENV_DATASET_PATH = os.getcwd() + f"\\Data\\{FILTER_NAME}\\datasets_data"
+ENV_ORIGIN_DATA_PATH = os.getcwd() + f"\\FilterData\\{FILTER_NAME}\\origins_data"
+ENV_DATASET_PATH = os.getcwd() + f"\\FilterData\\{FILTER_NAME}\\datasets_data"
 
 
 def main():
@@ -82,13 +30,15 @@ def main():
         pss_shifts_delta=PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
         cm_shifts_delta=CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=0.005),
         samplers_size=DATASET_SIZE,
+        save_s2p=False,
     )
     ds_gen.generate()
 
-    codec = MWFilterTouchstoneCodec.from_dataset(TouchstoneDataset(source=ds_gen.path_to_dataset, in_memory=True, s_tf=ds_gen.y_transform))
+    codec = MWFilterTouchstoneCodec.from_dataset(TouchstoneDataset(source=ds_gen.path_to_dataset, in_memory=True))
     codec.exclude_keys(["f0", "bw", "N", "Q"])
     print(codec)
-    codec.y_channels = ['S1_1.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S2_1.imag', 'S2_2.imag']
+    # codec.y_channels = ['S1_1.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S2_1.imag', 'S2_2.imag']
+    # codec.y_channels = ['S1_1.real', 'S2_1.real', 'S1_1.imag', 'S2_1.imag']
 
     # Исключаем из анализа ненужные x-параметры
     print("Каналы:", codec.y_channels)
@@ -97,17 +47,17 @@ def main():
     dm = TouchstoneLDataModule(
         source=ds_gen.path_to_dataset,         # Путь к датасету
         codec=codec,                   # Кодек для преобразования TouchstoneData → (x, y)
-        batch_size=64,                 # Размер батча
+        batch_size=BATCH_SIZE,                 # Размер батча
         val_ratio=0.2,                 # Доля валидационного набора
         test_ratio=0.05,                # Доля тестового набора
-        cache_size=None,
-        scaler_in=MinMaxScaler(dim=(0, 2)),                          # Скейлер для входных данных
+        cache_size=0,
+        scaler_in=MinMaxScaler(dim=(0, 2), feature_range=(-1, 1)),                          # Скейлер для входных данных
         scaler_out=MinMaxScaler(dim=0, feature_range=(-0.5, 0.5)),  # Скейлер для выходных данных
         swap_xy=True,
         # Параметры базового датасета:
         base_ds_kwargs={
             # "x_tf": x_transform,       # Предобработка входных данных
-            "s_tf": ds_gen.y_transform,        # Предобработка выходных данных
+            # "s_tf": ds_gen.y_transform,        # Предобработка выходных данных
             "in_memory": True
         }
     )
@@ -126,7 +76,9 @@ def main():
     print(f"Размер валидационного набора: {len(dm.val_ds)}")
     print(f"Размер тестового набора: {len(dm.test_ds)}")
 
-    model = Simple_Opt_3(len(ds_gen.origin_filter.coupling_matrix.links))
+    model = models.BiRNN(in_channels=len(codec.y_channels),
+                         out_channels=len(ds_gen.origin_filter.coupling_matrix.links))
+
     lit_model = MWFilterBaseLModule(
         model=model,  # Наша нейросетевая модель
         swap_xy=True,
@@ -141,7 +93,7 @@ def main():
 
     # Обучение модели с помощью PyTorch Lightning
     trainer = L.Trainer(
-        max_epochs=100,  # Максимальное количество эпох обучения
+        max_epochs=150,  # Максимальное количество эпох обучения
         accelerator="auto",  # Автоматический выбор устройства (CPU/GPU)
         log_every_n_steps=100,  # Частота логирования в процессе обучения
         callbacks=[
