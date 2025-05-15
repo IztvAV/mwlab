@@ -47,7 +47,7 @@ codec = TouchstoneCodec(
 from mwlab.datasets import TouchstoneDataset
 from mwlab.codecs import TouchstoneCodec
 
-ds = TouchstoneDataset("Data/Filter12")
+ds = TouchstoneDataset("FilterData/Filter12")
 codec = TouchstoneCodec.from_dataset(ds, components=["real", "imag"])
 print(codec)
 # TouchstoneCodec(x_keys=2, y_channels=8[imag,real], freq_pts=256, ports=2)

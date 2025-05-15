@@ -18,7 +18,7 @@
 --------------------
 ```python
 # 1) создаем «сырой» датасет с трансформами
-src      = "Data/Filter12"                        # каталог или .h5‑файл
+src      = "FilterData/Filter12"                        # каталог или .h5‑файл
 base_ds  = TouchstoneDataset(
               src,
               s_tf=S_Crop(1e9, 10e9) >> S_Resample(256),   # цепочка S‑TF

@@ -12,7 +12,7 @@
 from mwlab.datasets import TouchstoneDataset
 from mwlab.utils.analysis import TouchstoneDatasetAnalyzer
 
-ds = TouchstoneDataset("Data/Filter12")
+ds = TouchstoneDataset("FilterData/Filter12")
 an = TouchstoneDatasetAnalyzer(ds)
 ```
 

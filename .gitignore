@@ -28,4 +28,4 @@ Thumbs.db
 tests/__pycache__/
 
 filters/lightning_logs
-filters/Data
+filters/FilterData

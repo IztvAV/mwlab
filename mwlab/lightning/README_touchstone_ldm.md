@@ -101,7 +101,7 @@ from mwlab.nn.scalers import StdScaler, MinMaxScaler
 codec = TouchstoneCodec.from_dataset(...)
 
 ldm = TouchstoneLDataModule(
-    source="Data/FilterBank",
+    source="FilterData/FilterBank",
     codec=codec,
     batch_size=32,
     val_ratio=0.2,

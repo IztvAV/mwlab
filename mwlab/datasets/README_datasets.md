@@ -28,7 +28,7 @@ from mwlab.io.backends import FileBackend
 from mwlab.transforms import S_Crop, X_SelectKeys
 
 ds = TouchstoneDataset(
-    FileBackend("Data/Filter12"),
+    FileBackend("FilterData/Filter12"),
     x_keys=["w", "gap"],
     x_tf=X_SelectKeys(["w", "gap"]),
     s_tf=S_Crop(1e9, 10e9)
@@ -48,11 +48,11 @@ from mwlab.datasets.touchstone_tensor_dataset import TouchstoneTensorDataset
 from mwlab.codecs.touchstone_codec import TouchstoneCodec
 
 # создаём базовый датасет
-base = TouchstoneDataset("Data/Filter12")
+base = TouchstoneDataset("FilterData/Filter12")
 codec = TouchstoneCodec.from_dataset(base)
 
 ds = TouchstoneTensorDataset(
-    source="Data/Filter12",
+    source="FilterData/Filter12",
     codec=codec,
     swap_xy=False,
     return_meta=True,

@@ -1,6 +1,6 @@
 import os
-from ..mwlab.nn.scalers import MinMaxScaler
-from ..mwlab import TouchstoneDataset, TouchstoneLDataModule
+from mwlab.nn.scalers import MinMaxScaler
+from mwlab import TouchstoneDataset, TouchstoneLDataModule
 
 from filters import CMTheoreticalDatasetGenerator
 from filters.codecs import MWFilterTouchstoneCodec
@@ -16,7 +16,7 @@ import models
 
 
 BATCH_SIZE = 64
-DATASET_SIZE = 1_000
+DATASET_SIZE = 1_000_000
 FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
 ENV_ORIGIN_DATA_PATH = os.getcwd() + f"\\FilterData\\{FILTER_NAME}\\origins_data"
 ENV_DATASET_PATH = os.getcwd() + f"\\FilterData\\{FILTER_NAME}\\datasets_data"
@@ -76,8 +76,13 @@ def main():
     print(f"Размер валидационного набора: {len(dm.val_ds)}")
     print(f"Размер тестового набора: {len(dm.test_ds)}")
 
-    model = models.BiRNN(in_channels=len(codec.y_channels),
+    model = models.ResNet1D(in_channels=len(codec.y_channels),
                          out_channels=len(ds_gen.origin_filter.coupling_matrix.links))
+    # model = models.BiRNN(in_channels=301,
+    #                      num_layers=5,
+    #                      out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
+    #                      hidden_size=512,
+    #                      droupout=0.25)
 
     lit_model = MWFilterBaseLModule(
         model=model,  # Наша нейросетевая модель
@@ -89,11 +94,11 @@ def main():
         scheduler_cfg={"name": "StepLR", "step_size": 20, "gamma": 0.5},
         loss_fn=nn.MSELoss()
     )
-    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min", min_delta=0.00001)
+    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=15, mode="min", min_delta=0.00001)
 
     # Обучение модели с помощью PyTorch Lightning
     trainer = L.Trainer(
-        max_epochs=150,  # Максимальное количество эпох обучения
+        max_epochs=500,  # Максимальное количество эпох обучения
         accelerator="auto",  # Автоматический выбор устройства (CPU/GPU)
         log_every_n_steps=100,  # Частота логирования в процессе обучения
         callbacks=[
