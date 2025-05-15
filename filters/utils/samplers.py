@@ -8,6 +8,7 @@ class SamplerTypes(enum.Enum):
     SAMPLER_FACTORIAL = 1,
     SAMPLER_RANDOM = 2,
     SAMPLER_LATIN_HYPERCUBE = 3,
+    SAMPLER_STD = 4,
 
 
 class Sampler:
@@ -50,6 +51,16 @@ class Sampler:
             full_samples[i][active_mask] = scaled[i]
 
         return cls(type=SamplerTypes.SAMPLER_LATIN_HYPERCUBE, space=full_samples)
+
+    @classmethod
+    def std(cls, start, stop, num, mu=0.5, sigma=1):
+        # Генерация в нормализованном пространстве [0, 1]
+        normalized = np.random.normal(loc=mu, scale=sigma, size=(num, len(start)))
+
+        # Обрезка значений за пределами [0, 1] и масштабирование
+        clipped = np.clip(normalized, 0, 1)
+        space = start + clipped * (stop - start)
+        return cls(SamplerTypes.SAMPLER_STD, space)
 
     @property
     def type(self):
