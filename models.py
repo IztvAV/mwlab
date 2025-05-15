@@ -154,18 +154,19 @@ class BasicBlock1D(nn.Module):
 class ResNet1D(nn.Module):
     def __init__(self, in_channels=8, out_channels=10):
         super().__init__()
-        self.in_channels = 64
         self.conv1 = nn.Conv1d(in_channels, 64, kernel_size=7, stride=2, padding=3)
         self.bn1 = nn.BatchNorm1d(64)
         self.maxpool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self._make_layer(64, 64, 2, stride=1)
-        self.layer2 = self._make_layer(64, 128, 2, stride=2)
-        self.layer3 = self._make_layer(128, 256, 2, stride=2)
-        self.layer4 = self._make_layer(256, 512, 2, stride=2)
+        self.layer1 = self.make_layer(64, 64, 2, stride=1)
+        self.layer2 = self.make_layer(64, 128, 2, stride=2)
+        self.layer3 = self.make_layer(128, 256, 2, stride=2)
+        # self.layer4 = self.make_layer(256, 512, 2, stride=2)
+        # self.layer5 = self.make_layer(512, 1024, 2, stride=2)
         self.avgpool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Linear(512, out_channels)
+        self.fc = nn.Linear(256, out_channels)
 
-    def _make_layer(self, in_channels, out_channels, num_blocks, stride):
+    @staticmethod
+    def make_layer(in_channels, out_channels, num_blocks, stride):
         layers = [BasicBlock1D(in_channels, out_channels, stride)]
         for _ in range(1, num_blocks):
             layers.append(BasicBlock1D(out_channels, out_channels, stride=1))
@@ -177,7 +178,8 @@ class ResNet1D(nn.Module):
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
-        x = self.layer4(x)
+        # x = self.layer4(x)
+        # x = self.layer5(x)
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
         x = self.fc(x)
@@ -276,3 +278,110 @@ class Simple_Opt_3(nn.Module):
     def forward(self, x):
         encoded = self.encode(x)
         return encoded
+
+
+class ResNet1DBiRNN(nn.Module):
+    def __init__(self, in_channels=8, resnet_out_channels=512,
+                 hidden_size=64, num_layers=3, out_channels=10,
+                 dropout=0.2, rnn_type='lstm'):
+        super().__init__()
+
+        # ResNet1D часть
+        self.resnet = nn.Sequential(
+            nn.Conv1d(in_channels, 64, kernel_size=7, stride=2, padding=3),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=3, stride=2, padding=1),
+            ResNet1D.make_layer(64, 64, 2, stride=1),
+            ResNet1D.make_layer(64, 128, 2, stride=2),
+            ResNet1D.make_layer(128, resnet_out_channels, 2, stride=2),
+            # ResNet1D.make_layer(256, resnet_out_channels, 2, stride=2),
+            nn.AdaptiveAvgPool1d(1)
+        )
+
+        # BiRNN часть
+        rnn_class = nn.LSTM if rnn_type == 'lstm' else nn.GRU if rnn_type == 'gru' else nn.RNN
+        self.rnn = rnn_class(
+            input_size=resnet_out_channels,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=dropout if num_layers > 1 else 0
+        )
+        self.fc = nn.Linear(hidden_size * 2, out_channels)
+        self.hidden_size = hidden_size
+
+    def forward(self, x):
+        # Применяем ResNet1D
+        x = self.resnet(x)  # [batch, resnet_out_channels, 1]
+
+        # Подготовка для RNN: [batch, seq_len=1, features]
+        x = x.permute(0, 2, 1)  # [batch, 1, resnet_out_channels]
+
+        # Применяем BiRNN
+        out, _ = self.rnn(x)
+
+        # Объединяем направления
+        out = torch.cat([out[:, -1, :self.hidden_size],
+                        out[:, 0, self.hidden_size:]], dim=1)
+
+        # Финальный классификатор
+        return self.fc(out)
+
+
+class BiRNNResNet1D(nn.Module):
+    def __init__(self, rnn_in_channels=8, rnn_hidden_size=64, rnn_layers=3,
+                 resnet_in_channels=128, resnet_out_channels=512, num_classes=10,
+                 rnn_dropout=0.2, rnn_type='lstm'):
+        super().__init__()
+
+        # BiRNN часть
+        rnn_class = nn.LSTM if rnn_type == 'lstm' else nn.GRU if rnn_type == 'gru' else nn.RNN
+        self.birnn = rnn_class(
+            input_size=rnn_in_channels,
+            hidden_size=rnn_hidden_size,
+            num_layers=rnn_layers,
+            batch_first=True,
+            bidirectional=True,
+            dropout=rnn_dropout if rnn_layers > 1 else 0
+        )
+
+        # Преобразование выхода BiRNN для ResNet1D
+        self.rnn_to_resnet = nn.Sequential(
+            nn.Linear(rnn_hidden_size * 2, resnet_in_channels),
+            nn.ReLU()
+        )
+
+        # ResNet1D часть
+        self.resnet = nn.Sequential(
+            nn.Conv1d(1, 64, kernel_size=7, stride=2, padding=3),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.MaxPool1d(kernel_size=3, stride=2, padding=1),
+            ResNet1D.make_layer(64, 64, 2),
+            ResNet1D.make_layer(64, 128, 2, stride=2),
+            ResNet1D.make_layer(128, 256, 2, stride=2),
+            ResNet1D.make_layer(256, resnet_out_channels, 2, stride=2),
+            nn.AdaptiveAvgPool1d(1)
+        )
+
+        self.fc = nn.Linear(resnet_out_channels, num_classes)
+
+    def forward(self, x):
+        # BiRNN обработка
+        rnn_out, _ = self.birnn(x)  # [batch, seq_len, hidden_size*2]
+
+        # Преобразование для ResNet1D
+        features = self.rnn_to_resnet(rnn_out)  # [batch, seq_len, resnet_in_channels]
+
+        # Подготовка для Conv1d (добавляем dimension канала)
+        features = features.unsqueeze(1)  # [batch, 1, seq_len, resnet_in_channels]
+        features = features.permute(0, 1, 3, 2)  # [batch, 1, resnet_in_channels, seq_len]
+        features = features.squeeze(1)  # [batch, resnet_in_channels, seq_len]
+
+        # ResNet1D обработка
+        resnet_out = self.resnet(features)
+        resnet_out = resnet_out.view(resnet_out.size(0), -1)
+
+        return self.fc(resnet_out)
