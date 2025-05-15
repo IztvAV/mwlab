@@ -1,6 +1,7 @@
 import os
 from mwlab.nn.scalers import MinMaxScaler
 from mwlab import TouchstoneDataset, TouchstoneLDataModule
+from mwlab.io.backends import RAMBackend
 
 from filters import CMTheoreticalDatasetGenerator
 from filters.codecs import MWFilterTouchstoneCodec
@@ -19,13 +20,14 @@ torch.set_float32_matmul_precision("medium")
 
 
 BATCH_SIZE = 64
-DATASET_SIZE = 1_00
+DATASET_SIZE = 1_000
 FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
 ENV_ORIGIN_DATA_PATH = os.getcwd() + f"\\FilterData\\{FILTER_NAME}\\origins_data"
 ENV_DATASET_PATH = os.getcwd() + f"\\FilterData\\{FILTER_NAME}\\datasets_data"
 
 
 def main():
+    backend = RAMBackend([])
     ds_gen = CMTheoreticalDatasetGenerator(
         path_to_origin_filter=ENV_ORIGIN_DATA_PATH,
         path_to_save_dataset=ENV_DATASET_PATH,
@@ -33,11 +35,11 @@ def main():
         pss_shifts_delta=PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
         cm_shifts_delta=CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=0.005),
         samplers_size=DATASET_SIZE,
-        save_s2p=False,
+        backend=backend
     )
     ds_gen.generate()
 
-    codec = MWFilterTouchstoneCodec.from_dataset(TouchstoneDataset(source=ds_gen.path_to_dataset, in_memory=True))
+    codec = MWFilterTouchstoneCodec.from_dataset(TouchstoneDataset(source=backend, in_memory=True))
     codec.exclude_keys(["f0", "bw", "N", "Q"])
     print(codec)
     # codec.y_channels = ['S1_1.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S2_1.imag', 'S2_2.imag']
@@ -48,7 +50,7 @@ def main():
     print("Количество каналов:", len(codec.y_channels))
 
     dm = TouchstoneLDataModule(
-        source=ds_gen.path_to_dataset,         # Путь к датасету
+        source=backend,         # Путь к датасету
         codec=codec,                   # Кодек для преобразования TouchstoneData → (x, y)
         batch_size=BATCH_SIZE,                 # Размер батча
         val_ratio=0.2,                 # Доля валидационного набора
