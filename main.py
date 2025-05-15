@@ -16,7 +16,7 @@ import models
 
 
 BATCH_SIZE = 64
-DATASET_SIZE = 1_000_000
+DATASET_SIZE = 100_000
 FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
 ENV_ORIGIN_DATA_PATH = os.getcwd() + f"\\FilterData\\{FILTER_NAME}\\origins_data"
 ENV_DATASET_PATH = os.getcwd() + f"\\FilterData\\{FILTER_NAME}\\datasets_data"
@@ -37,8 +37,9 @@ def main():
     codec = MWFilterTouchstoneCodec.from_dataset(TouchstoneDataset(source=ds_gen.path_to_dataset, in_memory=True))
     codec.exclude_keys(["f0", "bw", "N", "Q"])
     print(codec)
+    # codec.y_channels = []
     # codec.y_channels = ['S1_1.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S2_1.imag', 'S2_2.imag']
-    # codec.y_channels = ['S1_1.real', 'S2_1.real', 'S1_1.imag', 'S2_1.imag']
+    # codec.y_channels = ['S1_1.db', 'S1_2.db', 'S2_1.db', 'S2_2.db']
 
     # Исключаем из анализа ненужные x-параметры
     print("Каналы:", codec.y_channels)
@@ -51,7 +52,7 @@ def main():
         val_ratio=0.2,                 # Доля валидационного набора
         test_ratio=0.05,                # Доля тестового набора
         cache_size=0,
-        scaler_in=MinMaxScaler(dim=(0, 2), feature_range=(-1, 1)),                          # Скейлер для входных данных
+        scaler_in=MinMaxScaler(dim=(0, 2), feature_range=(0, 1)),                          # Скейлер для входных данных
         scaler_out=MinMaxScaler(dim=0, feature_range=(-0.5, 0.5)),  # Скейлер для выходных данных
         swap_xy=True,
         # Параметры базового датасета:
