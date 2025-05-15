@@ -226,6 +226,47 @@ class LeNet1D(nn.Module):
         return x
 
 
+class DenseBlock1D(nn.Module):
+    def __init__(self, in_channels, growth_rate, num_layers):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            self.layers.append(nn.Sequential(
+                nn.BatchNorm1d(in_channels + i * growth_rate),
+                nn.ReLU(),
+                nn.Conv1d(in_channels + i * growth_rate, growth_rate, kernel_size=3, padding=1)
+            ))
+
+    def forward(self, x):
+        features = [x]
+        for layer in self.layers:
+            new_features = layer(torch.cat(features, dim=1))
+            features.append(new_features)
+        return torch.cat(features, dim=1)
+
+
+class DenseNet1D(nn.Module):
+    def __init__(self, in_channels=8, growth_rate=32, num_classes=10):
+        super().__init__()
+        self.conv1 = nn.Conv1d(in_channels, 64, kernel_size=7, stride=2, padding=3)
+        self.block1 = DenseBlock1D(64, growth_rate, 6)
+        self.transition = nn.Sequential(
+            nn.BatchNorm1d(64 + 6*growth_rate),
+            nn.Conv1d(64 + 6*growth_rate, 128, kernel_size=1)
+        )
+        self.block2 = DenseBlock1D(128, growth_rate, 12)
+        self.avgpool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Linear(128 + 12*growth_rate, num_classes)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.block1(x)
+        x = self.transition(x)
+        x = self.block2(x)
+        x = self.avgpool(x)
+        return self.fc(x.view(x.size(0), -1))
+
+
 class Simple_Opt_3(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super(Simple_Opt_3, self).__init__()
@@ -234,7 +275,7 @@ class Simple_Opt_3(nn.Module):
         # Количество выходных каналов
 
         # --------------------------  1 conv-слой ---------------------------
-        self.conv1 = nn.Conv1d(in_channels=self.in_channels, out_channels=64, kernel_size=7, stride=1, padding='same')
+        self.conv1 = nn.Conv1d(in_channels=in_channels, out_channels=64, kernel_size=7, stride=1, padding='same')
         # --------------------------  2 conv-слой ---------------------------
         self.conv2 = nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same')
         # --------------------------  3 conv-слой ---------------------------
@@ -331,15 +372,15 @@ class ResNet1DBiRNN(nn.Module):
 
 
 class BiRNNResNet1D(nn.Module):
-    def __init__(self, rnn_in_channels=8, rnn_hidden_size=64, rnn_layers=3,
-                 resnet_in_channels=128, resnet_out_channels=512, num_classes=10,
+    def __init__(self, in_channels=8, rnn_hidden_size=64, rnn_layers=3,
+                 resnet_in_channels=128, resnet_out_channels=512, out_channels=10,
                  rnn_dropout=0.2, rnn_type='lstm'):
         super().__init__()
 
         # BiRNN часть
         rnn_class = nn.LSTM if rnn_type == 'lstm' else nn.GRU if rnn_type == 'gru' else nn.RNN
         self.birnn = rnn_class(
-            input_size=rnn_in_channels,
+            input_size=in_channels,
             hidden_size=rnn_hidden_size,
             num_layers=rnn_layers,
             batch_first=True,
@@ -355,18 +396,18 @@ class BiRNNResNet1D(nn.Module):
 
         # ResNet1D часть
         self.resnet = nn.Sequential(
-            nn.Conv1d(1, 64, kernel_size=7, stride=2, padding=3),
+            nn.Conv1d(resnet_in_channels, 64, kernel_size=7, stride=2, padding=3),
             nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.MaxPool1d(kernel_size=3, stride=2, padding=1),
-            ResNet1D.make_layer(64, 64, 2),
+            ResNet1D.make_layer(64, 64, 2, stride=1),
             ResNet1D.make_layer(64, 128, 2, stride=2),
             ResNet1D.make_layer(128, 256, 2, stride=2),
             ResNet1D.make_layer(256, resnet_out_channels, 2, stride=2),
             nn.AdaptiveAvgPool1d(1)
         )
 
-        self.fc = nn.Linear(resnet_out_channels, num_classes)
+        self.fc = nn.Linear(resnet_out_channels, out_channels)
 
     def forward(self, x):
         # BiRNN обработка
