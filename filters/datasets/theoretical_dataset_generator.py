@@ -48,6 +48,7 @@ class CMTheoreticalDatasetGenerator:
                  pss_origin: PSShift,
                  pss_shifts_delta: PSShift,
                  samplers_size: int,
+                 samplers_type: SamplerTypes=SamplerTypes.SAMPLER_LATIN_HYPERCUBE,
                  resample_scale: int = 301,  # Значение для ресемплинга
                  f_start: float|None = None,  # Полоса откуда обрезаем
                  f_stop: float|None = None,  # Полоса до которой обрезаем
@@ -80,21 +81,41 @@ class CMTheoreticalDatasetGenerator:
         ])
         tds_transformed = TouchstoneDataset(source=path_to_origin_filter, s_tf=self._y_transform)
         self._origin_filter = MWFilter.from_touchstone_dataset_item(tds_transformed[0])
+        self._samplers = self._create_samplers(samplers_type, samplers_size, cm_shifts_delta,
+                                               pss_origin, pss_shifts_delta)
+
+    def _create_samplers(self, samplers_type: SamplerTypes, samplers_size: int,
+                         cm_shifts_delta, pss_origin, pss_shifts_delta) -> CMTheoreticalDatasetGeneratorSamplers:
         m_min, m_max = self.create_min_max_matrices(origin_matrix=self.origin_filter.coupling_matrix,
-                                               deltas=cm_shifts_delta)
+                                                    deltas=cm_shifts_delta)
         phase_shifts_min, phase_shifts_max = self.create_min_max_phase_shifts(
             origin_shifts=pss_origin, deltas=pss_shifts_delta)
 
-        cms_factors = Sampler.lhs(start=CouplingMatrix(matrix=m_min).factors, stop=CouplingMatrix(matrix=m_max).factors,
-                    num=samplers_size)
-        cm_sampler_space = np.zeros(shape=(len(cms_factors), *self._origin_filter.coupling_matrix.matrix.shape), dtype=float)
+        if samplers_type == SamplerTypes.SAMPLER_LATIN_HYPERCUBE:
+            cms_factors = Sampler.lhs(start=CouplingMatrix(matrix=m_min).factors, stop=CouplingMatrix(matrix=m_max).factors,
+                                      num=samplers_size)
+            pss_sampler = Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=samplers_size)
+        elif samplers_type == SamplerTypes.SAMPLER_STD:
+            cms_factors = Sampler.std(start=CouplingMatrix(matrix=m_min).factors,
+                                      stop=CouplingMatrix(matrix=m_max).factors,
+                                      num=samplers_size)
+            pss_sampler = Sampler.Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=samplers_size)
+        elif sampler_type == SamplerTypes.SAMPLER_UNIFORM:
+            cms_factors = Sampler.uniform(start=CouplingMatrix(matrix=m_min).factors,
+                                      stop=CouplingMatrix(matrix=m_max).factors,
+                                      num=samplers_size)
+            pss_sampler = Sampler.Sampler.uniform(start=phase_shifts_min, stop=phase_shifts_max, num=samplers_size)
+        else:
+            raise ValueError(f"Неизвестный тип сэмплеров {samplers_type}")
+        cm_sampler_space = np.zeros(shape=(len(cms_factors), *self._origin_filter.coupling_matrix.matrix.shape),
+                                    dtype=float)
         for cm_factors, idx in tuple(zip(cms_factors, range(len(cms_factors)))):
-            cm_sampler_space[idx] = CouplingMatrix.from_factors(cm_factors, self._origin_filter.coupling_matrix.links, self._origin_filter.order+2)
-        self._samplers = CMTheoreticalDatasetGeneratorSamplers(
-            cms=Sampler(space=cm_sampler_space, type=SamplerTypes.SAMPLER_LATIN_HYPERCUBE),
-            pss=Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=samplers_size)
+            cm_sampler_space[idx] = CouplingMatrix.from_factors(cm_factors, self._origin_filter.coupling_matrix.links,
+                                                                self._origin_filter.order + 2)
+        return CMTheoreticalDatasetGeneratorSamplers(
+            cms=Sampler(space=cm_sampler_space, type=samplers_type),
+            pss=pss_sampler
         )
-
 
     @staticmethod
     def create_min_max_matrices(origin_matrix: CouplingMatrix, deltas: CMShifts):
