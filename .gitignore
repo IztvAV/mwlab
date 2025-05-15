@@ -29,3 +29,4 @@ tests/__pycache__/
 
 filters/lightning_logs
 filters/FilterData
+filters/saved_models

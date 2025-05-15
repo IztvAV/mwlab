@@ -19,7 +19,7 @@ import pathlib
 from torch.utils.data import Dataset
 from typing import Callable, Optional
 
-from mwlab.io.backends import StorageBackend, FileBackend, HDF5Backend
+from mwlab.io.backends import StorageBackend, FileBackend, HDF5Backend, RAMBackend
 
 def get_backend(path: pathlib.Path, **backend_kwargs) -> StorageBackend:
     """
