@@ -94,6 +94,13 @@ class StdScaler(_Base):
         super().__init__(dim, eps)
         self.unbiased = bool(unbiased)
 
+        # сохраняем init-параметры для корректной сериализации
+        self._init_kwargs = {
+            "dim": dim,
+            "eps": eps,
+            "unbiased": unbiased
+        }
+
         # «пустые» буферы-заглушки; реальные значения появятся после fit()
         self.register_buffer("mean", torch.tensor(0.))
         self.register_buffer("std", torch.tensor(1.))
@@ -162,6 +169,13 @@ class MinMaxScaler(_Base):
         a, b = map(float, feature_range)
         if b <= a:
             raise ValueError("feature_range must satisfy max > min")
+
+        # сохраняем init-параметры для корректной сериализации
+        self._init_kwargs = {
+            "dim": dim,
+            "feature_range": feature_range,
+            "eps": eps,
+        }
 
         self.min_val = a
         self.max_val = b
