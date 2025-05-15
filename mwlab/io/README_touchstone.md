@@ -19,7 +19,7 @@
 ```python
 from mwlab.io.touchstone import TouchstoneData
 
-ts = TouchstoneData.load("Data/sample.s2p")
+ts = TouchstoneData.load("FilterData/sample.s2p")
 print(ts.params)     # параметры из "! Parameters = {...}"
 print(ts.network)    # skrf.Network
 ```

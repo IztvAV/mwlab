@@ -35,9 +35,9 @@ def sample_dir(repo_root: pathlib.Path) -> pathlib.Path:
     """
     Каталог с ~200 .s2p для более «тяжёлых» тестов.
     """
-    folder = repo_root / "Data" / "Filter12"
+    folder = repo_root / "FilterData" / "Filter12"
     if not folder.exists():
-        pytest.xfail("Каталог Data/Filter12 не найден")
+        pytest.xfail("Каталог FilterData/Filter12 не найден")
     return folder
 
 

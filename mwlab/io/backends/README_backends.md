@@ -27,7 +27,7 @@ class StorageBackend:
 ```python
 from mwlab.io.backends import FileBackend
 
-backend = FileBackend(root="Data/Filter12")
+backend = FileBackend(root="FilterData/Filter12")
 print(len(backend))         # количество файлов
 ts = backend.read(0)        # TouchstoneData
 ```

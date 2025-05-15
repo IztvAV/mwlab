@@ -39,7 +39,7 @@ class GRU(nn.Module):
 
 
 class BiRNN(nn.Module):
-    def __init__(self, in_channels=8, hidden_size=64, num_layers=3, out_channels=10, rnn_type='lstm'):
+    def __init__(self, in_channels=8, hidden_size=64, num_layers=3, out_channels=10, droupout=0.2, rnn_type='lstm'):
         super().__init__()
         rnn_class = nn.LSTM if rnn_type == 'lstm' else nn.GRU if rnn_type == 'gru' else nn.RNN
         self.rnn = rnn_class(
@@ -47,7 +47,8 @@ class BiRNN(nn.Module):
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
-            bidirectional=True
+            bidirectional=True,
+            dropout=droupout
         )
         self.fc = nn.Linear(hidden_size * 2, out_channels)
         self.hidden_size = hidden_size
@@ -60,24 +61,29 @@ class BiRNN(nn.Module):
 
 
 class Seq2Seq(nn.Module):
-    def __init__(self, input_size=8, hidden_size=64, output_size=10):
+    def __init__(self, in_channels=8, hidden_size=64, out_channels=10):
         super().__init__()
-        self.encoder = nn.LSTM(input_size, hidden_size, batch_first=True)
+        self.encoder = nn.LSTM(in_channels, hidden_size, batch_first=True)
         self.decoder = nn.LSTM(hidden_size, hidden_size, batch_first=True)
-        self.fc = nn.Linear(hidden_size, output_size)
+        self.fc = nn.Linear(hidden_size, out_channels)
+        self.proj = nn.Linear(out_channels, hidden_size)  # Проекция обратно в hidden_size
+        self.hidden_size = hidden_size
 
     def forward(self, x, target_len=1):
         # Кодирование
         _, (hidden, cell) = self.encoder(x)
 
-        # Декодирование (авторегрессионное)
-        decoder_input = torch.zeros(x.size(0), 1, x.size(2)).to(x.device)
+        # Инициализация декодера
+        decoder_input = torch.zeros(x.size(0), 1, self.hidden_size).to(x.device)
         outputs = []
+
         for _ in range(target_len):
             out, (hidden, cell) = self.decoder(decoder_input, (hidden, cell))
-            out = self.fc(out.squeeze(1))
+            out = self.fc(out.squeeze(1))  # [batch, out_channels]
             outputs.append(out)
-            decoder_input = out.unsqueeze(1).unsqueeze(2)
+
+            # Проецируем выход обратно в пространство скрытого состояния
+            decoder_input = self.proj(out.unsqueeze(1))  # [batch, 1, hidden_size]
 
         return torch.stack(outputs, dim=1)
 
