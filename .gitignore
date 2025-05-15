@@ -28,5 +28,5 @@ Thumbs.db
 tests/__pycache__/
 
 filters/lightning_logs
-filters/FilterData
+filters/FilterData/*/datasets_data_*
 filters/saved_models

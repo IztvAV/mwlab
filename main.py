@@ -4,7 +4,7 @@ from mwlab import TouchstoneDataset, TouchstoneLDataModule
 
 from filters import CMTheoreticalDatasetGenerator
 from filters.codecs import MWFilterTouchstoneCodec
-from filters.mwfilter_lightning import MWFilterBaseLModule
+from filters.mwfilter_lightning import MWFilterBaseLModule, MWFilterBaseLMWithMetrics
 
 from filters.datasets.theoretical_dataset_generator import CMShifts, PSShift
 
@@ -110,7 +110,7 @@ def main():
     #                      rnn_type='lstm')
 
 
-    lit_model = MWFilterBaseLModule(
+    lit_model = MWFilterBaseLMWithMetrics(
         model=model,  # Наша нейросетевая модель
         swap_xy=True,
         scaler_in=dm.scaler_in,  # Скейлер для входных данных
@@ -146,17 +146,19 @@ def main():
     print(f"Best model saved into: {checkpoint.best_model_path}")
 
     # Загружаем лучшую модель
-    inference_model = MWFilterBaseLModule.load_from_checkpoint(
+    inference_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
         checkpoint_path=checkpoint.best_model_path,
-        model=model,
+        model=models.ResNet1D(in_channels=len(codec.y_channels),
+                         out_channels=len(ds_gen.origin_filter.coupling_matrix.links)),
     ).to(lit_model.device)
     orig_fil, pred_fil = inference_model.predict_for(dm, idx=0)
     inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
 
     # Загружаем последнюю модель
-    last_model = MWFilterBaseLModule.load_from_checkpoint(
+    last_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
         checkpoint_path="saved_models/last.ckpt",
-        model=model,
+        model=models.ResNet1D(in_channels=len(codec.y_channels),
+                         out_channels=len(ds_gen.origin_filter.coupling_matrix.links)),
     ).to(lit_model.device)
     orig_fil, pred_fil = last_model.predict_for(dm, idx=0)
     last_model.plot_origin_vs_prediction(orig_fil, pred_fil)
