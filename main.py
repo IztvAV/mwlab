@@ -13,10 +13,13 @@ import lightning as L
 
 from torch import nn
 import models
+import torch
+
+torch.set_float32_matmul_precision("medium")
 
 
 BATCH_SIZE = 64
-DATASET_SIZE = 100_000
+DATASET_SIZE = 1_000
 FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
 ENV_ORIGIN_DATA_PATH = os.getcwd() + f"\\FilterData\\{FILTER_NAME}\\origins_data"
 ENV_DATASET_PATH = os.getcwd() + f"\\FilterData\\{FILTER_NAME}\\datasets_data"
@@ -55,6 +58,7 @@ def main():
         scaler_in=MinMaxScaler(dim=(0, 2), feature_range=(0, 1)),                          # Скейлер для входных данных
         scaler_out=MinMaxScaler(dim=0, feature_range=(-0.5, 0.5)),  # Скейлер для выходных данных
         swap_xy=True,
+        num_workers=4,
         # Параметры базового датасета:
         base_ds_kwargs={
             # "x_tf": x_transform,       # Предобработка входных данных
@@ -77,13 +81,23 @@ def main():
     print(f"Размер валидационного набора: {len(dm.val_ds)}")
     print(f"Размер тестового набора: {len(dm.test_ds)}")
 
-    model = models.ResNet1D(in_channels=len(codec.y_channels),
-                         out_channels=len(ds_gen.origin_filter.coupling_matrix.links))
+    # model = models.ResNet1D(in_channels=len(codec.y_channels),
+    #                      out_channels=len(ds_gen.origin_filter.coupling_matrix.links))
+    model = models.ResNet1DBiRNN(in_channels=len(codec.y_channels),
+                                 out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
+                                 resnet_out_channels=256,
+                                 hidden_size=512,
+                                 num_layers=5,
+                                 dropout=0.0,
+                                 rnn_type='lstm'
+                                 )
     # model = models.BiRNN(in_channels=301,
     #                      num_layers=5,
     #                      out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
-    #                      hidden_size=512,
-    #                      droupout=0.25)
+    #                      hidden_size=1024,
+    #                      droupout=0.0,
+    #                      rnn_type='lstm')
+
 
     lit_model = MWFilterBaseLModule(
         model=model,  # Наша нейросетевая модель
