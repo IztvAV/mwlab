@@ -12,5 +12,6 @@ mwlab.io.backends
 from .base import StorageBackend
 from .file_backend import FileBackend
 from .hdf5_backend import HDF5Backend
+from .in_memory import RAMBackend, SyntheticBackend
 
-__all__ = ["StorageBackend", "FileBackend", "HDF5Backend"]
+__all__ = ["StorageBackend", "FileBackend", "HDF5Backend", "RAMBackend", "SyntheticBackend"]
