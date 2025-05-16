@@ -114,7 +114,7 @@ class CMTheoreticalDatasetGenerator:
                                       stop=CouplingMatrix(matrix=m_max).factors,
                                       num=samplers_size)
             pss_sampler = Sampler.Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=samplers_size)
-        elif sampler_type == SamplerTypes.SAMPLER_UNIFORM:
+        elif samplers_type == SamplerTypes.SAMPLER_UNIFORM:
             cms_factors = Sampler.uniform(start=CouplingMatrix(matrix=m_min).factors,
                                       stop=CouplingMatrix(matrix=m_max).factors,
                                       num=samplers_size)
