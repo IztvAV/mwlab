@@ -426,3 +426,98 @@ class BiRNNResNet1D(nn.Module):
         resnet_out = resnet_out.view(resnet_out.size(0), -1)
 
         return self.fc(resnet_out)
+
+
+class SEBlock1D(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1)
+        return x * y.expand_as(x)
+
+
+class SEBasicBlock1D(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1, reduction=16):
+        super().__init__()
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm1d(out_channels)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm1d(out_channels)
+        self.se = SEBlock1D(out_channels, reduction)
+
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm1d(out_channels)
+            )
+
+    def forward(self, x):
+        residual = self.shortcut(x)
+
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.se(out)
+
+        out += residual
+        return F.relu(out)
+
+
+class SENet1D(nn.Module):
+    def __init__(self, in_channels=1, num_classes=10,
+                 block_config=[2, 2, 2, 2], init_channels=64,
+                 reduction=16, dropout=0.2):
+        super().__init__()
+
+        self.features = nn.Sequential(
+            nn.Conv1d(in_channels, init_channels, kernel_size=7, stride=2, padding=3, bias=False),
+            nn.BatchNorm1d(init_channels),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
+        )
+
+        channels = init_channels
+        self.layers = nn.ModuleList()
+        for i, num_blocks in enumerate(block_config):
+            layer = self._make_layer(channels, channels * (2 ** i), num_blocks, stride=1 if i == 0 else 2,
+                                     reduction=reduction)
+            self.layers.append(layer)
+            channels *= 2
+
+        self.avgpool = nn.AdaptiveAvgPool1d(1)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(channels // 2, num_classes)  # channels//2 из-за последнего удвоения
+
+        # Инициализация весов
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def _make_layer(self, in_channels, out_channels, blocks, stride, reduction):
+        layers = []
+        layers.append(SEBasicBlock1D(in_channels, out_channels, stride, reduction))
+        for _ in range(1, blocks):
+            layers.append(SEBasicBlock1D(out_channels, out_channels, 1, reduction))
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.features(x)
+        for layer in self.layers:
+            x = layer(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.dropout(x)
+        return self.fc(x)
