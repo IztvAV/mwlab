@@ -45,6 +45,17 @@ class Sampler(Iterable):
     >>> sampler.scaler = scaler
     >>> print(sampler.samples())
 
+    Из Sampler1d
+    >>> seed = np.random.RandomState(42)
+    >>> s1 = Sampler1d.hypercube(10, seed=seed)
+    >>> s2 = Sampler1d.hypercube(10, seed=seed)
+    >>> s3 = Sampler1d.hypercube(10, seed=seed)
+    >>>
+    >>> print(s1.samples())
+    >>>
+    >>> sampler = Sampler.from_sampler1d([s1, s2, s3])
+    >>> print(sampler.samples())
+
     """
 
     def __init__(self, iterator_factory, scaler:Scaler=None):
@@ -62,6 +73,10 @@ class Sampler(Iterable):
     @staticmethod
     def from_iterable(values: Iterable, scaler:Scaler=None) -> "Sampler":
         return Sampler(lambda: values.__iter__(), scaler=scaler)
+
+    @staticmethod
+    def from_sampler1d(samplers: list["Sampler1d"]):
+        return Sampler(lambda: _SamplerNdIterator(samplers=samplers))
 
     @staticmethod
     def hypercube(num_factors, num_samples, seed:int=None, scaler:Scaler=None):
@@ -82,7 +97,9 @@ class Sampler1d(Iterable):
         self.scaler = scaler
 
     def __iter__(self):
-        return self.iterator_factory()
+        if self.scaler is None:
+            return self.iterator_factory()
+        return _ScalingIterator(scaler=self.scaler, iterator=self.iterator_factory())
 
     def samples(self):
         return np.fromiter(self, float)
@@ -188,3 +205,19 @@ class _RandomSample1dIterator(SampleIterator):
 
     def next_element(self):
         return self.rng.random()
+
+
+class _SamplerNdIterator:
+    def __init__(self, samplers: list[Sampler1d]):
+        self.iters = [s.__iter__() for s in samplers]
+        self.n = len(samplers)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        values = np.zeros(self.n)
+        for i in range(self.n):
+            values[i] = self.iters[i].__next__()
+        return values
+
