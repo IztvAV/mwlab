@@ -135,6 +135,11 @@ class Sampler1d(Iterable):
 
     @staticmethod
     def uniform(len: int, endpoint:bool=True, scaler:Scaler=None) -> "Sampler1d":
+        """
+        Объединение нескольких Sampler1d.uniform даст семплы, расположенные на главной диагонали
+        пространства параметров, что вроде как некорректно.
+        Потом как-нибудь напишу нормальный многомерный uniform sampler.
+        """
         return Sampler1d.from_iterable(np.linspace(0, 1, num=len, endpoint=endpoint), scaler=scaler)
 
 
