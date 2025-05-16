@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 
 class LSTM(nn.Module):
@@ -159,8 +160,8 @@ class ResNet1D(nn.Module):
         self.maxpool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
         self.layer1 = self.make_layer(64, 64, 1, stride=1)
         self.layer2 = self.make_layer(64, 128, 2, stride=2)
-        self.layer3 = self.make_layer(128, 256, 2, stride=2)
-        self.layer4 = self.make_layer(256, 512, 3, stride=2)
+        self.layer3 = self.make_layer(128, 256, 3, stride=2)
+        self.layer4 = self.make_layer(256, 512, 1, stride=2)
         self.layer5 = self.make_layer(512, 1024, 2, stride=2)
         self.avgpool = nn.AdaptiveAvgPool1d(1)
         self.fc = nn.Linear(512, out_channels)
@@ -184,6 +185,148 @@ class ResNet1D(nn.Module):
         x = x.view(x.size(0), -1)
         x = self.fc(x)
         return x
+
+
+
+class Bottleneck1D(nn.Module):
+    expansion = 4
+
+    def __init__(self, in_channels, out_channels, stride=1, dilation=1):
+        super().__init__()
+        mid_channels = out_channels // self.expansion
+
+        self.conv1 = nn.Conv1d(in_channels, mid_channels, kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm1d(mid_channels)
+
+        self.conv2 = nn.Conv1d(mid_channels, mid_channels, kernel_size=3,
+                               stride=stride, padding=dilation,
+                               dilation=dilation, bias=False)
+        self.bn2 = nn.BatchNorm1d(mid_channels)
+
+        self.conv3 = nn.Conv1d(mid_channels, out_channels, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm1d(out_channels)
+
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels,
+                          kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm1d(out_channels)
+            )
+
+        self.dropout = nn.Dropout1d(0.2)
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = F.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+        out += self.shortcut(x)
+        out = F.relu(out)
+        return self.dropout(out)
+
+
+class RobustAttention(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.max_pool = nn.AdaptiveMaxPool1d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction),
+            nn.ReLU(),
+            nn.Linear(channels // reduction, channels),
+            nn.Tanh()
+        )
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self, x):
+        avg_out = self.fc(self.avg_pool(x).squeeze(-1))
+        max_out = self.fc(self.max_pool(x).squeeze(-1))
+        out = avg_out + max_out
+        return self.dropout(out.unsqueeze(-1)) * x
+
+
+class SEAttention(nn.Module):
+    def __init__(self, base_channels):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Conv1d(base_channels * 8, base_channels * 8 // 16, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv1d(base_channels * 8 // 16, base_channels * 8, kernel_size=1),
+            nn.Tanh()
+        )
+
+    def forward(self, x):
+        y = self.fc(x)
+        return y
+
+
+class ImprovedResNet1D(nn.Module):
+    def __init__(self, in_channels=8, out_channels=10, base_channels=64,
+                 layer_blocks=[3, 4, 6, 3], dilation_factors=[1, 2, 4]):
+        super().__init__()
+
+        self.conv1 = nn.Conv1d(in_channels, base_channels, kernel_size=7,
+                               stride=2, padding=3, bias=False)
+        self.bn1 = nn.BatchNorm1d(base_channels)
+        self.maxpool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
+
+        self.layer1 = ResNet1D.make_layer(base_channels, base_channels, num_blocks=layer_blocks[0], stride=1)
+        self.layer2 = ResNet1D.make_layer(base_channels, base_channels*2, num_blocks=layer_blocks[1], stride=2)
+        self.layer3 = ResNet1D.make_layer(base_channels*2, base_channels*4, num_blocks=layer_blocks[2], stride=2)
+        self.layer4 = ResNet1D.make_layer(base_channels*4, base_channels*8, num_blocks=layer_blocks[3], stride=2)
+        # self.layer1 = self._make_layer(base_channels, base_channels,
+        #                                layer_blocks[0], stride=1,
+        #                                dilation=dilation_factors[0])
+        # self.layer2 = self._make_layer(base_channels, base_channels * 2,
+        #                                layer_blocks[1], stride=2,
+        #                                dilation=dilation_factors[1])
+        # self.layer3 = self._make_layer(base_channels * 2, base_channels * 4,
+        #                                layer_blocks[2], stride=2,
+        #                                dilation=dilation_factors[2])
+        # self.layer4 = self._make_layer(base_channels * 4, base_channels * 8,
+        #                                layer_blocks[3], stride=2,
+        #                                dilation=max(dilation_factors))
+
+        self.attention = RobustAttention(base_channels*8)
+        self.dropout = nn.Dropout(0.5)
+
+        self.avgpool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Linear(base_channels * 8, out_channels)
+
+        # Инициализация весов
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def _make_layer(self, in_channels, out_channels, blocks, stride, dilation):
+        layers = []
+        layers.append(Bottleneck1D(in_channels, out_channels, stride, dilation))
+        for _ in range(1, blocks):
+            layers.append(Bottleneck1D(out_channels, out_channels,
+                                       dilation=dilation))
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+
+        # Attention mechanism
+        # att = self.attention(x)
+        # x = x * att
+
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        y = self.fc(x)
+        return y
 
 
 class LeNet1D(nn.Module):
@@ -251,12 +394,12 @@ class DenseNet1D(nn.Module):
         self.conv1 = nn.Conv1d(in_channels, 64, kernel_size=7, stride=2, padding=3)
         self.block1 = DenseBlock1D(64, growth_rate, 6)
         self.transition = nn.Sequential(
-            nn.BatchNorm1d(64 + 6*growth_rate),
-            nn.Conv1d(64 + 6*growth_rate, 128, kernel_size=1)
+            nn.BatchNorm1d(64 + 6 * growth_rate),
+            nn.Conv1d(64 + 6 * growth_rate, 128, kernel_size=1)
         )
         self.block2 = DenseBlock1D(128, growth_rate, 12)
         self.avgpool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Linear(128 + 12*growth_rate, num_classes)
+        self.fc = nn.Linear(128 + 12 * growth_rate, num_classes)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -306,7 +449,7 @@ class Simple_Opt_3(nn.Module):
             nn.ReLU(),
             nn.Linear(1024, 512),
             nn.ReLU(),
-            nn.Linear(512, out_channels), # N - количество ненулевых элементов матрицы связи
+            nn.Linear(512, out_channels),  # N - количество ненулевых элементов матрицы связи
             nn.Tanh()
         )
 
@@ -365,7 +508,7 @@ class ResNet1DBiRNN(nn.Module):
 
         # Объединяем направления
         out = torch.cat([out[:, -1, :self.hidden_size],
-                        out[:, 0, self.hidden_size:]], dim=1)
+                         out[:, 0, self.hidden_size:]], dim=1)
 
         # Финальный классификатор
         return self.fc(out)
