@@ -37,9 +37,9 @@ class CMTheoreticalDatasetGeneratorSamplers:
     pss: Sampler
 
 
-GET_S2P_FILENAME_FOR_INDEX = lambda path, idx: path + f"\\{idx:04d}.s2p"
-GET_HDF5_FILENAME = lambda path: path + f"\\Dataset.h5"
-GET_PICKLE_FILENAME = lambda path: path + f"\\Dataset.pkl"
+GET_S2P_FILENAME_FOR_INDEX = lambda path, idx: os.path.join(path, f"\\{idx:04d}.s2p")
+GET_HDF5_FILENAME = lambda path: os.path.join(path, "Dataset.h5")
+GET_PICKLE_FILENAME = lambda path: os.path.join(path, "Dataset.pkl")
 
 
 class CMTheoreticalDatasetGenerator:

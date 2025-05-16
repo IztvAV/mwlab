@@ -20,10 +20,10 @@ torch.set_float32_matmul_precision("medium")
 
 
 BATCH_SIZE = 64
-DATASET_SIZE = 1_000
+DATASET_SIZE = 10_000
 FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
-ENV_ORIGIN_DATA_PATH = os.getcwd() + f"\\FilterData\\{FILTER_NAME}\\origins_data"
-ENV_DATASET_PATH = os.getcwd() + f"\\FilterData\\{FILTER_NAME}\\datasets_data"
+ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "FilterData", FILTER_NAME, "origins_data")
+ENV_DATASET_PATH = os.path.join(os.getcwd(), "FilterData", FILTER_NAME, "datasets_data")
 
 
 def main():
@@ -59,7 +59,7 @@ def main():
         scaler_in=MinMaxScaler(dim=(0, 2), feature_range=(0, 1)),                          # Скейлер для входных данных
         scaler_out=MinMaxScaler(dim=0, feature_range=(-0.5, 0.5)),  # Скейлер для выходных данных
         swap_xy=True,
-        num_workers=4,
+        num_workers=0,
         # Параметры базового датасета:
         base_ds_kwargs={
             "in_memory": True
@@ -122,7 +122,7 @@ def main():
         scheduler_cfg={"name": "StepLR", "step_size": 20, "gamma": 0.5},
         loss_fn=nn.MSELoss()
     )
-    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=15, mode="min", min_delta=0.00001)
+    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min", min_delta=0.00001)
     checkpoint = L.pytorch.callbacks.ModelCheckpoint(monitor="val_loss", dirpath="saved_models/"+FILTER_NAME,
                                                      filename="best-{epoch}-{val_loss:.5f}",
                                                      mode="min",

@@ -383,4 +383,4 @@ class MWFilter(rf.Network):
         if torch.cuda.is_available():
             return RespM2_gpu(M, f0, FBW, Q, frange, NRNlist, Rs, Rl, PSs)
         else:
-            return RespM2_cpu(M, f0, FBW, Q, frange, NRNlist, Rs, Rl, PSs)
+            return RespM2_gpu(M, f0, FBW, Q, frange, NRNlist, Rs, Rl, PSs, device='cpu')
