@@ -381,6 +381,7 @@ class MWFilter(rf.Network):
             return Slist
 
         if torch.cuda.is_available():
-            return RespM2_gpu(M, f0, FBW, Q, frange, NRNlist, Rs, Rl, PSs)
+            """ Так быстрее """
+            return RespM2_gpu(M, f0, FBW, Q, frange, NRNlist, Rs, Rl, PSs, device='cpu')
         else:
             return RespM2_gpu(M, f0, FBW, Q, frange, NRNlist, Rs, Rl, PSs, device='cpu')
