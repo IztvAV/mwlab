@@ -84,31 +84,20 @@ def main():
     #                      out_channels=len(ds_gen.origin_filter.coupling_matrix.links))
     # model = models.ResNet1D(in_channels=len(codec.y_channels),
     #                      out_channels=len(ds_gen.origin_filter.coupling_matrix.links))
-    model = models.ImprovedResNet1D(in_channels=len(codec.y_channels),
-                                    out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
-                                    layer_blocks=[1, 2, 4, 1],
-                                    dilation_factors=[1, 1, 1],
-                                    base_channels=64)
-    # model = models.ResNet1DBiRNN(in_channels=len(codec.y_channels),
-    #                              out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
-    #                              resnet_out_channels=256,
-    #                              hidden_size=256,
-    #                              num_layers=2,
-    #                              dropout=0.0,
-    #                              rnn_type='gru'
-    #                              )
+    model = models.ResNeXt1D(in_channels=len(codec.y_channels),
+                             out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
+                             cardinality=16,
+                             base_width=4)
+    # model = models.ResNetRNN1D(in_channels=len(codec.y_channels),
+    #                            out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
+    #                            resnet_hidden_size=len(ds_gen.origin_filter.coupling_matrix.links),
+    #                            rnn_hidden_size=32,
+    #                            rnn_type='lstm',
+    #                            rnn_layers=1,
+    #                            bidirectional=False)
     # model = models.DenseNet1D(in_channels=len(codec.y_channels),
     #                           growth_rate=48,
     #                           num_classes=len(ds_gen.origin_filter.coupling_matrix.links))
-    # # model = models.BiRNNResNet1D(in_channels=301,
-    #                              out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
-    #                              rnn_hidden_size=256,
-    #                              rnn_layers=1,
-    #                              rnn_dropout=0,
-    #                              rnn_type='lstm',
-    #                              resnet_in_channels=32,
-    #                              resnet_out_channels=256
-    #                              )
     # model = models.BiRNN(in_channels=301,
     #                      num_layers=5,
     #                      out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
@@ -122,17 +111,17 @@ def main():
         scaler_in=dm.scaler_in,  # Скейлер для входных данных
         scaler_out=dm.scaler_out,  # Скейлер для выходных данных
         codec=codec,  # Кодек для преобразования данных
-        # optimizer_cfg={"name": "Adam", "lr": 1e-2, "weight_decay": 1e-2},  # Конфигурация оптимизатора
-        # scheduler_cfg={"name": "StepLR", "step_size": 20, "gamma": 0.8},
+        optimizer_cfg={"name": "Adam", "lr": 1e-2},  # Конфигурация оптимизатора
+        scheduler_cfg={"name": "StepLR", "step_size": 20, "gamma": 0.5},
         # optimizer_cfg={"name": "SGD", "lr": 0.1, "momentum": 0.99, "nesterov": True},
         # scheduler_cfg={"name": "CosineAnnealingWarmRestarts", "T_0": 4, "T_mult": 2, "eta_min": 1e-5},
-        optimizer_cfg={"name": "AdamW", "lr": 0.01},
-        scheduler_cfg={"name": "OneCycleLR", "max_lr": 1e-2, "epochs": 5, "steps_per_epoch": len(dm.train_ds)},
+        # optimizer_cfg={"name": "AdamW", "lr": 3e-4},
+        # scheduler_cfg={"name": "OneCycleLR", "max_lr": 3e-3, "epochs": 50, "steps_per_epoch": len(dm.train_ds), "pct_start": 0.2},
         loss_fn=nn.MSELoss()
     )
 
 
-    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min", min_delta=0.00001)
+    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=10, mode="min", min_delta=0.00001)
     checkpoint = L.pytorch.callbacks.ModelCheckpoint(monitor="val_loss", dirpath="saved_models/"+FILTER_NAME,
                                                      filename="best-{epoch}-{val_loss:.5f}",
                                                      mode="min",
@@ -160,22 +149,20 @@ def main():
     # Загружаем лучшую модель
     inference_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
         checkpoint_path=checkpoint.best_model_path,
-        model=models.ResNet1D(in_channels=len(codec.y_channels),
-                         out_channels=len(ds_gen.origin_filter.coupling_matrix.links)),
+        model=model
     ).to(lit_model.device)
-    orig_fil, pred_fil = inference_model.predict_for(dm, idx=0)
+    orig_fil, pred_fil = inference_model.predict(dm, idx=0)
     inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
 
     # Загружаем последнюю модель
     last_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
         checkpoint_path="saved_models/last.ckpt",
-        model=models.ResNet1D(in_channels=len(codec.y_channels),
-                         out_channels=len(ds_gen.origin_filter.coupling_matrix.links)),
+        model=model
     ).to(lit_model.device)
-    orig_fil, pred_fil = last_model.predict_for(dm, idx=0)
+    orig_fil, pred_fil = last_model.predict(dm, idx=0)
     last_model.plot_origin_vs_prediction(orig_fil, pred_fil)
 
-    orig_fil, pred_fil = lit_model.predict_for(dm, idx=0)
+    orig_fil, pred_fil = lit_model.predict(dm, idx=0)
     lit_model.plot_origin_vs_prediction(orig_fil, pred_fil)
     plt.show()
 
