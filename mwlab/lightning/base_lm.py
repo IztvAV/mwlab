@@ -322,7 +322,7 @@ class BaseLModule(L.LightningModule):
         return self.codec.decode_s(y_t[0])
 
     @torch.no_grad()
-    def predict_x(self, net: rf.Network) -> Dict[str, float]:
+    def predict_x(self, net: rf.Network, with_scalars: bool=True) -> Dict[str, float]:
         if not self.swap_xy:
             raise RuntimeError("predict_x доступен только при swap_xy=True")
         if self.codec is None:
@@ -331,7 +331,7 @@ class BaseLModule(L.LightningModule):
         y_t, _ = self.codec.encode_s(net)
         y_t = y_t.to(self.device).unsqueeze(0)
         x_pred = self(y_t)[0]
-        if self.scaler_out is not None:
+        if self.scaler_out is not None and with_scalars:
             x_pred = self._apply_inverse(self.scaler_out, x_pred)
         return self.codec.decode_x(x_pred)
     # ---------------------------------------------------------------- repr
