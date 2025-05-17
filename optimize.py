@@ -41,7 +41,7 @@ def objective(trial):
         ],
         'batch_size': trial.suggest_categorical('batch_size', [32, 64, 128]),
         'lr': trial.suggest_float('lr', 1e-5, 1e-1, log=True),
-        'gamma': trial.suggest_float('gamma', 0, 1),
+        'gamma': trial.suggest_discrete_uniform('gamma', 0.1, 1.0, 0.1),
         'step_size': trial.suggest_int('step_size', 1, 30)
     }
 

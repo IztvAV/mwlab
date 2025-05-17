@@ -20,7 +20,7 @@ torch.set_float32_matmul_precision("medium")
 
 
 BATCH_SIZE = 64
-DATASET_SIZE = 100_000
+DATASET_SIZE = 10_000
 FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "FilterData", FILTER_NAME, "datasets_data")
@@ -84,10 +84,14 @@ def main():
     #                      out_channels=len(ds_gen.origin_filter.coupling_matrix.links))
     # model = models.ResNet1D(in_channels=len(codec.y_channels),
     #                      out_channels=len(ds_gen.origin_filter.coupling_matrix.links))
-    model = models.ResNeXt1D(in_channels=len(codec.y_channels),
-                             out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
-                             cardinality=16,
-                             base_width=4)
+    model = models.ResNet1DFlexible(
+        in_channels=8,  # По вашему исходному коду
+        out_channels=30,  # По вашему исходному коду
+        first_conv_channels=64,
+        first_conv_kernel=10,
+        layer_channels=[128, 64, 64, 128],
+        num_blocks=[5, 1, 3, 2],
+    )
     # model = models.ResNetRNN1D(in_channels=len(codec.y_channels),
     #                            out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
     #                            resnet_hidden_size=len(ds_gen.origin_filter.coupling_matrix.links),
@@ -111,8 +115,8 @@ def main():
         scaler_in=dm.scaler_in,  # Скейлер для входных данных
         scaler_out=dm.scaler_out,  # Скейлер для выходных данных
         codec=codec,  # Кодек для преобразования данных
-        optimizer_cfg={"name": "Adam", "lr": 1e-2},  # Конфигурация оптимизатора
-        scheduler_cfg={"name": "StepLR", "step_size": 20, "gamma": 0.5},
+        optimizer_cfg={"name": "Adam", "lr": 0.014},  # Конфигурация оптимизатора
+        scheduler_cfg={"name": "StepLR", "step_size": 29, "gamma": 0.95},
         # optimizer_cfg={"name": "SGD", "lr": 0.1, "momentum": 0.99, "nesterov": True},
         # scheduler_cfg={"name": "CosineAnnealingWarmRestarts", "T_0": 4, "T_mult": 2, "eta_min": 1e-5},
         # optimizer_cfg={"name": "AdamW", "lr": 3e-4},
