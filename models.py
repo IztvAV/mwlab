@@ -187,6 +187,51 @@ class ResNet1D(nn.Module):
         return x
 
 
+# Модифицированная ResNet1D с настраиваемыми параметрами
+class ResNet1DFlexible(nn.Module):
+    def __init__(self, in_channels=8, out_channels=10,
+                 first_conv_channels=64, first_conv_kernel=7,
+                 layer_channels=[64, 128, 256, 512],  # Количество каналов для каждого слоя
+                 num_blocks=[1, 2, 3, 1]):
+        super().__init__()
+
+        # Первый сверточный слой
+        self.conv1 = nn.Conv1d(in_channels, first_conv_channels,
+                               kernel_size=first_conv_kernel,
+                               stride=2,
+                               padding=first_conv_kernel // 2)
+        self.bn1 = nn.BatchNorm1d(first_conv_channels)
+        self.maxpool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
+
+        # Создаем слои ResNet
+        self.layers = nn.ModuleList()
+        in_ch = first_conv_channels
+        for out_ch, n_blocks in zip(layer_channels, num_blocks):
+            self.layers.append(self.make_layer(in_ch, out_ch, n_blocks, stride=2 if in_ch != out_ch else 1))
+            in_ch = out_ch
+
+        self.avgpool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Linear(in_ch, out_channels)
+
+    @staticmethod
+    def make_layer(in_channels, out_channels, num_blocks, stride):
+        layers = [BasicBlock1D(in_channels, out_channels, stride)]
+        for _ in range(1, num_blocks):
+            layers.append(BasicBlock1D(out_channels, out_channels, stride=1))
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = nn.ReLU()(self.bn1(self.conv1(x)))
+        x = self.maxpool(x)
+
+        for layer in self.layers:
+            x = layer(x)
+
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+        return x
+
 
 class Bottleneck1D(nn.Module):
     expansion = 4
@@ -261,53 +306,61 @@ class SEAttention(nn.Module):
         return y
 
 
-class ImprovedResNet1D(nn.Module):
-    def __init__(self, in_channels=8, out_channels=10, base_channels=64,
-                 layer_blocks=[3, 4, 6, 3], dilation_factors=[1, 2, 4]):
+class ResNeXtBlock1D(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1, cardinality=32, base_width=4):
         super().__init__()
+        width = int(out_channels * (base_width / 64)) * cardinality
 
-        self.conv1 = nn.Conv1d(in_channels, base_channels, kernel_size=7,
-                               stride=2, padding=3, bias=False)
-        self.bn1 = nn.BatchNorm1d(base_channels)
+        self.conv1 = nn.Conv1d(in_channels, width, kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm1d(width)
+
+        self.conv2 = nn.Conv1d(
+            width, width, kernel_size=3,
+            stride=stride, padding=1,
+            groups=cardinality, bias=False
+        )
+        self.bn2 = nn.BatchNorm1d(width)
+
+        self.conv3 = nn.Conv1d(width, out_channels, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm1d(out_channels)
+
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm1d(out_channels)
+            )
+
+    def forward(self, x):
+        residual = self.shortcut(x)
+
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.bn3(self.conv3(x))
+
+        x += residual
+        return F.relu(x)
+
+
+class ResNeXt1D(nn.Module):
+    def __init__(self, in_channels=1, out_channels=10, cardinality=32, base_width=4):
+        super().__init__()
+        self.conv1 = nn.Conv1d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.bn1 = nn.BatchNorm1d(64)
         self.maxpool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
 
-        self.layer1 = ResNet1D.make_layer(base_channels, base_channels, num_blocks=layer_blocks[0], stride=1)
-        self.layer2 = ResNet1D.make_layer(base_channels, base_channels*2, num_blocks=layer_blocks[1], stride=2)
-        self.layer3 = ResNet1D.make_layer(base_channels*2, base_channels*4, num_blocks=layer_blocks[2], stride=2)
-        self.layer4 = ResNet1D.make_layer(base_channels*4, base_channels*8, num_blocks=layer_blocks[3], stride=2)
-        # self.layer1 = self._make_layer(base_channels, base_channels,
-        #                                layer_blocks[0], stride=1,
-        #                                dilation=dilation_factors[0])
-        # self.layer2 = self._make_layer(base_channels, base_channels * 2,
-        #                                layer_blocks[1], stride=2,
-        #                                dilation=dilation_factors[1])
-        # self.layer3 = self._make_layer(base_channels * 2, base_channels * 4,
-        #                                layer_blocks[2], stride=2,
-        #                                dilation=dilation_factors[2])
-        # self.layer4 = self._make_layer(base_channels * 4, base_channels * 8,
-        #                                layer_blocks[3], stride=2,
-        #                                dilation=max(dilation_factors))
-
-        self.attention = RobustAttention(base_channels*8)
-        self.dropout = nn.Dropout(0.5)
+        self.layer1 = self._make_layer(64, 64, 1, stride=1, cardinality=cardinality, base_width=base_width)
+        self.layer2 = self._make_layer(64, 128, 2, stride=2, cardinality=cardinality, base_width=base_width)
+        self.layer3 = self._make_layer(128, 256, 3, stride=2, cardinality=cardinality, base_width=base_width)
+        self.layer4 = self._make_layer(256, 512, 1, stride=2, cardinality=cardinality, base_width=base_width)
 
         self.avgpool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Linear(base_channels * 8, out_channels)
+        self.fc = nn.Linear(512, out_channels)
 
-        # Инициализация весов
-        for m in self.modules():
-            if isinstance(m, nn.Conv1d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-
-    def _make_layer(self, in_channels, out_channels, blocks, stride, dilation):
-        layers = []
-        layers.append(Bottleneck1D(in_channels, out_channels, stride, dilation))
+    def _make_layer(self, in_channels, out_channels, blocks, stride, cardinality, base_width):
+        layers = [ResNeXtBlock1D(in_channels, out_channels, stride, cardinality, base_width)]
         for _ in range(1, blocks):
-            layers.append(Bottleneck1D(out_channels, out_channels,
-                                       dilation=dilation))
+            layers.append(ResNeXtBlock1D(out_channels, out_channels, 1, cardinality, base_width))
         return nn.Sequential(*layers)
 
     def forward(self, x):
@@ -319,14 +372,10 @@ class ImprovedResNet1D(nn.Module):
         x = self.layer3(x)
         x = self.layer4(x)
 
-        # Attention mechanism
-        # att = self.attention(x)
-        # x = x * att
-
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
-        y = self.fc(x)
-        return y
+        x = self.fc(x)
+        return x
 
 
 class LeNet1D(nn.Module):
@@ -569,3 +618,166 @@ class BiRNNResNet1D(nn.Module):
         resnet_out = resnet_out.view(resnet_out.size(0), -1)
 
         return self.fc(resnet_out)
+
+
+class ResNetRNN1D(nn.Module):
+    def __init__(self, in_channels=8, out_channels=10,
+                 resnet_hidden_size=512, rnn_hidden_size=256,
+                 rnn_layers=1, rnn_type='LSTM', bidirectional=False):
+        super().__init__()
+
+        # ResNet part
+        self.resnet = ResNet1D(in_channels, resnet_hidden_size)
+
+        # RNN part
+        self.rnn_type = rnn_type
+        self.rnn_layers = rnn_layers
+        self.bidirectional = bidirectional
+        self.rnn_hidden_size = rnn_hidden_size
+
+        if rnn_type.upper() == 'LSTM':
+            self.rnn = nn.LSTM(
+                input_size=out_channels,  # Using ResNet output as RNN input
+                hidden_size=rnn_hidden_size,
+                num_layers=rnn_layers,
+                bidirectional=bidirectional,
+                batch_first=True
+            )
+        elif rnn_type.upper() == 'GRU':
+            self.rnn = nn.GRU(
+                input_size=out_channels,
+                hidden_size=rnn_hidden_size,
+                num_layers=rnn_layers,
+                bidirectional=bidirectional,
+                batch_first=True
+            )
+        else:
+            raise ValueError("rnn_type must be either 'LSTM' or 'GRU'")
+
+        # Final fully connected layer
+        direction_multiplier = 2 if bidirectional else 1
+        self.fc_final = nn.Linear(rnn_hidden_size * direction_multiplier, out_channels)
+
+    def forward(self, x):
+        # Get initial predictions from ResNet
+        resnet_output = self.resnet(x)  # shape: (batch_size, out_channels)
+
+        # Prepare for RNN - add sequence dimension (sequence length = 1)
+        # We're treating each ResNet output as a single timestep
+        rnn_input = resnet_output.unsqueeze(1)  # shape: (batch_size, 1, out_channels)
+
+        # RNN processing
+        if self.rnn_type.upper() == 'LSTM':
+            h0 = torch.zeros(self.rnn_layers * (2 if self.bidirectional else 1),
+                             rnn_input.size(0), self.rnn_hidden_size).to(x.device)
+            c0 = torch.zeros(self.rnn_layers * (2 if self.bidirectional else 1),
+                             rnn_input.size(0), self.rnn_hidden_size).to(x.device)
+            rnn_output, _ = self.rnn(rnn_input, (h0, c0))
+        else:
+            h0 = torch.zeros(self.rnn_layers * (2 if self.bidirectional else 1),
+                             rnn_input.size(0), self.rnn_hidden_size).to(x.device)
+            rnn_output, _ = self.rnn(rnn_input, h0)
+
+        # Get final predictions
+        output = self.fc_final(rnn_output.squeeze(1))
+        return output
+
+
+class SEBlock1D(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1)
+        return x * y.expand_as(x)
+
+
+class SEBasicBlock1D(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1, reduction=16):
+        super().__init__()
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm1d(out_channels)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm1d(out_channels)
+        self.se = SEBlock1D(out_channels, reduction)
+
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm1d(out_channels)
+            )
+
+    def forward(self, x):
+        residual = self.shortcut(x)
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.se(out)
+        out += residual
+        return F.relu(out)
+
+
+class SENet1D(nn.Module):
+    def __init__(self, in_channels=1, num_classes=10, block_config=[2, 2, 2],
+                 init_channels=64, reduction=16, dropout=0.2):
+        super().__init__()
+
+        # Initial layers
+        self.features = nn.Sequential(
+            nn.Conv1d(in_channels, init_channels, kernel_size=7, stride=2, padding=3, bias=False),
+            nn.BatchNorm1d(init_channels),
+            nn.ReLU(inplace=True),
+            nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
+        )
+
+        # Residual layers
+        self.layers = nn.ModuleList()
+        channels = init_channels
+
+        for i, num_blocks in enumerate(block_config):
+            out_channels = channels * (2 if i > 0 else 1)  # Double channels after first layer
+            self.layers.append(self._make_layer(channels, out_channels, num_blocks,
+                                                stride=1 if i == 0 else 2,
+                                                reduction=reduction))
+            channels = out_channels
+
+        # Final layers
+        self.avgpool = nn.AdaptiveAvgPool1d(1)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(channels, num_classes)
+
+        # Weight initialization
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def _make_layer(self, in_channels, out_channels, blocks, stride, reduction):
+        layers = []
+        layers.append(SEBasicBlock1D(in_channels, out_channels, stride, reduction))
+        for _ in range(1, blocks):
+            layers.append(SEBasicBlock1D(out_channels, out_channels, 1, reduction))
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.features(x)  # [batch, init_channels, L//4]
+
+        for layer in self.layers:
+            x = layer(x)  # После каждого слоя: [batch, channels*, L*]
+
+        x = self.avgpool(x)  # [batch, channels, 1]
+        x = torch.flatten(x, 1)  # [batch, channels]
+        x = self.dropout(x)
+        x = self.fc(x)  # [batch, num_classes]
+        return x
