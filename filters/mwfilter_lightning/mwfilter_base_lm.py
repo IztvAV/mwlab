@@ -1,6 +1,8 @@
+import torch.nn
 from mwlab import BaseLModule, TouchstoneLDataModule, BaseLMWithMetrics
 from filters import MWFilter, CouplingMatrix
 import matplotlib.pyplot as plt
+from torch.utils.data import Dataset
 
 
 class MWFilterBaseLModule(BaseLModule):
@@ -44,7 +46,14 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    def predict_for(self, dm: TouchstoneLDataModule, idx: int) -> tuple[MWFilter, MWFilter]:
+    def predict(self, dm: TouchstoneLDataModule, idx: int, with_scalers: bool=True):
+        if idx == -1:  # значит предсказываем всем датасете
+            predictions = [self.predict_for(dm, i, with_scalers) for i in range(len(dm.get_dataset(split="test", meta=True)))]
+        else:
+            predictions = self.predict_for(dm, idx, with_scalers)
+        return predictions
+
+    def predict_for(self, dm: TouchstoneLDataModule, idx: int, with_scalers=True) -> tuple[MWFilter, MWFilter]:
         # Возьмем для примера первый touchstone-файл из тестового набора данных
         test_tds = dm.get_dataset(split="test", meta=True)
         # Поскольку swap_xy=True, то датасет меняет местами пары (y, x)
@@ -53,12 +62,18 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         # Декодируем данные
         orig_prms = dm.codec.decode_x(x_t)  # Создаем словарь параметров
         net = dm.codec.decode_s(y_t, meta)  # Создаем объект skrf.Network
+        dl = dm.get_dataloader(split="test", meta=True)
 
         # Предсказанные S-параметры
         pred_prms = self.predict_x(net)
+        if not with_scalers:
+            pred_prms_vals = dm.scaler_out(torch.tensor(list(pred_prms.values())))
+            orig_prms_vals = dm.scaler_out(torch.tensor(list(orig_prms.values())))
+            pred_prms = dict(zip(pred_prms.keys(), list(torch.squeeze(pred_prms_vals, dim=0).numpy())))
+            orig_prms = dict(zip(orig_prms.keys(), list(torch.squeeze(orig_prms_vals, dim=0).numpy())))
 
-        print(f"Исходные параметры: {orig_prms}")
-        print(f"Предсказанные параметры: {pred_prms}")
+        # print(f"Исходные параметры: {orig_prms}")
+        # print(f"Предсказанные параметры: {pred_prms}")
 
         orig_fil = MWFilter.from_touchstone_dataset_item(({**meta['params'], **orig_prms}, net))
         pred_matrix = MWFilter.matrix_from_touchstone_data_parameters({**meta['params'], **pred_prms})
@@ -68,6 +83,16 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
                             Q=meta['params']['Q'],
                             matrix=pred_matrix, frequency=orig_fil.f, s=s_pred, z0=orig_fil.z0)
         return orig_fil, pred_fil
+
+    """ Функция для вычисления MSELoss от списка полученных фильтров. Нужна для оценки предсказания модели на наборе данных """
+    def mse_score(self, predictions: list[tuple[MWFilter, MWFilter]]):
+        score = 0.0
+        loss_f = torch.nn.MSELoss()
+        for orig_fil, pred_fil in predictions:
+            loss = loss_f(torch.tensor(orig_fil.coupling_matrix.factors), torch.tensor(pred_fil.coupling_matrix.factors))
+            score += loss.item()
+        score /= len(predictions)
+        return score
 
     def plot_origin_vs_prediction(self, origin_fil: MWFilter, pred_fil: MWFilter):
         plt.figure()
