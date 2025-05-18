@@ -158,13 +158,13 @@ class ResNet1D(nn.Module):
         self.conv1 = nn.Conv1d(in_channels, 64, kernel_size=7, stride=2, padding=3)
         self.bn1 = nn.BatchNorm1d(64)
         self.maxpool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self.make_layer(64, 64, 1, stride=1)
+        self.layer1 = self.make_layer(64, 64, 2, stride=1)
         self.layer2 = self.make_layer(64, 128, 2, stride=2)
-        self.layer3 = self.make_layer(128, 256, 3, stride=2)
-        self.layer4 = self.make_layer(256, 512, 1, stride=2)
+        self.layer3 = self.make_layer(128, 256, 2, stride=2)
+        self.layer4 = self.make_layer(256, 512, 2, stride=2)
         self.layer5 = self.make_layer(512, 1024, 2, stride=2)
         self.avgpool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Linear(512, out_channels)
+        self.fc = nn.Linear(256, out_channels)
 
     @staticmethod
     def make_layer(in_channels, out_channels, num_blocks, stride):
@@ -179,7 +179,7 @@ class ResNet1D(nn.Module):
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
-        x = self.layer4(x)
+        # x = self.layer4(x)
         # x = self.layer5(x)
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)

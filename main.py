@@ -20,7 +20,7 @@ torch.set_float32_matmul_precision("medium")
 
 
 BATCH_SIZE = 64
-DATASET_SIZE = 100_000
+DATASET_SIZE = 500_000
 FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "FilterData", FILTER_NAME, "datasets_data")
@@ -82,13 +82,13 @@ def main():
 
     # model = models.Simple_Opt_3(in_channels=len(codec.y_channels),
     #                      out_channels=len(ds_gen.origin_filter.coupling_matrix.links))
-    # model = models.ResNet1D(in_channels=len(codec.y_channels),
-    #                      out_channels=len(ds_gen.origin_filter.coupling_matrix.links))
-    model = models.ImprovedResNet1D(in_channels=len(codec.y_channels),
-                                    out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
-                                    layer_blocks=[1, 2, 4, 1],
-                                    dilation_factors=[1, 1, 1],
-                                    base_channels=64)
+    model = models.ResNet1D(in_channels=len(codec.y_channels),
+                         out_channels=len(ds_gen.origin_filter.coupling_matrix.links))
+    # model = models.ImprovedResNet1D(in_channels=len(codec.y_channels),
+    #                                 out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
+    #                                 layer_blocks=[1, 2, 4, 1],
+    #                                 dilation_factors=[1, 1, 1],
+    #                                 base_channels=64)
     # model = models.ResNet1DBiRNN(in_channels=len(codec.y_channels),
     #                              out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
     #                              resnet_out_channels=256,
@@ -122,17 +122,17 @@ def main():
         scaler_in=dm.scaler_in,  # Скейлер для входных данных
         scaler_out=dm.scaler_out,  # Скейлер для выходных данных
         codec=codec,  # Кодек для преобразования данных
-        # optimizer_cfg={"name": "Adam", "lr": 1e-2, "weight_decay": 1e-2},  # Конфигурация оптимизатора
-        # scheduler_cfg={"name": "StepLR", "step_size": 20, "gamma": 0.8},
+        optimizer_cfg={"name": "Adam", "lr": 1e-2},  # Конфигурация оптимизатора
+        scheduler_cfg={"name": "StepLR", "step_size": 20, "gamma": 0.5},
         # optimizer_cfg={"name": "SGD", "lr": 0.1, "momentum": 0.99, "nesterov": True},
         # scheduler_cfg={"name": "CosineAnnealingWarmRestarts", "T_0": 4, "T_mult": 2, "eta_min": 1e-5},
-        optimizer_cfg={"name": "AdamW", "lr": 0.01},
-        scheduler_cfg={"name": "OneCycleLR", "max_lr": 1e-2, "epochs": 5, "steps_per_epoch": len(dm.train_ds)},
+        # optimizer_cfg={"name": "AdamW", "lr": 0.01},
+        # scheduler_cfg={"name": "OneCycleLR", "max_lr": 1e-2, "epochs": 5, "steps_per_epoch": len(dm.train_ds)},
         loss_fn=nn.MSELoss()
     )
 
 
-    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min", min_delta=0.00001)
+    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=50, mode="min", min_delta=0.00001)
     checkpoint = L.pytorch.callbacks.ModelCheckpoint(monitor="val_loss", dirpath="saved_models/"+FILTER_NAME,
                                                      filename="best-{epoch}-{val_loss:.5f}",
                                                      mode="min",
