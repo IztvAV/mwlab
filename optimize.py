@@ -117,8 +117,9 @@ def objective(trial):
     ).to(lit_model.device)
     # 2.3. Оцениваем качество модели
 
-    predictions = inference_model.predict(dm=dm, idx=-1, with_scalars=False)
-    score = inference_model.mse_score(predictions)
+    val_loss = trainer.callback_metrics["val_loss"].item()
+    trial.report(val_loss, step=0)
+    score = val_loss
 
     return score
 
