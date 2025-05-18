@@ -110,13 +110,6 @@ def objective(trial):
     # Запуск процесса обучения
     trainer.fit(lit_model, dm)
 
-    # Загружаем лучшую модель
-    inference_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
-        checkpoint_path=checkpoint.best_model_path,
-        model=model
-    ).to(lit_model.device)
-    # 2.3. Оцениваем качество модели
-
     val_loss = trainer.callback_metrics["val_loss"].item()
     trial.report(val_loss, step=0)
     score = val_loss
