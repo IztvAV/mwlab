@@ -46,14 +46,14 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    def predict(self, dm: TouchstoneLDataModule, idx: int, with_scalars: bool=True):
+    def predict(self, dm: TouchstoneLDataModule, idx: int, with_scalers: bool=True):
         if idx == -1:  # значит предсказываем всем датасете
-            predictions = [self.predict_for(dm, i, with_scalars) for i in range(len(dm.get_dataset(split="test", meta=True)))]
+            predictions = [self.predict_for(dm, i, with_scalers) for i in range(len(dm.get_dataset(split="test", meta=True)))]
         else:
-            predictions = self.predict_for(dm, idx, with_scalars)
+            predictions = self.predict_for(dm, idx, with_scalers)
         return predictions
 
-    def predict_for(self, dm: TouchstoneLDataModule, idx: int, with_scalars=True) -> tuple[MWFilter, MWFilter]:
+    def predict_for(self, dm: TouchstoneLDataModule, idx: int, with_scalers=True) -> tuple[MWFilter, MWFilter]:
         # Возьмем для примера первый touchstone-файл из тестового набора данных
         test_tds = dm.get_dataset(split="test", meta=True)
         # Поскольку swap_xy=True, то датасет меняет местами пары (y, x)
@@ -62,9 +62,15 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         # Декодируем данные
         orig_prms = dm.codec.decode_x(x_t)  # Создаем словарь параметров
         net = dm.codec.decode_s(y_t, meta)  # Создаем объект skrf.Network
+        dl = dm.get_dataloader(split="test", meta=True)
 
         # Предсказанные S-параметры
-        pred_prms = self.predict_x(net, with_scalars)
+        pred_prms = self.predict_x(net)
+        if not with_scalers:
+            pred_prms_vals = dm.scaler_out(torch.tensor(list(pred_prms.values())))
+            orig_prms_vals = dm.scaler_out(torch.tensor(list(orig_prms.values())))
+            pred_prms = dict(zip(pred_prms.keys(), list(torch.squeeze(pred_prms_vals, dim=0).numpy())))
+            orig_prms = dict(zip(orig_prms.keys(), list(torch.squeeze(orig_prms_vals, dim=0).numpy())))
 
         # print(f"Исходные параметры: {orig_prms}")
         # print(f"Предсказанные параметры: {pred_prms}")
