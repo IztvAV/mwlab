@@ -32,9 +32,12 @@ ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAM
 
 
 class FastMN2toSParamCalculation:
-    def __init__(self, matrix_order, w_min, w_max, w_num, fbw, Q):
+    def __init__(self, matrix_order, fbw, Q, w_min=0, w_max=0, w_num=0, wlist=None):
         self.matrix_order = matrix_order
-        self.w = torch.linspace(w_min, w_max, w_num)
+        if wlist is None:
+            self.w = torch.linspace(w_min, w_max, w_num)
+        else:
+            self.w = torch.tensor(wlist)
         self.R = torch.zeros(matrix_order, matrix_order, dtype=torch.complex64)
         self.R[0, 0] = 1j
         self.R[-1, -1] = 1j
@@ -45,7 +48,7 @@ class FastMN2toSParamCalculation:
         self.G[0, 0] = 0
         self.G[-1, -1] = 0
         for res in range(1, matrix_order - 1):
-            self.G[res, res] = 1 / (fbw * Q)
+            self.G[res, res] = 1j / (fbw * Q)
         self.S11 = torch.zeros(w_num, dtype=torch.complex64)
         self.S21 = torch.zeros(w_num, dtype=torch.complex64)
         self.S22 = torch.zeros(w_num, dtype=torch.complex64)
@@ -84,10 +87,9 @@ def optimize_cm(pred_filter:MWFilter, orig_filter: MWFilter):
     x0 = x0_real
     x0 = torch.round(torch.tensor(x0), decimals=5)
     print("Start optimize")
-    fast_calc = FastMN2toSParamCalculation(matrix_order=orig_filter.coupling_matrix.matrix_order, w_min=-1.2, w_max=1.2, w_num=301, Q=orig_filter.Q, fbw=orig_filter.fbw)
-    _, s11_origin, s21_origin = fast_calc.RespM2_gpu(orig_filter.coupling_matrix.matrix)
-    s11_origin_db = to_db(s11_origin)
-    s21_origin_db = to_db(s21_origin)
+    fast_calc = FastMN2toSParamCalculation(matrix_order=orig_filter.coupling_matrix.matrix_order, wlist=orig_filter.f_norm, Q=orig_filter.Q, fbw=orig_filter.fbw) # Q=torch.inf потому что мы предсказываем на фильтре с потерями
+    s11_origin_db = to_db(torch.tensor(orig_filter.s[:, 0, 0]))
+    s21_origin_db = to_db(torch.tensor(orig_filter.s[:, 1, 0]))
     start_time = time.time_ns()
     prev_cost = 0
     for _ in range(15):
@@ -145,9 +147,6 @@ def main():
     codec = MWFilterTouchstoneCodec.from_dataset(TouchstoneDataset(source=backend, in_memory=True))
     codec.exclude_keys(["f0", "bw", "N", "Q"])
     print(codec)
-    # codec.y_channels = ['S1_1.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S2_1.imag', 'S2_2.imag']
-    # codec.y_channels = ['S1_1.db', 'S1_2.db', 'S2_1.db', 'S2_2.db']
-
     # Исключаем из анализа ненужные x-параметры
     print("Каналы:", codec.y_channels)
     print("Количество каналов:", len(codec.y_channels))
@@ -223,10 +222,6 @@ def main():
         codec=codec,  # Кодек для преобразования данных
         optimizer_cfg={"name": "Adam", "lr": 0.0017552306729777972},
         scheduler_cfg={"name": "StepLR", "step_size": 10, "gamma": 0.1},
-        # optimizer_cfg={"name": "SGD", "lr": 0.1, "momentum": 0.99, "nesterov": True},
-        # scheduler_cfg={"name": "CosineAnnealingWarmRestarts", "T_0": 4, "T_mult": 2, "eta_min": 1e-5},
-        # optimizer_cfg={"name": "AdamW", "lr": 0.01},
-        # scheduler_cfg={"name": "OneCycleLR", "max_lr": 1e-2, "epochs": 5, "steps_per_epoch": len(dm.train_ds)},
         loss_fn=nn.MSELoss()
     )
 
@@ -251,19 +246,25 @@ def main():
         ]
     )
 
-    # Запуск процесса обучения
+    # # Запуск процесса обучения
     # trainer.fit(lit_model, dm)
     # print(f"Best model saved into: {checkpoint.best_model_path}")
 
     # Загружаем лучшую модель
     inference_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
-        checkpoint_path="saved_models/SCYA501-KuIMUXT5-BPFC3/best-epoch=23-val_loss=0.01887.ckpt",
+        checkpoint_path="saved_models/SCYA501-KuIMUXT5-BPFC3/best-epoch=20-val_loss=0.01534-train_loss=0.01210.ckpt",
         model=model
     ).to(lit_model.device)
     orig_fil, pred_fil = inference_model.predict(dm, idx=0)
     inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
+    optim_factors = optimize_cm(pred_fil, orig_fil)
 
-
+    # Предсказываем эталонный фильтр
+    orig_fil = ds_gen.origin_filter
+    pred_prms = inference_model.predict_x(orig_fil)
+    pred_fil = inference_model.create_filter_from_prediction(orig_fil, orig_fil.to_touchstone_data(None).params,
+                                                             pred_prms, meta)
+    inference_model.plot_origin_vs_prediction(ds_gen.origin_filter, pred_fil)
     optim_factors = optimize_cm(pred_fil, orig_fil)
     plt.show()
 
