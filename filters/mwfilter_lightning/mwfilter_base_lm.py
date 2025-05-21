@@ -75,23 +75,19 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         print(f"Предсказанные параметры: {pred_prms}")
 
         orig_fil = MWFilter.from_touchstone_dataset_item(({**meta['params'], **orig_prms}, net))
+        pred_fil = self.create_filter_from_prediction(orig_fil, orig_prms, pred_prms, meta)
+        return orig_fil, pred_fil
+
+    @staticmethod
+    def create_filter_from_prediction(orig_fil: MWFilter, orig_prms:dict, pred_prms: dict, meta: dict) -> MWFilter:
+        orig_fil = MWFilter.from_touchstone_dataset_item(({**meta['params'], **orig_prms}, orig_fil))
         pred_matrix = MWFilter.matrix_from_touchstone_data_parameters({**meta['params'], **pred_prms})
         s_pred = MWFilter.response_from_coupling_matrix(f0=orig_fil.f0, FBW=orig_fil.fbw, frange=orig_fil.f / 1e6,
                                                         Q=orig_fil.Q, M=pred_matrix)
         pred_fil = MWFilter(order=int(meta['params']['N']), bw=meta['params']['bw'], f0=meta['params']['f0'],
                             Q=meta['params']['Q'],
                             matrix=pred_matrix, frequency=orig_fil.f, s=s_pred, z0=orig_fil.z0)
-        return orig_fil, pred_fil
-
-    """ Функция для вычисления MSELoss от списка полученных фильтров. Нужна для оценки предсказания модели на наборе данных """
-    def mse_score(self, predictions: list[tuple[MWFilter, MWFilter]]):
-        score = 0.0
-        loss_f = torch.nn.MSELoss()
-        for orig_fil, pred_fil in predictions:
-            loss = loss_f(torch.tensor(orig_fil.coupling_matrix.factors), torch.tensor(pred_fil.coupling_matrix.factors))
-            score += loss.item()
-        score /= len(predictions)
-        return score
+        return pred_fil
 
     def plot_origin_vs_prediction(self, origin_fil: MWFilter, pred_fil: MWFilter):
         plt.figure()

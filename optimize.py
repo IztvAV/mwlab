@@ -14,7 +14,7 @@ from torch import nn
 import lightning as L
 
 
-DATASET_SIZE = 100_000
+DATASET_SIZE = 500_000
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "optimize_data")
 
@@ -142,6 +142,21 @@ def main():
 
     # 3. Создаем study и запускаем оптимизацию
     study = optuna.create_study(direction='minimize')  # Мы хотим максимизировать accuracy
+    study.enqueue_trial(
+        {'first_conv_channels': 128,
+         'first_conv_kernel': 11,
+         'layer1_channels': 128,
+         'layer2_channels': 256,
+         'layer3_channels': 512,
+         'layer4_channels': 512,
+         'layer1_blocks': 1,
+         'layer2_blocks': 1,
+         'layer3_blocks': 5,
+         'layer4_blocks': 3,
+         'lr': 0.0017552306729777972,
+         'gamma': 0.1,
+         'step_size': 10}
+    )
     study.optimize(objective, n_trials=100)  # Количество итераций оптимизации
 
     # 4. Выводим результаты
