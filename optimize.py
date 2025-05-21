@@ -12,14 +12,27 @@ from mwlab import TouchstoneData, TouchstoneDataset, TouchstoneLDataModule
 from mwlab.nn import MinMaxScaler
 from torch import nn
 import lightning as L
+import pickle
 
 
 DATASET_SIZE = 500_000
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "optimize_data")
+ENV_STUDY_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "study_results")
+TRIAL_NUM = 100
 
 backend = None
 codec = None
+
+
+def save_study_pickle(study, path):
+    with open(path, 'wb') as f:
+        pickle.dump(study, f)
+
+def load_study_pickle(path):
+    with open(path, 'rb') as f:
+        return pickle.load(f)
+
 
 # 2. Определяем целевую функцию для Optuna
 def objective(trial):
@@ -157,12 +170,15 @@ def main():
          'gamma': 0.1,
          'step_size': 10}
     )
-    study.optimize(objective, n_trials=100)  # Количество итераций оптимизации
+    study.optimize(objective, n_trials=TRIAL_NUM)  # Количество итераций оптимизации
 
     # 4. Выводим результаты
     print(f"Лучшие параметры: {study.best_params}")
     print(f"Лучшая accuracy: {study.best_value:.4f}")
 
+    if not os.path.exists(ENV_STUDY_PATH):
+        os.makedirs(ENV_STUDY_PATH)
+    save_study_pickle(study, path=os.path.join(ENV_STUDY_PATH, f"study_dataset-dataset={DATASET_SIZE}-trials={TRIAL_NUM}.pkl"))
     # 5. Визуализация (опционально)
     optuna.visualization.plot_optimization_history(study).show()
     optuna.visualization.plot_param_importances(study).show()

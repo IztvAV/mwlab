@@ -25,7 +25,7 @@ torch.set_float32_matmul_precision("medium")
 to_db = lambda x: 20 * torch.log10(abs(x))
 
 BATCH_SIZE = 64
-DATASET_SIZE = 1_000
+DATASET_SIZE = 100_000
 FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "datasets_data")
@@ -52,12 +52,12 @@ class FastMN2toSParamCalculation:
         self.S11 = torch.zeros(w_num, dtype=torch.complex64)
         self.S21 = torch.zeros(w_num, dtype=torch.complex64)
         self.S22 = torch.zeros(w_num, dtype=torch.complex64)
+        self.w_calc = self.w.view(-1, 1, 1)
 
     def RespM2_gpu(self, M):
         # Батчевое создание матриц A
-        w = self.w.view(-1, 1, 1)  # (B, 1, 1)
         MR = torch.tensor(M) - self.R
-        A = MR + w * self.I - self.G
+        A = MR + self.w_calc * self.I - self.G
 
         # Обратные матрицы
         Ainv = torch.linalg.inv(A)  # (B, N, N)
@@ -246,13 +246,13 @@ def main():
         ]
     )
 
-    # # Запуск процесса обучения
-    # trainer.fit(lit_model, dm)
-    # print(f"Best model saved into: {checkpoint.best_model_path}")
+    # Запуск процесса обучения
+    trainer.fit(lit_model, dm)
+    print(f"Best model saved into: {checkpoint.best_model_path}")
 
     # Загружаем лучшую модель
     inference_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
-        checkpoint_path="saved_models/SCYA501-KuIMUXT5-BPFC3/best-epoch=20-val_loss=0.01534-train_loss=0.01210.ckpt",
+        checkpoint_path=checkpoint.best_model_path,
         model=model
     ).to(lit_model.device)
     orig_fil, pred_fil = inference_model.predict(dm, idx=0)

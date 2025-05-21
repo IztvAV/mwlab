@@ -29,6 +29,8 @@ tests/__pycache__/
 
 filters/lightning_logs
 filters/FilterData/*/datasets_data_*
+filters/FilterData/*/optimize_data_*
+filters/FilterData/*/study_results
 filters/saved_models
 lightning_logs
 optimized_models
