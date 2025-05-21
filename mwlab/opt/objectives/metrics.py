@@ -124,14 +124,9 @@ class _SpecMetricMixin:
         scaler_out=None,
         **kwargs,
     ):
-        # 1) забираем task, если вдруг передали вручную
-        task = kwargs.pop("task", "binary")
-
-        # 2) инициализируем настоящий класс метрики
-        #    positional → для Accuracy/Recall/… фабрики
-        super().__init__(task, **kwargs)  # type: ignore[misc]
-
-        # 3) собственные атрибуты
+        # torchmetrics ≥ 1.0 требует task
+        kwargs.setdefault("task", "binary")
+        super().__init__(**kwargs)  # type: ignore[misc]
         self.spec = specification
         self.codec = codec
         self.scaler_out = scaler_out
@@ -149,26 +144,36 @@ class _SpecMetricMixin:
             y_hat.append(self.spec.is_ok(net_pred))
             y_true.append(self.spec.is_ok(net_true))
 
-        #ph = preds.new_tensor(y_hat, dtype=torch.float32)
-        #pt = preds.new_tensor(y_true, dtype=torch.float32)
-        ph = torch.tensor(y_hat, dtype=torch.bool, device=preds.device)
-        pt = torch.tensor(y_true, dtype=torch.bool, device=preds.device)
-
+        ph = preds.new_tensor(y_hat, dtype=torch.float32)
+        pt = preds.new_tensor(y_true, dtype=torch.float32)
         super().update(ph, pt)  # type: ignore[arg-type]
 
 
 #───────────────────────────────────────────── конкретные метрики
 class SpecPassAccuracy(_SpecMetricMixin, Accuracy):
     """Accuracy pass/fail относительно Specification."""
+    def __init__(self, **kwargs):
+        kwargs.setdefault("task", "binary")
+        super().__init__(**kwargs)
 
 class SpecRecall(_SpecMetricMixin, Recall):
     """Recall (TPR) pass/fail относительно Specification."""
+    def __init__(self, **kwargs):
+        kwargs.setdefault("task", "binary")
+        super().__init__(**kwargs)
 
 class SpecPrecision(_SpecMetricMixin, Precision):
     """Precision (PPV) pass/fail относительно Specification."""
+    def __init__(self, **kwargs):
+        kwargs.setdefault("task", "binary")
+        super().__init__(**kwargs)
+
 
 class SpecF1(_SpecMetricMixin, F1Score):
     """F1-score pass/fail относительно Specification."""
+    def __init__(self, **kwargs):
+        kwargs.setdefault("task", "binary")
+        super().__init__(**kwargs)
 
 
 __all__ = [
