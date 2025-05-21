@@ -132,10 +132,13 @@ class BaseLMWithMetrics(BaseLModule):
         self.log("val_loss", loss, on_epoch=True, prog_bar=True, batch_size=x.size(0))
 
         # 💡 Flatten для совместимости с метриками
-        preds_flat = preds.view(preds.size(0), -1)
-        y_flat = y_t.view(y_t.size(0), -1)
+        #preds_flat = preds.view(preds.size(0), -1)
+        #y_flat = y_t.view(y_t.size(0), -1)
+        #metric_dict = self.val_metrics(preds_flat, y_flat)
 
-        metric_dict = self.val_metrics(preds_flat, y_flat)
+        # 👉 передаем **не** сплющенные тензоры
+        metric_dict = self.val_metrics(preds, y_t)
+
         self.log_dict(metric_dict, on_epoch=True, prog_bar=True, batch_size=x.size(0))
         return loss
 
@@ -148,10 +151,13 @@ class BaseLMWithMetrics(BaseLModule):
         self.log("test_loss", loss, on_epoch=True, prog_bar=True, batch_size=x.size(0))
 
         # 💡 Flatten для метрик
-        preds_flat = preds.view(preds.size(0), -1)
-        y_flat = y_t.view(y_t.size(0), -1)
+        #preds_flat = preds.view(preds.size(0), -1)
+        #y_flat = y_t.view(y_t.size(0), -1)
+        #metric_dict = self.test_metrics(preds_flat, y_flat)
 
-        metric_dict = self.test_metrics(preds_flat, y_flat)
+        # 👉 передаем **не** сплющенные тензоры
+        metric_dict = self.val_metrics(preds, y_t)
+
         self.log_dict(metric_dict, on_epoch=True, prog_bar=True, batch_size=x.size(0))
         return loss
 
