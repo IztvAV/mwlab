@@ -89,8 +89,9 @@ from __future__ import annotations
 from typing import List
 import torch
 from torch import Tensor
-from torchmetrics import Accuracy, Recall, Precision, F1Score
-
+from torchmetrics.classification import (
+    BinaryAccuracy, BinaryRecall, BinaryPrecision, BinaryF1Score,
+)
 import skrf as rf  # используется в decode_s, неявно
 from .specification import Specification
 from mwlab.codecs.touchstone_codec import TouchstoneCodec
@@ -144,36 +145,23 @@ class _SpecMetricMixin:
             y_hat.append(self.spec.is_ok(net_pred))
             y_true.append(self.spec.is_ok(net_true))
 
-        ph = preds.new_tensor(y_hat, dtype=torch.float32)
-        pt = preds.new_tensor(y_true, dtype=torch.float32)
+        ph = torch.tensor(y_hat, dtype=torch.bool, device=preds.device)
+        pt = torch.tensor(y_true, dtype=torch.bool, device=preds.device)
         super().update(ph, pt)  # type: ignore[arg-type]
 
 
 #───────────────────────────────────────────── конкретные метрики
-class SpecPassAccuracy(_SpecMetricMixin, Accuracy):
+class SpecPassAccuracy(_SpecMetricMixin, BinaryAccuracy):
     """Accuracy pass/fail относительно Specification."""
-    def __init__(self, **kwargs):
-        kwargs.setdefault("task", "binary")
-        super().__init__(**kwargs)
 
-class SpecRecall(_SpecMetricMixin, Recall):
+class SpecRecall(_SpecMetricMixin, BinaryRecall):
     """Recall (TPR) pass/fail относительно Specification."""
-    def __init__(self, **kwargs):
-        kwargs.setdefault("task", "binary")
-        super().__init__(**kwargs)
 
-class SpecPrecision(_SpecMetricMixin, Precision):
+class SpecPrecision(_SpecMetricMixin, BinaryPrecision):
     """Precision (PPV) pass/fail относительно Specification."""
-    def __init__(self, **kwargs):
-        kwargs.setdefault("task", "binary")
-        super().__init__(**kwargs)
 
-
-class SpecF1(_SpecMetricMixin, F1Score):
+class SpecF1(_SpecMetricMixin, BinaryF1Score):
     """F1-score pass/fail относительно Specification."""
-    def __init__(self, **kwargs):
-        kwargs.setdefault("task", "binary")
-        super().__init__(**kwargs)
 
 
 __all__ = [
