@@ -62,7 +62,6 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         # Декодируем данные
         orig_prms = dm.codec.decode_x(x_t)  # Создаем словарь параметров
         net = dm.codec.decode_s(y_t, meta)  # Создаем объект skrf.Network
-        dl = dm.get_dataloader(split="test", meta=True)
 
         # Предсказанные S-параметры
         pred_prms = self.predict_x(net)
@@ -72,8 +71,8 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
             pred_prms = dict(zip(pred_prms.keys(), list(torch.squeeze(pred_prms_vals, dim=0).numpy())))
             orig_prms = dict(zip(orig_prms.keys(), list(torch.squeeze(orig_prms_vals, dim=0).numpy())))
 
-        # print(f"Исходные параметры: {orig_prms}")
-        # print(f"Предсказанные параметры: {pred_prms}")
+        print(f"Исходные параметры: {orig_prms}")
+        print(f"Предсказанные параметры: {pred_prms}")
 
         orig_fil = MWFilter.from_touchstone_dataset_item(({**meta['params'], **orig_prms}, net))
         pred_matrix = MWFilter.matrix_from_touchstone_data_parameters({**meta['params'], **pred_prms})
