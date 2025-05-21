@@ -125,8 +125,6 @@ class _SpecMetricMixin:
         scaler_out=None,
         **kwargs,
     ):
-        # torchmetrics ≥ 1.0 требует task
-        kwargs.setdefault("task", "binary")
         super().__init__(**kwargs)  # type: ignore[misc]
         self.spec = specification
         self.codec = codec
