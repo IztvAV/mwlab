@@ -91,48 +91,54 @@ from torch import Tensor
 from torchmetrics.classification import (
     BinaryAccuracy, BinaryRecall, BinaryPrecision, BinaryF1Score,
 )
-import skrf as rf  # используется в decode_s, неявно
 from .specification import Specification
 from mwlab.codecs.touchstone_codec import TouchstoneCodec
 
-#───────────────────────────────────────────── helper inverse (общий)
+#───────────────────────────────────────────── helpers
 def _inverse_if_needed(t: Tensor, scaler):
     """
-    Снимает нормализацию, если передан scaler.
+    Снимает нормализацию, если передан `scaler`.
 
     * Поддерживает API `.inverse()` и `.inverse_transform()`.
-    * Если вход *(B, F)*, а буфер скейлера имеет форму *(1, C, …)* ―
-      буфер расплющивается и бродкастится, чтобы избежать ошибки
-      несовпадения размерностей.
+    * В остальных случаях возвращает вход без изменений.
     """
     if scaler is None:
         return t
 
-    # прямое использование, если форма совпадает
-    try:
-        if hasattr(scaler, "inverse"):
-            return scaler.inverse(t)
-        if hasattr(scaler, "inverse_transform"):
-            arr = scaler.inverse_transform(t.cpu().numpy())
-            return torch.as_tensor(arr, dtype=t.dtype, device=t.device)
-    except RuntimeError as err:
-        # попробуем «ручное» обратное преобразование через буферы
-        if not hasattr(scaler, "data_range") or not hasattr(scaler, "data_min"):
-            raise err
+    if hasattr(scaler, "inverse"):
+        return scaler.inverse(t)
 
-        dr = scaler.data_range.reshape(-1)          # (F0,)
-        dm = scaler.data_min.reshape(-1)
-        flat = t.view(t.size(0), -1)                # (B, F)
-        flat = flat * dr + dm                       # обратное MinMax
-        return flat.view_as(t)
+    if hasattr(scaler, "inverse_transform"):
+        arr = scaler.inverse_transform(t.detach().cpu().numpy())
+        return torch.as_tensor(arr, dtype=t.dtype, device=t.device)
 
-    raise AttributeError("scaler has neither inverse nor inverse_transform")
+    raise AttributeError("Scaler has neither inverse() nor inverse_transform().")
 
 
-#───────────────────────────────────────────── базовый класс
+def _unflatten_with_codec(t: Tensor, codec: TouchstoneCodec) -> Tensor:
+    """
+    Приводит плоский вектор `(B, C*F)` к форме `(B, C, F)`,
+    исходя из `codec.y_channels` (`C`) и `codec.freq_hz` (`F`).
+
+    Если размерность не совпадает — возвращает тензор без изменений.
+    """
+    if t.dim() == 1:                            # (C*F,) → (1, C*F)
+        t = t.unsqueeze(0)
+
+    B, prod = t.shape
+    C = len(codec.y_channels)
+    F = len(codec.freq_hz)
+
+    if prod != C * F:
+        return t                                # уже «правильная» форма
+
+    return t.view(B, C, F)
+
+#───────────────────────────────────────────── базовый mix-in
 class _SpecMetricMixin:
     """
-    Микс-ин: реализует update(preds, target) для метрик pass/fail.
+    Микс-ин: формирует bool-метки pass/fail и вызывает `update()` родительской
+    *Binary*\*-метрики.
     """
 
     def __init__(
@@ -149,9 +155,15 @@ class _SpecMetricMixin:
         self.scaler_out = scaler_out
 
     def update(self, preds: Tensor, target: Tensor):  # type: ignore[override]
+        # 1) восстанавливаем форму (B, C, F), если пришёл «флэт»
+        preds = _unflatten_with_codec(preds, self.codec)
+        target = _unflatten_with_codec(target, self.codec)
+
+        # 2) возвращаем данные из «скейл-пространства» в инженерные единицы
         preds = _inverse_if_needed(preds, self.scaler_out)
         target = _inverse_if_needed(target, self.scaler_out)
 
+        # 3) получаем метки pass/fail
         y_hat: List[bool] = []
         y_true: List[bool] = []
 
@@ -168,16 +180,16 @@ class _SpecMetricMixin:
 
 #───────────────────────────────────────────── конкретные метрики
 class SpecPassAccuracy(_SpecMetricMixin, BinaryAccuracy):
-    """Accuracy pass/fail относительно Specification."""
+    """Accuracy (TP+TN)/ALL относительно `Specification`."""
 
 class SpecRecall(_SpecMetricMixin, BinaryRecall):
-    """Recall (TPR) pass/fail относительно Specification."""
+    """Recall / True-Positive Rate относительно `Specification`."""
 
 class SpecPrecision(_SpecMetricMixin, BinaryPrecision):
-    """Precision (PPV) pass/fail относительно Specification."""
+    """Precision / Positive Predictive Value относительно `Specification`."""
 
 class SpecF1(_SpecMetricMixin, BinaryF1Score):
-    """F1-score pass/fail относительно Specification."""
+    """F1-score (гармоническое среднее Precision и Recall)."""
 
 
 __all__ = [
