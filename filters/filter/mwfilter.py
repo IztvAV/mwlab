@@ -201,7 +201,7 @@ class MWFilter(rf.Network):
         return ntwk
 
     def response(self, frange, NRNlist=[], Rs=1, Rl=1, PSs=None):
-        resp = self.response_from_coupling_matrix(M=self.coupling_matrix, f0=self.f0, BW=self.bw, Q=self.Q,
+        resp = self.response_from_coupling_matrix(M=self.coupling_matrix.matrix, f0=self.f0, FBW=self.fbw, Q=self.Q,
                                                   frange=frange, NRNlist=NRNlist, Rs=Rs, Rl=Rl, PSs=PSs)
         return resp
 
