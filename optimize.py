@@ -1,7 +1,7 @@
 import optuna
 import os
 import models
-from main import FILTER_NAME
+from main import FILTER_NAME, BATCH_SIZE
 from mwlab.io.backends import RAMBackend
 from filters.mwfilter_lightning import MWFilterBaseLModule, MWFilterBaseLMWithMetrics
 from filters.datasets import CMTheoreticalDatasetGenerator
@@ -14,7 +14,7 @@ from torch import nn
 import lightning as L
 
 
-DATASET_SIZE = 1_000
+DATASET_SIZE = 100_000
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "optimize_data")
 
@@ -39,9 +39,9 @@ def objective(trial):
             trial.suggest_int('layer3_blocks', 1, 5),
             trial.suggest_int('layer4_blocks', 1, 5),
         ],
-        'batch_size': trial.suggest_categorical('batch_size', [32, 64, 128]),
+        # 'batch_size': trial.suggest_categorical('batch_size', [32, 64, 128]),
         'lr': trial.suggest_float('lr', 1e-5, 1e-1, log=True),
-        'gamma': trial.suggest_discrete_uniform('gamma', 0.1, 1.0, 0.1),
+        'gamma': trial.suggest_float('gamma', 0.1, 1.0, step=0.1),
         'step_size': trial.suggest_int('step_size', 1, 30)
     }
 
@@ -59,7 +59,7 @@ def objective(trial):
     dm = TouchstoneLDataModule(
         source=backend,  # Путь к датасету
         codec=codec,  # Кодек для преобразования TouchstoneData → (x, y)
-        batch_size=params['batch_size'],  # Размер батча
+        batch_size=BATCH_SIZE,  # Размер батча
         val_ratio=0.2,  # Доля валидационного набора
         test_ratio=0.05,  # Доля тестового набора
         cache_size=0,
@@ -88,7 +88,7 @@ def objective(trial):
 
     stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min", min_delta=0.00001)
     checkpoint = L.pytorch.callbacks.ModelCheckpoint(monitor="val_loss", dirpath="optimized_models/" + FILTER_NAME,
-                                                     filename="best-{epoch}-{val_loss:.5f}",
+                                                     filename="best-{epoch}-{val_loss:.5f}-{train_loss:.5f}",
                                                      mode="min",
                                                      save_top_k=1,  # Сохраняем только одну лучшую
                                                      save_weights_only=False,
@@ -110,8 +110,7 @@ def objective(trial):
     # Запуск процесса обучения
     trainer.fit(lit_model, dm)
 
-    val_loss = trainer.callback_metrics["val_loss"].item()
-    trial.report(val_loss, step=0)
+    val_loss = checkpoint.best_model_score
     score = val_loss
 
     return score
@@ -146,8 +145,7 @@ def main():
     study.optimize(objective, n_trials=100)  # Количество итераций оптимизации
 
     # 4. Выводим результаты
-    print("Лучшие параметры:")
-    print(study.best_params)
+    print(f"Лучшие параметры: {study.best_params}")
     print(f"Лучшая accuracy: {study.best_value:.4f}")
 
     # 5. Визуализация (опционально)
