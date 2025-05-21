@@ -20,12 +20,11 @@ mwlab.opt.objectives.metrics
 
 Как работают
 ------------
-1. Получают **сырые** тензоры *(batch, …)* из `validation_step`.
-2. (Если задан) снимают масштабирующие скейлеры выхода.
+1. Получают батч **сырых** тензоров S-параметров из `validation_step`.
+2. При необходимости снимают нормализацию (`scaler_out.inverse`).
 3. Декодируют тензор → `rf.Network` через `TouchstoneCodec`.
-4. С помощью `Specification.is_ok(net)` переводят в bool (0/1).
-5. Передают bool-вектора во встроенный класс из `torchmetrics`
-   (`Accuracy`, `Recall`, `Precision`, `F1Score`).
+4. С помощью `Specification.is_ok(net)` превращают в bool (0 / 1).
+5. Передают bool-вектора во встроенную метрику `torchmetrics`.
 
 Пример подключения к Lightning-модулю
 -------------------------------------
@@ -100,16 +99,35 @@ from mwlab.codecs.touchstone_codec import TouchstoneCodec
 def _inverse_if_needed(t: Tensor, scaler):
     """
     Снимает нормализацию, если передан scaler.
-    Поддерживаются оба варианта API: .inverse() и .inverse_transform().
+
+    * Поддерживает API `.inverse()` и `.inverse_transform()`.
+    * Если вход *(B, F)*, а буфер скейлера имеет форму *(1, C, …)* ―
+      буфер расплющивается и бродкастится, чтобы избежать ошибки
+      несовпадения размерностей.
     """
     if scaler is None:
         return t
-    if hasattr(scaler, "inverse"):
-        return scaler.inverse(t)
-    if hasattr(scaler, "inverse_transform"):
-        arr = scaler.inverse_transform(t.cpu().numpy())
-        return torch.as_tensor(arr, dtype=t.dtype, device=t.device)
+
+    # прямое использование, если форма совпадает
+    try:
+        if hasattr(scaler, "inverse"):
+            return scaler.inverse(t)
+        if hasattr(scaler, "inverse_transform"):
+            arr = scaler.inverse_transform(t.cpu().numpy())
+            return torch.as_tensor(arr, dtype=t.dtype, device=t.device)
+    except RuntimeError as err:
+        # попробуем «ручное» обратное преобразование через буферы
+        if not hasattr(scaler, "data_range") or not hasattr(scaler, "data_min"):
+            raise err
+
+        dr = scaler.data_range.reshape(-1)          # (F0,)
+        dm = scaler.data_min.reshape(-1)
+        flat = t.view(t.size(0), -1)                # (B, F)
+        flat = flat * dr + dm                       # обратное MinMax
+        return flat.view_as(t)
+
     raise AttributeError("scaler has neither inverse nor inverse_transform")
+
 
 #───────────────────────────────────────────── базовый класс
 class _SpecMetricMixin:
