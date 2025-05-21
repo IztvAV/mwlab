@@ -32,4 +32,5 @@ filters/FilterData/*/datasets_data_*
 filters/saved_models
 lightning_logs
 optimized_models
+saved_models
 *.pkl
