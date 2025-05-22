@@ -14,9 +14,7 @@ H. Zhang et al., *IEEE TAP*, 2018 — но с возможностью:
 Стратегии поиска
 ----------------
 * ``strategy="lhs_global"`` – глобальный перебор «угловых» точек LHS
-  (полностью реализовано).
-* ``strategy="axis_zoom"``  – прежний локальный бинарный zoom
-  (оставлен TODO; можно включить при нехватке времени).
+* ``strategy="axis_zoom"``  – бинарный поиск по каждой оси
 
 Идея «lhs_global»
 -----------------
@@ -120,7 +118,8 @@ class BoxFinder:
         """
         if self.strategy == "lhs_global":
             return self._find_lhs_global(center, space, surrogate, spec, delta_init)
-        raise NotImplementedError("axis_zoom strategy: TODO")
+        # ─── быстрый локальный поиск ─────────────────
+        raise self._find_axis_zoom(center, space, surrogate, spec, delta_init)
 
     # ======================================================================
     #                       INTERNAL — LHS-GLOBAL
@@ -226,6 +225,66 @@ class BoxFinder:
         c_star = 0.5 * (best_low + best_high)
         d_minus = c_star - best_low
         d_plus = best_high - c_star
+        return {n: (-dm, dp) for n, dm, dp in zip(names, d_minus, d_plus)}
+
+    # ======================================================================
+    # INTERNAL — AXIS-ZOOM  (быстрый локальный)
+    # ======================================================================
+    def _find_axis_zoom(
+        self,
+        center_dict: Mapping[str, float],
+        space: DesignSpace,
+        surrogate: BaseSurrogate,
+        spec: Specification,
+        delta_init: float | Mapping[str, float],
+    ) -> Dict[str, Tuple[float, float]]:
+        names = list(space.names())
+        center = np.asarray([center_dict[n] for n in names])
+        d_minus = self._delta_to_array(delta_init, names)
+        d_plus  = self._delta_to_array(delta_init, names)
+
+        # helper для проверки yield
+        def _yield(dm: np.ndarray, dp: np.ndarray) -> float:
+            lows, highs = center - dm, center + dp
+            cloud = self._sobol_points(lows, highs, self.N)
+            dict_cloud = [{n: float(v) for n, v in zip(names, row)} for row in cloud]
+            ok_mask = np.array([spec.is_ok(net)
+                                for net in surrogate.batch_predict(dict_cloud)])
+            return float(ok_mask.mean())
+
+        if self.mode == "sym":
+            # прежняя симметричная логика
+            best = d_plus.copy()
+            for _ in range(self.max_iter):
+                y = _yield(best, best)
+                if y >= self.alpha:
+                    best *= self.zoom
+                else:
+                    best *= 0.5
+                if np.max(best) < 1e-12:
+                    break
+            return {n: (-d, d) for n, d in zip(names, best)}
+
+        # ─── asym: отдельный zoom в + / – для каждой оси ────────────────
+        for _ in range(self.max_iter):
+            progress = False
+            # попытка расширить каждую грань индивидуально
+            for i in range(len(names)):
+                # positive side
+                test_p = d_plus.copy()
+                test_p[i] *= self.zoom
+                if _yield(d_minus, test_p) >= self.alpha:
+                    d_plus[i] = test_p[i]
+                    progress = True
+                # negative side
+                test_m = d_minus.copy()
+                test_m[i] *= self.zoom
+                if _yield(test_m, d_plus) >= self.alpha:
+                    d_minus[i] = test_m[i]
+                    progress = True
+            if not progress:
+                break
+
         return {n: (-dm, dp) for n, dm, dp in zip(names, d_minus, d_plus)}
 
     # ---------- repr -------------------------------------------------------
