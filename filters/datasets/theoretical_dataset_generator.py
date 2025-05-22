@@ -11,6 +11,7 @@ from mwlab.io.backends import HDF5Backend, RAMBackend, StorageBackend, FileBacke
 from mwlab.transforms.s_transforms import S_Crop, S_Resample
 from mwlab.transforms import TComposite
 
+import matplotlib.pyplot as plt
 
 
 @dataclass
@@ -42,6 +43,9 @@ GET_HDF5_FILENAME = lambda path: os.path.join(path, "Dataset.h5")
 GET_PICKLE_FILENAME = lambda path: os.path.join(path, "Dataset.pkl")
 
 
+AVAILABLE_BACKEND_TYPES = ['s2p', 'hdf5', 'ram']
+
+
 class CMTheoreticalDatasetGenerator:
     def __init__(self,
                  path_to_origin_filter: str,  # Путь к директории где располагается s2p-файл с оригинальным фильтром
@@ -51,23 +55,19 @@ class CMTheoreticalDatasetGenerator:
                  pss_shifts_delta: PSShift,
                  samplers_size: int,
                  samplers_type: SamplerTypes=SamplerTypes.SAMPLER_LATIN_HYPERCUBE,
+                 samplers_kwargs: dict = {},
                  resample_scale: int = 301,  # Значение для ресемплинга
                  f_start: float|None = None,  # Полоса откуда обрезаем
                  f_stop: float|None = None,  # Полоса до которой обрезаем
                  f_unit: str|None = None,
-                 backend: StorageBackend = None,
+                 backend_type: str = 'ram',
+                 backend_kwargs: dict = {}
                  ):
         self._dataset_size = samplers_size
         self._path_to_save_dataset = path_to_save_dataset+f"_{self._dataset_size}"
-        self._enable_generate = True
-        print(f"Write data into directory: {self._path_to_save_dataset}")
-        if not os.path.exists(self._path_to_save_dataset):
-            os.makedirs(self._path_to_save_dataset)
-        self._enable_generate = self._check_dataset(backend)
-        if not self._enable_generate:
-            backend.__dict__.update(RAMBackend.load_pickle(GET_PICKLE_FILENAME(self._path_to_save_dataset)).__dict__)
-            print(f"Directory already have dataset files!!!")
-        self._backend = backend
+        self._backend = self.create_backend(backend_type, backend_kwargs)
+        self._backend_type = backend_type
+
         tds = TouchstoneDataset(source=path_to_origin_filter)
         origin_filter_ = MWFilter.from_touchstone_dataset_item(tds[0])
         f0 = origin_filter_.f0
@@ -84,43 +84,80 @@ class CMTheoreticalDatasetGenerator:
         ])
         tds_transformed = TouchstoneDataset(source=path_to_origin_filter, s_tf=self._y_transform)
         self._origin_filter = MWFilter.from_touchstone_dataset_item(tds_transformed[0])
-        self._samplers = self._create_samplers(samplers_type, samplers_size, cm_shifts_delta,
+        self._samplers = self._create_samplers(samplers_type, samplers_size, samplers_kwargs, cm_shifts_delta,
                                                pss_origin, pss_shifts_delta)
-    """ В качестве бэкэнда пока что используется только RAMBackend """
 
-    def _check_dataset(self, backend: StorageBackend) -> bool:
-        if isinstance(backend, FileBackend):
-            return not os.path.exists(GET_S2P_FILENAME_FOR_INDEX(backend.paths, 0))
-        elif isinstance(backend, HDF5Backend):
-            return not os.path.exists(GET_HDF5_FILENAME(backend.paths))
-        elif isinstance(backend, RAMBackend):
+    def _check_dataset(self, backend_type: str) -> bool:
+        if backend_type == 's2p':
+            return not os.path.exists(GET_S2P_FILENAME_FOR_INDEX(self._path_to_save_dataset, 0))
+        elif backend_type == 'hdf5':
+            return not os.path.exists(GET_HDF5_FILENAME(self._path_to_save_dataset))
+        elif backend_type == 'ram':
             return not os.path.exists(GET_PICKLE_FILENAME(self._path_to_save_dataset))
-        else:
-            ValueError(f"Unsupported backed: {backend}")
 
-    def _create_samplers(self, samplers_type: SamplerTypes, samplers_size: int,
+    def create_backend(self, backend_type: str, backend_kwargs: dict) -> StorageBackend:
+        if not backend_type in AVAILABLE_BACKEND_TYPES:
+            raise ValueError(f"Unsupported backed: {backend_type}")
+        self._enable_generate = self._check_dataset(backend_type)
+        if not self._enable_generate:
+            print(f"Directory already have dataset files. Load backend from existing")
+            if backend_type == 's2p':
+                backend = FileBackend(self._path_to_save_dataset, **backend_kwargs)
+            elif backend_type == 'hdf5':
+                backend = HDF5Backend(GET_HDF5_FILENAME(self._path_to_save_dataset), **backend_kwargs)
+            elif backend_type == 'ram':
+                backend = RAMBackend.load_pickle(GET_PICKLE_FILENAME(self._path_to_save_dataset), **backend_kwargs)
+        else:
+            print(f"Write data into directory: {self._path_to_save_dataset}")
+            if not os.path.exists(self._path_to_save_dataset):
+                os.makedirs(self._path_to_save_dataset)
+            if backend_type == 's2p':
+                backend = FileBackend(self._path_to_save_dataset, **backend_kwargs)
+            elif backend_type == 'hdf5':
+                backend = HDF5Backend(GET_HDF5_FILENAME(self._path_to_save_dataset), mode='w', **backend_kwargs)
+            elif backend_type == 'ram':
+                backend = RAMBackend([], **backend_kwargs)
+        return backend
+
+
+    def _create_samplers(self, samplers_type: SamplerTypes, samplers_size: int, samplers_kwargs,
                          cm_shifts_delta, pss_origin, pss_shifts_delta) -> CMTheoreticalDatasetGeneratorSamplers:
         m_min, m_max = self.create_min_max_matrices(origin_matrix=self.origin_filter.coupling_matrix,
                                                     deltas=cm_shifts_delta)
         phase_shifts_min, phase_shifts_max = self.create_min_max_phase_shifts(
             origin_shifts=pss_origin, deltas=pss_shifts_delta)
 
-        if samplers_type == SamplerTypes.SAMPLER_LATIN_HYPERCUBE:
-            cms_factors = Sampler.lhs(start=CouplingMatrix(matrix=m_min).factors, stop=CouplingMatrix(matrix=m_max).factors,
-                                      num=samplers_size)
-            pss_sampler = Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=samplers_size)
-        elif samplers_type == SamplerTypes.SAMPLER_STD:
-            cms_factors = Sampler.std(start=CouplingMatrix(matrix=m_min).factors,
-                                      stop=CouplingMatrix(matrix=m_max).factors,
-                                      num=samplers_size)
-            pss_sampler = Sampler.Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=samplers_size)
-        elif samplers_type == SamplerTypes.SAMPLER_UNIFORM:
-            cms_factors = Sampler.uniform(start=CouplingMatrix(matrix=m_min).factors,
-                                      stop=CouplingMatrix(matrix=m_max).factors,
-                                      num=samplers_size)
-            pss_sampler = Sampler.Sampler.uniform(start=phase_shifts_min, stop=phase_shifts_max, num=samplers_size)
-        else:
-            raise ValueError(f"Неизвестный тип сэмплеров {samplers_type}")
+        cms_factors = Sampler.for_type(
+            **samplers_kwargs,
+            type=samplers_type,
+            start=CouplingMatrix(matrix=m_min).factors,
+            stop=CouplingMatrix(matrix=m_max).factors,
+            num=samplers_size)
+        pss_sampler = Sampler.for_type(
+            **samplers_kwargs,
+            type=samplers_type,
+            start=phase_shifts_min,
+            stop=phase_shifts_max,
+            num=samplers_size)
+
+        # if samplers_type == SamplerTypes.SAMPLER_LATIN_HYPERCUBE:
+        #     cms_factors = Sampler.lhs(start=CouplingMatrix(matrix=m_min).factors, stop=CouplingMatrix(matrix=m_max).factors,
+        #                               num=samplers_size)
+        #     pss_sampler = Sampler.lhs(start=phase_shifts_min, stop=phase_shifts_max, num=samplers_size)
+        # elif samplers_type == SamplerTypes.SAMPLER_STD or samplers_type == SamplerTypes.SAMPLER_UNIFORM or:
+        #     cms_factors = Sampler.std(start=CouplingMatrix(matrix=m_min).factors,
+        #                               stop=CouplingMatrix(matrix=m_max).factors,
+        #                               num=samplers_size)
+        #     pss_sampler = Sampler.std(start=phase_shifts_min, stop=phase_shifts_max, num=samplers_size)
+        # elif samplers_type == SamplerTypes.SAMPLER_UNIFORM:
+        #     cms_factors = Sampler.uniform(start=CouplingMatrix(matrix=m_min).factors,
+        #                               stop=CouplingMatrix(matrix=m_max).factors,
+        #                               num=samplers_size)
+        #     pss_sampler = Sampler.Sampler.uniform(start=phase_shifts_min, stop=phase_shifts_max, num=samplers_size)
+        # elif samplers_type == SamplerTypes.SAMPLER_GAUSSIAN_SADDLE:
+        #
+        # else:
+        #     raise ValueError(f"Неизвестный тип сэмплеров {samplers_type}")
         cm_sampler_space = np.zeros(shape=(len(cms_factors), *self._origin_filter.coupling_matrix.matrix.shape),
                                     dtype=float)
         for cm_factors, idx in tuple(zip(cms_factors, range(len(cms_factors)))):
@@ -159,8 +196,17 @@ class CMTheoreticalDatasetGenerator:
         return phase_shifts_min, phase_shifts_max
 
     @property
+    def backend(self):
+        return self._backend
+
+    @property
     def path_to_dataset(self):
-        return GET_PICKLE_FILENAME(self._path_to_save_dataset)
+        if self._backend_type == 'ram':
+            return GET_PICKLE_FILENAME(self._path_to_save_dataset)
+        elif self._backend_type == 'hdf5':
+            return GET_HDF5_FILENAME(self._path_to_save_dataset)
+        elif self._backend_type == 's2p':
+            return self._path_to_save_dataset
 
     @property
     def origin_filter(self):
@@ -188,5 +234,6 @@ class CMTheoreticalDatasetGenerator:
                      Q=self._origin_filter.Q, matrix=new_matrix, frequency=self._origin_filter.f, s=s_params, z0=50))
             ts = new_filter.to_touchstone_data()
             self._backend.append(ts)
-        self._backend.dump_pickle(GET_PICKLE_FILENAME(self._path_to_save_dataset))
+        if self._backend_type == 'ram':
+            self._backend.dump_pickle(GET_PICKLE_FILENAME(self._path_to_save_dataset))
 

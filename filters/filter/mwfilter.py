@@ -114,6 +114,14 @@ class MWFilter(rf.Network):
         # Сохраняем обычный touchstone файл (без комментариев)
         super().write_touchstone(filename)
 
+    @staticmethod
+    def to_db(s):
+        return 20 * torch.log10(abs(torch.tensor(s)))
+
+    @property
+    def s_db(self):
+        return self.to_db(self.s)
+
     @property
     def coupling_matrix(self):
         return self._coupling_matrix

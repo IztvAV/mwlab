@@ -2,13 +2,12 @@ import os
 import time
 
 from mwlab.nn.scalers import MinMaxScaler
-from mwlab import TouchstoneDataset, TouchstoneLDataModule
+from mwlab import TouchstoneDataset, TouchstoneLDataModule, TouchstoneDatasetAnalyzer
 from mwlab.io.backends import RAMBackend
 
-from filters import CMTheoreticalDatasetGenerator, CouplingMatrix
+from filters import CMTheoreticalDatasetGenerator, SamplerTypes
 from filters.codecs import MWFilterTouchstoneCodec
 from filters.mwfilter_lightning import MWFilterBaseLModule, MWFilterBaseLMWithMetrics
-from filters.filter import MWFilter
 
 from filters.datasets.theoretical_dataset_generator import CMShifts, PSShift
 
@@ -18,11 +17,9 @@ import lightning as L
 from torch import nn
 import models
 import torch
-from scipy.optimize import minimize
+from filters.mwfilter_optim.bfgs import optimize_cm
 
 torch.set_float32_matmul_precision("medium")
-
-to_db = lambda x: 20 * torch.log10(abs(x))
 
 BATCH_SIZE = 64
 DATASET_SIZE = 100_000
@@ -31,108 +28,15 @@ ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "datasets_data")
 
 
-class FastMN2toSParamCalculation:
-    def __init__(self, matrix_order, fbw, Q, w_min=0, w_max=0, w_num=0, wlist=None):
-        self.matrix_order = matrix_order
-        if wlist is None:
-            self.w = torch.linspace(w_min, w_max, w_num)
-        else:
-            self.w = torch.tensor(wlist)
-        self.R = torch.zeros(matrix_order, matrix_order, dtype=torch.complex64)
-        self.R[0, 0] = 1j
-        self.R[-1, -1] = 1j
-        self.I = torch.eye(matrix_order, matrix_order, dtype=torch.complex64)
-        self.I[0, 0] = 0
-        self.I[-1, -1] = 0
-        self.G = 1j*1 * torch.eye(matrix_order, matrix_order, dtype=torch.complex64)
-        self.G[0, 0] = 0
-        self.G[-1, -1] = 0
-        for res in range(1, matrix_order - 1):
-            self.G[res, res] = 1j / (fbw * Q)
-        self.S11 = torch.zeros(w_num, dtype=torch.complex64)
-        self.S21 = torch.zeros(w_num, dtype=torch.complex64)
-        self.S22 = torch.zeros(w_num, dtype=torch.complex64)
-        self.w_calc = self.w.view(-1, 1, 1)
-
-    def RespM2_gpu(self, M):
-        # Батчевое создание матриц A
-        MR = torch.tensor(M) - self.R
-        A = MR + self.w_calc * self.I - self.G
-
-        # Обратные матрицы
-        Ainv = torch.linalg.inv(A)  # (B, N, N)
-
-        # Расчет S-параметров
-        A00 = Ainv[:, 0, 0]
-        # ANN = Ainv[:, -1, -1]
-        AN0 = Ainv[:, -1, 0]
-
-        S11 = 1 + 2j * 1 * A00
-        # S22 = 1 + 2j * Rl * ANN
-        S21 = -2j * torch.sqrt(torch.tensor(1 * 1, dtype=torch.float32)) * AN0
-
-        return self.w, S11, S21
-
-
-def optimize_cm(pred_filter:MWFilter, orig_filter: MWFilter):
-    def cost(x, *args):
-        """ х - элементы матрицы связи (сначала главная диагональ D, потом D+1, потом побочная d, потом d+1"""
-        fast_calc, orig_filter, s11_origin, s21_origin = args
-        matrix = CouplingMatrix.from_factors(x, orig_filter.coupling_matrix.links, orig_filter.coupling_matrix.matrix_order)
-        _, s11_pred, s21_pred = fast_calc.RespM2_gpu(matrix)
-        cost = torch.sum(torch.abs(s21_origin - to_db(s21_pred))) + torch.sum(torch.abs(s11_origin - to_db(s11_pred)))
-        return cost.item()
-
-    x0_real = pred_filter.coupling_matrix.factors
-    x0 = x0_real
-    x0 = torch.round(torch.tensor(x0), decimals=5)
-    print("Start optimize")
-    fast_calc = FastMN2toSParamCalculation(matrix_order=orig_filter.coupling_matrix.matrix_order, wlist=orig_filter.f_norm, Q=orig_filter.Q, fbw=orig_filter.fbw) # Q=torch.inf потому что мы предсказываем на фильтре с потерями
-    s11_origin_db = to_db(torch.tensor(orig_filter.s[:, 0, 0]))
-    s21_origin_db = to_db(torch.tensor(orig_filter.s[:, 1, 0]))
-    start_time = time.time_ns()
-    prev_cost = 0
-    for _ in range(15):
-        optim_res = minimize(fun=cost, x0=x0, jac="2-points", method="BFGS",
-                             args=(fast_calc, orig_filter, s11_origin_db, s21_origin_db),
-                             options={"disp": True, "maxiter": 50})
-        x0 = optim_res.x
-
-        if optim_res.nit == 0:
-            print("Number of iteration is 0. Break loop")
-            break
-        elif abs(optim_res.fun - prev_cost) < 1e-2:
-            print("Different between cost function values less than 1e-2. Break loop")
-            break
-        elif abs(optim_res.fun) < 1:
-            print("Cost function value less than 1. Break loop")
-            break
-        prev_cost = optim_res.fun
-    stop_time = time.time_ns()
-    print(f"Optimize time: {(stop_time - start_time) / 1e9} sec")
-
-    optim_matrix = CouplingMatrix.from_factors(optim_res.x, orig_filter.coupling_matrix.links,
-                                               orig_filter.coupling_matrix.matrix_order)
-    w, s11_optim_resp, s21_optim_resp = fast_calc.RespM2_gpu(optim_matrix)
-    s11_optim_db = to_db(s11_optim_resp)
-    s21_optim_db = to_db(s21_optim_resp)
-
-    plt.figure()
-    plt.title("S11")
-    plt.plot(w, s11_origin_db, w, s11_optim_db)
-    plt.legend(["Origin", "Optimized"])
-
-    plt.figure()
-    plt.title("S21")
-    plt.plot(w, s21_origin_db, w, s21_optim_db)
-    plt.legend(["Origin", "Optimized"])
-
-    return optim_res.x
-
+def plot_distribution(ds: TouchstoneDataset, num_params: int, batch: int = 6):
+    analyzer = TouchstoneDatasetAnalyzer(ds)
+    varying = analyzer.get_varying_keys()
+    r = int((num_params / batch) + num_params%batch)
+    for i in range(r):
+        analyzer.plot_param_distributions(varying[batch*i:batch*(i+1)])
 
 
 def main():
-    backend = RAMBackend([])
     ds_gen = CMTheoreticalDatasetGenerator(
         path_to_origin_filter=ENV_ORIGIN_DATA_PATH,
         path_to_save_dataset=ENV_DATASET_PATH,
@@ -140,11 +44,17 @@ def main():
         pss_shifts_delta=PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
         cm_shifts_delta=CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=0.005),
         samplers_size=DATASET_SIZE,
-        backend=backend
+        backend_type='ram',
+        samplers_type=SamplerTypes.SAMPLER_GAUSSIAN_SADDLE,
+        samplers_kwargs={"depth": 1}
     )
     ds_gen.generate()
+    ds = TouchstoneDataset(source=ds_gen.backend, in_memory=True)
 
-    codec = MWFilterTouchstoneCodec.from_dataset(TouchstoneDataset(source=backend, in_memory=True))
+    plot_distribution(ds, num_params=len(ds_gen.origin_filter.coupling_matrix.links))
+    plt.show()
+
+    codec = MWFilterTouchstoneCodec.from_dataset(ds)
     codec.exclude_keys(["f0", "bw", "N", "Q"])
     print(codec)
     # Исключаем из анализа ненужные x-параметры
@@ -152,7 +62,7 @@ def main():
     print("Количество каналов:", len(codec.y_channels))
 
     dm = TouchstoneLDataModule(
-        source=backend,         # Путь к датасету
+        source=ds_gen.backend,         # Путь к датасету
         codec=codec,                   # Кодек для преобразования TouchstoneData → (x, y)
         batch_size=BATCH_SIZE,                 # Размер батча
         val_ratio=0.2,                 # Доля валидационного набора
@@ -199,7 +109,7 @@ def main():
     model = models.ResNet1DFlexible(
         in_channels=len(codec.y_channels),
         out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
-        num_blocks=[1, 1, 5, 3],
+        num_blocks=[1, 1, 6, 3],
         layer_channels=[128, 256, 512, 512],
         first_conv_kernel=11,
         first_conv_channels=128,
@@ -257,15 +167,14 @@ def main():
     ).to(lit_model.device)
     orig_fil, pred_fil = inference_model.predict(dm, idx=0)
     inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
-    optim_factors = optimize_cm(pred_fil, orig_fil)
+    optimize_cm(pred_fil, orig_fil)
 
     # Предсказываем эталонный фильтр
     orig_fil = ds_gen.origin_filter
     pred_prms = inference_model.predict_x(orig_fil)
-    pred_fil = inference_model.create_filter_from_prediction(orig_fil, orig_fil.to_touchstone_data(None).params,
-                                                             pred_prms, meta)
-    inference_model.plot_origin_vs_prediction(ds_gen.origin_filter, pred_fil)
-    optim_factors = optimize_cm(pred_fil, orig_fil)
+    pred_fil = inference_model.create_filter_from_prediction(orig_fil, pred_prms, meta)
+    inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
+    optimize_cm(pred_fil, orig_fil)
     plt.show()
 
 

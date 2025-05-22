@@ -9,6 +9,7 @@ class SamplerTypes(enum.Enum):
     SAMPLER_RANDOM = 2,
     SAMPLER_LATIN_HYPERCUBE = 3,
     SAMPLER_STD = 4,
+    SAMPLER_GAUSSIAN_SADDLE = 5,
 
 
 class Sampler:
@@ -53,14 +54,72 @@ class Sampler:
         return cls(type=SamplerTypes.SAMPLER_LATIN_HYPERCUBE, space=full_samples)
 
     @classmethod
-    def std(cls, start, stop, num, mu=0.5, sigma=1):
-        # Генерация в нормализованном пространстве [0, 1]
-        normalized = np.random.normal(loc=mu, scale=sigma, size=(num, len(start)))
+    def std(cls, start, stop, num):
+        # Проверка на одинаковую длину векторов min и max
+        if len(start) != len(stop):
+            raise ValueError("Длины векторов min и max должны совпадать.")
 
-        # Обрезка значений за пределами [0, 1] и масштабирование
-        clipped = np.clip(normalized, 0, 1)
-        space = start + clipped * (stop - start)
+        # Вычисляем среднее (μ) и стандартное отклонение (σ)
+        mu = (start + stop) / 2
+        sigma = (stop - mu) / 3  # Правило трёх сигм
+
+        # Генерируем нормальное распределение
+        space = np.random.normal(loc=mu, scale=sigma, size=(num, len(mu)))
         return cls(SamplerTypes.SAMPLER_STD, space)
+
+    @classmethod
+    def gaussian_saddle(cls, start, stop, num, depth):
+        """
+         Генерирует матрицу бимодальных распределений для каждого элемента.
+
+         Параметры:
+             min_vector (np.array): Вектор минимальных значений (shape=(n,)).
+             max_vector (np.array): Вектор максимальных значений (shape=(n,)).
+             size (int): Размер выборки для каждого элемента.
+
+         Возвращает:
+             np.array: Матрица shape=(n, size) с бимодальными распределениями.
+         """
+        min_vector = np.asarray(start)
+        max_vector = np.asarray(stop)
+
+        if len(min_vector) != len(max_vector):
+            raise ValueError("Длины min_vector и max_vector должны совпадать")
+
+        n = len(min_vector)
+        matrix = np.zeros((n, num))
+
+        for i in range(n):
+            # Центры двух мод (сдвинуты к min и max)
+            mu1 = min_vector[i] + 0.3 * (max_vector[i] - min_vector[i])
+            mu2 = max_vector[i] - 0.3 * (max_vector[i] - min_vector[i])
+
+            # Стандартное отклонение (10% от диапазона)
+            sigma = 0.1 * (max_vector[i] - min_vector[i])
+
+            # Генерация двух мод
+            mode1 = np.random.normal(mu1, sigma, num // 2)
+            mode2 = np.random.normal(mu2, sigma, num // 2)
+
+            # Объединение и перемешивание
+            matrix[i] = np.concatenate([mode1, mode2])
+            np.random.shuffle(matrix[i])
+        space = matrix.T
+
+        return cls(SamplerTypes.SAMPLER_GAUSSIAN_SADDLE, space)
+
+    @classmethod
+    def for_type(cls, start, stop, num, type, **kwargs):
+        if type == SamplerTypes.SAMPLER_UNIFORM:
+            return cls.uniform(start, stop, num)
+        elif type == SamplerTypes.SAMPLER_STD:
+            return cls.std(start, stop, num)
+        elif type == SamplerTypes.SAMPLER_LATIN_HYPERCUBE:
+            return cls.lhs(start, stop, num)
+        elif type == SamplerTypes.SAMPLER_GAUSSIAN_SADDLE:
+            return cls.gaussian_saddle(start, stop, num, **kwargs)
+        else:
+            raise ValueError(f"Выбранный сэмплер не реализован: {type}")
 
     @property
     def type(self):
