@@ -119,7 +119,7 @@ class BoxFinder:
         if self.strategy == "lhs_global":
             return self._find_lhs_global(center, space, surrogate, spec, delta_init)
         # ─── быстрый локальный поиск ─────────────────
-        raise self._find_axis_zoom(center, space, surrogate, spec, delta_init)
+        return self._find_axis_zoom(center, space, surrogate, spec, delta_init)
 
     # ======================================================================
     #                       INTERNAL — LHS-GLOBAL
