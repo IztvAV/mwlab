@@ -3,6 +3,7 @@ from mwlab import BaseLModule, TouchstoneLDataModule, BaseLMWithMetrics
 from filters import MWFilter, CouplingMatrix
 import matplotlib.pyplot as plt
 from torch.utils.data import Dataset
+from filters.mwfilter_optim.base import FastMN2toSParamCalculation
 
 
 class MWFilterBaseLModule(BaseLModule):
@@ -95,3 +96,32 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         origin_fil.plot_s_db(m=1, n=0, label='S21 origin')
         pred_fil.plot_s_db(m=0, n=0, label='S11 pred', ls=':')
         pred_fil.plot_s_db(m=1, n=0, label='S21 pred', ls=':')
+
+
+class MWFilterBaseLMWithMetricsCAE(MWFilterBaseLMWithMetrics):
+    def __init__(self, origin_filter: MWFilter, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.origin_filter = origin_filter
+        self.fast_calc = FastMN2toSParamCalculation(matrix_order=self.origin_filter.coupling_matrix.matrix_order,
+                                                    wlist=self.origin_filter.f_norm, Q=self.origin_filter.Q,
+                                                    fbw=self.origin_filter.fbw)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """X → Z (учитываем scaler_in, если есть)."""
+        if self.scaler_in is not None:
+            x = self.scaler_in(x)
+        preds = self.model(x)
+        matrix_factors = self.scaler_out.inverse(preds)
+        s_origin_db = MWFilter.to_db(x)
+        matrix = CouplingMatrix.from_factors(matrix_factors, self.origin_filter.coupling_matrix.links,
+                                             self.origin_filter.coupling_matrix.matrix_order)
+        s_pred = self.fast_calc.RespM2(matrix)
+        s_pred_db = MWFilter.to_db(s_pred)
+        loss = self.loss_fn(s_pred_db, s_origin_db)
+        return loss
+
+    def _shared_step(self, batch):
+        x, y, _ = self._split_batch(batch)
+        preds = self(x)
+        return preds
+

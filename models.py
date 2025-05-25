@@ -2,6 +2,25 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+from filters import MWFilter
+
+
+def _get_activation(name):
+    """Возвращает функцию активации по имени"""
+    activations = {
+        'relu': F.relu,
+        'leaky_relu': F.leaky_relu,
+        'elu': F.elu,
+        'selu': F.selu,
+        'tanh': torch.tanh,
+        'sigmoid': torch.sigmoid,
+        'swish': lambda x: x * torch.sigmoid(x),
+        'mish': lambda x: x * torch.tanh(F.softplus(x)),
+        'gelu': F.gelu,
+        'none': lambda x: x
+    }
+    return activations.get(name.lower(), F.relu)
+
 
 class LSTM(nn.Module):
     def __init__(self, input_size=8, hidden_size=64, num_layers=2, output_size=10, bidirectional=False):
@@ -131,7 +150,7 @@ class VGG1D(nn.Module):
 
 
 class BasicBlock1D(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1):
+    def __init__(self, in_channels, out_channels, stride=1, activation='relu'):
         super().__init__()
         self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1)
         self.bn1 = nn.BatchNorm1d(out_channels)
@@ -144,11 +163,14 @@ class BasicBlock1D(nn.Module):
                 nn.BatchNorm1d(out_channels),
             )
 
+        # Выбор функции активации
+        self.activation = _get_activation(activation)
+
     def forward(self, x):
-        out = nn.ReLU()(self.bn1(self.conv1(x)))
+        out = self.activation(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
         out += self.shortcut(x)  # Residual connection
-        out = nn.ReLU()(out)
+        out = self.activation(out)
         return out
 
 
@@ -187,13 +209,17 @@ class ResNet1D(nn.Module):
         return x
 
 
-# Модифицированная ResNet1D с настраиваемыми параметрами
 class ResNet1DFlexible(nn.Module):
     def __init__(self, in_channels=8, out_channels=10,
                  first_conv_channels=64, first_conv_kernel=7,
-                 layer_channels=[64, 128, 256, 512],  # Количество каналов для каждого слоя
-                 num_blocks=[1, 2, 3, 1]):
+                 layer_channels=[64, 128, 256, 512],
+                 num_blocks=[1, 2, 3, 1],
+                 activation_in='relu', activation_block='relu'):
         super().__init__()
+
+        # Сохраняем параметр активации
+        self.activation_name = activation_in
+        self.activation = _get_activation(activation_in)
 
         # Первый сверточный слой
         self.conv1 = nn.Conv1d(in_channels, first_conv_channels,
@@ -207,21 +233,23 @@ class ResNet1DFlexible(nn.Module):
         self.layers = nn.ModuleList()
         in_ch = first_conv_channels
         for out_ch, n_blocks in zip(layer_channels, num_blocks):
-            self.layers.append(self.make_layer(in_ch, out_ch, n_blocks, stride=2 if in_ch != out_ch else 1))
+            self.layers.append(self.make_layer(in_ch, out_ch, n_blocks,
+                                               stride=2 if in_ch != out_ch else 1,
+                                               activation=activation_block))
             in_ch = out_ch
 
         self.avgpool = nn.AdaptiveAvgPool1d(1)
         self.fc = nn.Linear(in_ch, out_channels)
 
     @staticmethod
-    def make_layer(in_channels, out_channels, num_blocks, stride):
-        layers = [BasicBlock1D(in_channels, out_channels, stride)]
+    def make_layer(in_channels, out_channels, num_blocks, stride, activation):
+        layers = [BasicBlock1D(in_channels, out_channels, stride, activation)]
         for _ in range(1, num_blocks):
-            layers.append(BasicBlock1D(out_channels, out_channels, stride=1))
+            layers.append(BasicBlock1D(out_channels, out_channels, stride=1, activation=activation))
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        x = nn.ReLU()(self.bn1(self.conv1(x)))
+        x = self.activation(self.bn1(self.conv1(x)))
         x = self.maxpool(x)
 
         for layer in self.layers:
