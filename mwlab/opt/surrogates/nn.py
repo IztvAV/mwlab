@@ -14,11 +14,13 @@ NNSurrogate – обертка над уже **обученным** Lightning-м
 """
 from __future__ import annotations
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 import torch
+import torch.nn as nn
 import skrf as rf
 
+from mwlab.lightning.base_lm import _locate_class
 from ..design.space import DesignSpace
 from .base import BaseSurrogate
 from ..surrogates import register   # регистрируем alias
@@ -93,13 +95,40 @@ class NNSurrogate(BaseSurrogate):
         from importlib import import_module
 
         payload = torch.load(path, map_location="cpu")
-        module_path, cls_name = payload["class"].split(":")
-        ModCls = getattr(import_module(module_path), cls_name)
 
-        lm = ModCls.__new__(ModCls)     # type: ignore[call-arg]
-        lm.__init__(model=None)         # dummy init; потом state_dict
+        #module_path, cls_name = payload["class"].split(":")
+        #ModCls = getattr(import_module(module_path), cls_name)
+        #lm = ModCls.__new__(ModCls)     # type: ignore[call-arg]
+        #lm.__init__(model=None)         # dummy init; потом state_dict
+
+        ModCls = _locate_class(payload["class"])
+        # создаем экземпляр без побочных эффектов
+        lm = ModCls.__new__(ModCls)  # type: ignore[call-arg]
+        ModCls.__init__(lm, model=nn.Identity())  # минимальный valid-init
+
         lm.load_state_dict(payload["state_dict"])
         return cls(pl_module=lm)
+
+    # ---------------------------------------------------------------- batch-API
+    def batch_predict(
+            self,
+            xs: Sequence[Mapping[str, float]],
+            *,
+            return_std: bool = False,
+    ):
+        if return_std:
+            raise NotImplementedError("NN surrogate не возвращает дисперсию.")
+
+        codec = getattr(self.model, "codec", None)
+        if codec is None:  # fallback на построчный режим
+            return [self.predict(x) for x in xs]
+
+        with torch.no_grad():
+            X = torch.stack([codec.encode_x(p) for p in xs]).to(self.model.device)
+            preds = self.model(X)
+            if self.model.scaler_out is not None:
+                preds = self.model._apply_inverse(self.model.scaler_out, preds)
+            return [codec.decode_s(row) for row in preds]
 
     # -------------------------------------------------------------------
     def __repr__(self):  # pragma: no cover

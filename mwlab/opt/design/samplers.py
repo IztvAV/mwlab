@@ -1,4 +1,4 @@
-# mwlab/opt/design/samplers.py
+#mwlab/opt/design/samplers.py
 """
 MWLab · opt · design · samplers
 ================================
@@ -132,7 +132,11 @@ def _resolve_rng(
     if isinstance(rng, np.random.Generator):
         np_rng = rng
         # сохраняем переданный генератор как есть и используем тот же seed для Torch
-        seed = int(np_rng.bit_generator.state["state"]["state"] & 0xFFFFFFFF)  # type: ignore[index]
+        # разные BitGenerator-ы имеют слегка разные структуры state
+        try:
+            seed = int(np_rng.bit_generator.state["state"]["state"] & 0xFFFFFFFF)  # type: ignore[index]
+        except Exception:
+            seed = int(np_rng.bit_generator.state.get("state", 0) & 0xFFFFFFFF)
         t_gen = torch.Generator().manual_seed(seed) if torch is not None else None  # type: ignore[arg-type]
         return np_rng, t_gen, seed
 
@@ -194,7 +198,14 @@ class BaseSampler:
             p: PointDict = {}
             for name, val, var in zip(names, row, vars_):
                 if getattr(var, "is_integer", False):
-                    p[name] = int(round(val))
+                    # аккуратно садим на сетку step и в границы
+                    step = int(getattr(var, "step", 1))
+                    if step > 1:
+                        stepped = round(val / step) * step
+                        lo, hi = int(var.lower), int(var.upper)  # type: ignore[attr-defined]
+                        p[name] = int(np.clip(stepped, lo, hi))
+                    else:
+                        p[name] = int(round(val))
                 elif getattr(var, "levels", None) is not None:
                     idx = int(np.clip(np.round(val), 0, len(var.levels) - 1))
                     p[name] = var.levels[idx]

@@ -311,7 +311,8 @@ class DesignSpace:
         pts: List[Dict[str, Any]] = []
         attempts = 0
         while len(pts) < n and attempts < max_attempts:
-            cand = smp.sample(self, n)
+            need = n - len(pts)  # ← сколько еще точек нужно
+            cand = smp.sample(self, need)
             pts.extend(p for p in cand if self._is_valid(p))
             attempts += 1
         if len(pts) < n:

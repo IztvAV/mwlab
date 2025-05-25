@@ -116,7 +116,7 @@ class Specification:
             rep[c.name] = {
                 "value": val,
                 "ok": c.comp.is_ok(val),  # type: ignore[attr-defined]
-                "penalty": c.comp.penalty(val),  # type: ignore[attr-defined]
+                "penalty": c.weight * c.comp.penalty(val),  # type: ignore[attr-defined]
                 "weight": c.weight,
             }
 
