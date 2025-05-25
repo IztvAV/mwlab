@@ -1,13 +1,14 @@
 import optuna
 import os
 import models
-from main import FILTER_NAME, BATCH_SIZE
+from main import FILTER_NAME, BATCH_SIZE, create_origin_filter
 from mwlab.io.backends import RAMBackend
 from filters.mwfilter_lightning import MWFilterBaseLModule, MWFilterBaseLMWithMetrics
-from filters.datasets import CMTheoreticalDatasetGenerator
+from filters.datasets import CMTheoreticalDatasetGenerator, CMTheoreticalDatasetGeneratorSamplers
 from filters.datasets.theoretical_dataset_generator import PSShift, CMShifts
 from filters.filter import MWFilter
 from filters.codecs import MWFilterTouchstoneCodec
+from filters.utils import SamplerTypes, Sampler
 from mwlab import TouchstoneData, TouchstoneDataset, TouchstoneLDataModule
 from mwlab.nn import MinMaxScaler
 from torch import nn
@@ -15,13 +16,13 @@ import lightning as L
 import pickle
 
 
-DATASET_SIZE = 500_000
+DATASET_SIZE = 100_000
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "optimize_data")
 ENV_STUDY_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "study_results")
 TRIAL_NUM = 100
 
-backend = None
+ds_gen = None
 codec = None
 
 
@@ -32,6 +33,20 @@ def save_study_pickle(study, path):
 def load_study_pickle(path):
     with open(path, 'rb') as f:
         return pickle.load(f)
+
+
+def create_samplers(orig_filter: MWFilter):
+    sampler_configs = {
+        "pss_origin": PSShift(phi11=0.547, phi21=-1.0, theta11=0.01685, theta21=0.017),
+        "pss_shifts_delta": PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
+        "cm_shifts_delta": CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=0.005),
+        "samplers_size": DATASET_SIZE,
+    }
+    samplers_lhs_all_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
+                                                                                    samplers_type=SamplerTypes.SAMPLER_LATIN_HYPERCUBE(one_param=False),
+                                                                                    **sampler_configs)
+    return samplers_lhs_all_params
+
 
 
 # 2. Определяем целевую функцию для Optuna
@@ -55,7 +70,11 @@ def objective(trial):
         # 'batch_size': trial.suggest_categorical('batch_size', [32, 64, 128]),
         'lr': trial.suggest_float('lr', 1e-5, 1e-1, log=True),
         'gamma': trial.suggest_float('gamma', 0.1, 1.0, step=0.1),
-        'step_size': trial.suggest_int('step_size', 1, 30)
+        'step_size': trial.suggest_int('step_size', 1, 30),
+        'activation_in': trial.suggest_categorical('activation_in', ['relu', 'elu', 'leaky_relu', 'selu', 'gelu',
+                                                                     'tanh', 'sigmoid', 'swish', 'mish']),
+        'activation_block': trial.suggest_categorical('activation_block', ['relu', 'elu', 'leaky_relu', 'selu', 'gelu',
+                                                                     'tanh', 'sigmoid', 'swish', 'mish'])
     }
 
     # 2. Создаем модель
@@ -66,11 +85,13 @@ def objective(trial):
         first_conv_kernel=params['first_conv_kernel'],
         layer_channels=params['layer_channels'],
         num_blocks=params['num_blocks'],
+        activation_in=params['activation_in'],
+        activation_block=params['activation_block']
     )
 
     # 3. Создаем DataLoader
     dm = TouchstoneLDataModule(
-        source=backend,  # Путь к датасету
+        source=ds_gen.backend,  # Путь к датасету
         codec=codec,  # Кодек для преобразования TouchstoneData → (x, y)
         batch_size=BATCH_SIZE,  # Размер батча
         val_ratio=0.2,  # Доля валидационного набора
@@ -131,21 +152,22 @@ def objective(trial):
 
 def main():
     # 1. Загрузка данных
-    global backend
-    backend = RAMBackend([])
+    print("Создаем фильтр")
+    orig_filter = create_origin_filter(ENV_ORIGIN_DATA_PATH)
+    print("Создаем сэмплеры")
+    samplers = create_samplers(orig_filter)
+    global ds_gen
     ds_gen = CMTheoreticalDatasetGenerator(
-        path_to_origin_filter=ENV_ORIGIN_DATA_PATH,
-        path_to_save_dataset=ENV_DATASET_PATH,
-        pss_origin=PSShift(phi11=0.547, phi21=-1.0, theta11=0.01685, theta21=0.017),
-        pss_shifts_delta=PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
-        cm_shifts_delta=CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=0.005),
-        samplers_size=DATASET_SIZE,
-        backend=backend
+        path_to_save_dataset=os.path.join(ENV_DATASET_PATH, samplers.cms.type.name, f"{len(samplers.cms)}"),
+        backend_type='ram',
+        orig_filter=orig_filter,
+        filename="Dataset",
     )
-    ds_gen.generate()
+    ds_gen.generate(samplers)
+
 
     global codec
-    codec = MWFilterTouchstoneCodec.from_dataset(TouchstoneDataset(source=backend, in_memory=True))
+    codec = MWFilterTouchstoneCodec.from_dataset(TouchstoneDataset(source=ds_gen.backend, in_memory=True))
     codec.exclude_keys(["f0", "bw", "N", "Q"])
     print(codec)
 
@@ -168,7 +190,9 @@ def main():
          'layer4_blocks': 3,
          'lr': 0.0017552306729777972,
          'gamma': 0.1,
-         'step_size': 10}
+         'step_size': 10,
+         'activation_in': 'relu',
+         'activation_block': 'relu'}
     )
     study.optimize(objective, n_trials=TRIAL_NUM)  # Количество итераций оптимизации
 

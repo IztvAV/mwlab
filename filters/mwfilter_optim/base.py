@@ -24,7 +24,7 @@ class FastMN2toSParamCalculation:
         self.S22 = torch.zeros(w_num, dtype=torch.complex64)
         self.w_calc = self.w.view(-1, 1, 1)
 
-    def RespM2_gpu(self, M):
+    def RespM2(self, M):
         # Батчевое создание матриц A
         MR = torch.tensor(M) - self.R
         A = MR + self.w_calc * self.I - self.G

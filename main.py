@@ -4,8 +4,10 @@ import time
 from mwlab.nn.scalers import MinMaxScaler
 from mwlab import TouchstoneDataset, TouchstoneLDataModule, TouchstoneDatasetAnalyzer
 from mwlab.io.backends import RAMBackend
+from mwlab.transforms import TComposite
+from mwlab.transforms.s_transforms import S_Crop, S_Resample
 
-from filters import CMTheoreticalDatasetGenerator, SamplerTypes
+from filters import CMTheoreticalDatasetGenerator, CMTheoreticalDatasetGeneratorSamplers, SamplerTypes, MWFilter
 from filters.codecs import MWFilterTouchstoneCodec
 from filters.mwfilter_lightning import MWFilterBaseLModule, MWFilterBaseLMWithMetrics
 
@@ -22,7 +24,7 @@ from filters.mwfilter_optim.bfgs import optimize_cm
 torch.set_float32_matmul_precision("medium")
 
 BATCH_SIZE = 64
-DATASET_SIZE = 100_000
+BASE_DATASET_SIZE = 250_000
 FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "datasets_data")
@@ -31,28 +33,79 @@ ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAM
 def plot_distribution(ds: TouchstoneDataset, num_params: int, batch: int = 6):
     analyzer = TouchstoneDatasetAnalyzer(ds)
     varying = analyzer.get_varying_keys()
-    r = int((num_params / batch) + num_params%batch)
+    r = int((num_params / batch) + num_params % batch)
     for i in range(r):
-        analyzer.plot_param_distributions(varying[batch*i:batch*(i+1)])
+        analyzer.plot_param_distributions(varying[batch * i:batch * (i + 1)])
+
+
+def create_origin_filter(path_orig_filter: str, f_start=None, f_stop=None, f_unit=None, resample_scale=301):
+    tds = TouchstoneDataset(source=path_orig_filter)
+    origin_filter = MWFilter.from_touchstone_dataset_item(tds[0])
+    f0 = origin_filter.f0
+    bw = origin_filter.bw
+    if f_start is None:
+        f_start = f0 - 1.2 * bw
+    if f_stop is None:
+        f_stop = f0 + 1.2 * bw
+    if f_unit is None:
+        f_unit = "MHz"
+    y_transform = TComposite([
+        S_Crop(f_start=f_start, f_stop=f_stop, unit=f_unit),
+        S_Resample(resample_scale)
+    ])
+    tds_transformed = TouchstoneDataset(source=path_orig_filter, s_tf=y_transform)
+    origin_filter = MWFilter.from_touchstone_dataset_item(tds_transformed[0])
+    return origin_filter
+
+
+def create_samplers(orig_filter: MWFilter):
+    sampler_configs = {
+        "pss_origin": PSShift(phi11=0.547, phi21=-1.0, theta11=0.01685, theta21=0.017),
+        "pss_shifts_delta": PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
+        "cm_shifts_delta": CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=0.005),
+        "samplers_size": BASE_DATASET_SIZE,
+    }
+    samplers_lhs_all_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
+                                                                                    samplers_type=SamplerTypes.SAMPLER_LATIN_HYPERCUBE(one_param=False),
+                                                                                    **sampler_configs)
+    samplers_lhs_all_params_shuffle_cms = CMTheoreticalDatasetGeneratorSamplers(
+        cms=samplers_lhs_all_params.cms.shuffle(ratio=1),
+        pss=samplers_lhs_all_params.pss)
+    samplers_lhs_all_params_shuffle_pss = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_lhs_all_params.cms,
+                                                                                pss=samplers_lhs_all_params.pss.shuffle(
+                                                                                    ratio=1))
+    samplers_lhs_all_params_shuffle_all = CMTheoreticalDatasetGeneratorSamplers(
+        cms=samplers_lhs_all_params.cms.shuffle(ratio=1),
+        pss=samplers_lhs_all_params.pss.shuffle(ratio=1))
+
+    sampler_configs["samplers_size"] = int(BASE_DATASET_SIZE/100)
+    samplers_lhs_with_one_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
+                                                                                         samplers_type=SamplerTypes.SAMPLER_LATIN_HYPERCUBE(one_param=True),
+                                                                                         **sampler_configs)
+    total_samplers = CMTheoreticalDatasetGeneratorSamplers.concat(
+            (samplers_lhs_all_params_shuffle_cms, samplers_lhs_all_params_shuffle_pss,
+             samplers_lhs_all_params_shuffle_all, samplers_lhs_all_params)
+    )
+    return total_samplers
 
 
 def main():
+    print("Создаем фильтр")
+    orig_filter = create_origin_filter(ENV_ORIGIN_DATA_PATH)
+    print("Создаем сэмплеры")
+    samplers = create_samplers(orig_filter)
     ds_gen = CMTheoreticalDatasetGenerator(
-        path_to_origin_filter=ENV_ORIGIN_DATA_PATH,
-        path_to_save_dataset=ENV_DATASET_PATH,
-        pss_origin=PSShift(phi11=0.547, phi21=-1.0, theta11=0.01685, theta21=0.017),
-        pss_shifts_delta=PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
-        cm_shifts_delta=CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=0.005),
-        samplers_size=DATASET_SIZE,
+        path_to_save_dataset=os.path.join(ENV_DATASET_PATH, samplers.cms.type.name, f"{len(samplers.cms)}"),
         backend_type='ram',
-        samplers_type=SamplerTypes.SAMPLER_GAUSSIAN_SADDLE,
-        samplers_kwargs={"depth": 1}
+        orig_filter=orig_filter,
+        filename="Dataset",
     )
-    ds_gen.generate()
-    ds = TouchstoneDataset(source=ds_gen.backend, in_memory=True)
+    ds_gen.generate(samplers)
 
+    ds = TouchstoneDataset(source=ds_gen.backend, in_memory=True)
     plot_distribution(ds, num_params=len(ds_gen.origin_filter.coupling_matrix.links))
-    plt.show()
+
+    # plt.show()
 
     codec = MWFilterTouchstoneCodec.from_dataset(ds)
     codec.exclude_keys(["f0", "bw", "N", "Q"])
@@ -62,13 +115,13 @@ def main():
     print("Количество каналов:", len(codec.y_channels))
 
     dm = TouchstoneLDataModule(
-        source=ds_gen.backend,         # Путь к датасету
-        codec=codec,                   # Кодек для преобразования TouchstoneData → (x, y)
-        batch_size=BATCH_SIZE,                 # Размер батча
-        val_ratio=0.2,                 # Доля валидационного набора
-        test_ratio=0.05,                # Доля тестового набора
+        source=ds_gen.backend,  # Путь к датасету
+        codec=codec,  # Кодек для преобразования TouchstoneData → (x, y)
+        batch_size=BATCH_SIZE,  # Размер батча
+        val_ratio=0.2,  # Доля валидационного набора
+        test_ratio=0.05,  # Доля тестового набора
         cache_size=0,
-        scaler_in=MinMaxScaler(dim=(0, 2), feature_range=(0, 1)),                          # Скейлер для входных данных
+        scaler_in=MinMaxScaler(dim=(0, 2), feature_range=(0, 1)),  # Скейлер для входных данных
         scaler_out=MinMaxScaler(dim=0, feature_range=(-0.5, 0.5)),  # Скейлер для выходных данных
         swap_xy=True,
         num_workers=0,
@@ -92,20 +145,6 @@ def main():
     print(f"Размер валидационного набора: {len(dm.val_ds)}")
     print(f"Размер тестового набора: {len(dm.test_ds)}")
 
-    # model = models.Simple_Opt_3(in_channels=len(codec.y_channels),
-    #                             out_channels=len(ds_gen.origin_filter.coupling_matrix.links))
-    # model = models.ResNet1D(in_channels=len(codec.y_channels),
-    #                      out_channels=len(ds_gen.origin_filter.coupling_matrix.links))
-    # model = models.LeNet1D(in_channels=len(codec.y_channels),
-    #                        out_channels=len(ds_gen.origin_filter.coupling_matrix.links))
-    # model = models.ResNet1DBiRNN(in_channels=len(codec.y_channels),
-    #                              out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
-    #                              resnet_out_channels=256,
-    #                              hidden_size=256,
-    #                              num_layers=2,
-    #                              dropout=0.0,
-    #                              rnn_type='gru'
-    #                              )
     model = models.ResNet1DFlexible(
         in_channels=len(codec.y_channels),
         out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
@@ -114,15 +153,6 @@ def main():
         first_conv_kernel=11,
         first_conv_channels=128,
     )
-    # model = models.DenseNet1D(in_channels=len(codec.y_channels),
-    #                           growth_rate=48,
-    #                           num_classes=len(ds_gen.origin_filter.coupling_matrix.links))
-    # model = models.BiRNN(in_channels=301,
-    #                      num_layers=5,
-    #                      out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
-    #                      hidden_size=512,
-    #                      droupout=0.0,
-    #                      rnn_type='lstm')
 
     lit_model = MWFilterBaseLMWithMetrics(
         model=model,  # Наша нейросетевая модель
@@ -135,14 +165,14 @@ def main():
         loss_fn=nn.MSELoss()
     )
 
-
-    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min", min_delta=0.00001)
-    checkpoint = L.pytorch.callbacks.ModelCheckpoint(monitor="val_loss", dirpath="saved_models/"+FILTER_NAME,
+    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=15, mode="min", min_delta=0.00001)
+    checkpoint = L.pytorch.callbacks.ModelCheckpoint(monitor="val_loss", dirpath="saved_models/" + FILTER_NAME,
                                                      filename="best-{epoch}-{val_loss:.5f}-{train_loss:.5f}",
                                                      mode="min",
-                                                     save_top_k=1,                                  # Сохраняем только одну лучшую
-                                                     save_weights_only=False,                       # Сохранять всю модель (включая структуру)
-                                                     verbose=False                                  # Отключаем логирование сохранения)
+                                                     save_top_k=1,  # Сохраняем только одну лучшую
+                                                     save_weights_only=False,
+                                                     # Сохранять всю модель (включая структуру)
+                                                     verbose=False  # Отключаем логирование сохранения)
                                                      )
 
     # Обучение модели с помощью PyTorch Lightning
@@ -155,6 +185,12 @@ def main():
             checkpoint
         ]
     )
+    # # Загружаем лучшую модель
+    # lit_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
+    #     checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=10-val_loss=0.01374-train_loss=0.01136.ckpt",
+    #     model=model
+    # ).to(lit_model.device)
+
 
     # Запуск процесса обучения
     trainer.fit(lit_model, dm)

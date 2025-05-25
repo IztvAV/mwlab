@@ -14,7 +14,7 @@ def optimize_cm(pred_filter:MWFilter, orig_filter: MWFilter):
         """ х - элементы матрицы связи (сначала главная диагональ D, потом D+1, потом побочная d, потом d+1"""
         fast_calc, orig_filter, s11_origin, s21_origin = args
         matrix = CouplingMatrix.from_factors(x, orig_filter.coupling_matrix.links, orig_filter.coupling_matrix.matrix_order)
-        _, s11_pred, s21_pred = fast_calc.RespM2_gpu(matrix)
+        _, s11_pred, s21_pred = fast_calc.RespM2(matrix)
         cost = torch.sum(torch.abs(s21_origin - MWFilter.to_db(s21_pred))) + torch.sum(torch.abs(s11_origin - MWFilter.to_db(s11_pred)))
         return cost.item()
 
@@ -48,7 +48,7 @@ def optimize_cm(pred_filter:MWFilter, orig_filter: MWFilter):
 
     optim_matrix = CouplingMatrix.from_factors(optim_res.x, orig_filter.coupling_matrix.links,
                                                orig_filter.coupling_matrix.matrix_order)
-    w, s11_optim_resp, s21_optim_resp = fast_calc.RespM2_gpu(optim_matrix)
+    w, s11_optim_resp, s21_optim_resp = fast_calc.RespM2(optim_matrix)
     s11_optim_db = MWFilter.to_db(s11_optim_resp)
     s21_optim_db = MWFilter.to_db(s21_optim_resp)
 
