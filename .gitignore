@@ -1,28 +1,26 @@
+# Python virtual environments
 .venv/
-__pycache__/
-*.pyc
+venv/
+.env/
 
-# IDE
-.idea/
-.vscode/
-
-# Python
+# Python cache and compiled files
 __pycache__/
 *.py[cod]
 *.so
 *.pyd
 
-# Env
-venv/
-.env/
+# IDEs and editors
+.idea/
+.vscode/
 
-# System
+# OS-generated files
 .DS_Store
 Thumbs.db
 
-# Archives
+# Package build artifacts
+*.egg-info/
 *.zip
 *.tar.gz
 
-# Tests cache
+# Test cache
 tests/__pycache__/
