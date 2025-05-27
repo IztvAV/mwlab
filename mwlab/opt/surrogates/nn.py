@@ -15,6 +15,7 @@ NNSurrogate – обертка над уже **обученным** Lightning-м
 from __future__ import annotations
 from pathlib import Path
 from typing import Mapping, Sequence
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -92,7 +93,7 @@ class NNSurrogate(BaseSurrogate):
 
     @classmethod
     def load(cls, path: str | Path) -> "NNSurrogate":
-        from importlib import import_module
+        #from importlib import import_module
 
         payload = torch.load(path, map_location="cpu")
 
@@ -130,6 +131,33 @@ class NNSurrogate(BaseSurrogate):
                 preds = self.model._apply_inverse(self.model.scaler_out, preds)
             return [codec.decode_s(row) for row in preds]
 
+    # ----------------------------------------------- оптимизированный passes_spec
+    def passes_spec(self, xs, spec):
+        # одиночная точка → наследуем дефолт
+        if isinstance(xs, Mapping):
+            return super().passes_spec(xs, spec)
+
+        codec = getattr(self.model, "codec", None)
+        if codec is None:
+            return super().passes_spec(xs, spec)
+
+        with torch.no_grad():
+            X = codec.encode_x_batch(xs).to(self.model.device)
+            Y = self.model(X)                         # (N, features)
+            if self.model.scaler_out is not None:
+                Y = self.model._apply_inverse(self.model.scaler_out, Y)
+            Y = Y.cpu().numpy()
+
+        # Быстрый способ, если в Specification он есть
+        if hasattr(spec, "fast_is_ok"):
+            return spec.fast_is_ok(Y)
+
+        # Иначе медленно декодируем в rf.Network
+        return np.fromiter(
+            (spec.is_ok(codec.decode_s(row)) for row in Y),
+            dtype=bool,
+        )
+
     # -------------------------------------------------------------------
     def __repr__(self):  # pragma: no cover
         return f"NNSurrogate(model={self.model.__class__.__name__}, swap_xy={self.model.swap_xy})"
@@ -155,3 +183,4 @@ class InverseNNSurrogate(BaseSurrogate):
         if return_std:
             raise NotImplementedError
         return self.model.predict_x(net)     # → dict
+

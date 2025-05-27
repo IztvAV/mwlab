@@ -213,12 +213,8 @@ class BoxFinder:
             # ── 1) Собираем облако Sobol‑точек ────────────────────────────
             N = self.N0
             while True:
-                cloud, dict_cloud = self._sample_cloud(lows, highs, names, N, space)
-                try:
-                    nets = surrogate.batch_predict(dict_cloud)
-                    ok_mask = np.asarray([spec.is_ok(net) for net in nets])
-                except Exception:
-                    ok_mask = np.zeros(len(dict_cloud), dtype=bool)
+                cloud, cloud_view = self._sample_cloud(lows, highs, names, N, space)
+                ok_mask = surrogate.passes_spec(cloud_view, spec)
 
                 # Проверяем Wilson‑критерий **на текущем N**
                 ok, _ = self._is_yield_ok(ok_mask, n_target=N)
@@ -249,9 +245,11 @@ class BoxFinder:
                 idx_inside = tree.query_ball_point(box_center, r=rad_inf, p=np.inf)
 
                 # Точная прямоугольная фильтрация
-                inside_mask = ok_mask[idx_inside][
-                    np.all((cloud[idx_inside] >= cand_low) & (cloud[idx_inside] <= cand_high), axis=1)
-                ]
+                mask_precise = np.all(
+                    (cloud[idx_inside] >= cand_low) & (cloud[idx_inside] <= cand_high),
+                    axis=1,
+                )
+                inside_mask = ok_mask[idx_inside][mask_precise]
 
                 ok_inside, _ = self._is_yield_ok(inside_mask, n_target=max(64, int(0.05 * N)))
                 if not ok_inside:
@@ -309,12 +307,8 @@ class BoxFinder:
             N = self.N0
             while True:
                 lows, highs = x0 - dm, x0 + dp
-                cloud, dict_cloud = self._sample_cloud(lows, highs, names, N, space)
-                try:
-                    nets = surrogate.batch_predict(dict_cloud)
-                    ok_mask = np.asarray([spec.is_ok(n) for n in nets])
-                except Exception:
-                    ok_mask = np.zeros(len(dict_cloud), dtype=bool)
+                cloud, cloud_view = self._sample_cloud(lows, highs, names, N, space)
+                ok_mask = surrogate.passes_spec(cloud_view, spec)
 
                 ok, p_low = self._is_yield_ok(ok_mask, n_target=N)
                 if ok or N >= self.n_max:
