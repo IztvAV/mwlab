@@ -28,9 +28,9 @@ def save_matrix_to_s2p_single_comment(matrix_indices, matrix_values):
 def main():
     # Парсинг аргументов командной строки
     parser = argparse.ArgumentParser(description="Генератор .s2p файлов для добавления информации о МС и параметрах фильтра. Корректирует старые данные для использования их в обучении ИИ")
-    parser.add_argument("-fr", "--freq_resp", type=str, default=os.getcwd()+"\\SCYA501-KuIMUXT5-BPFC3/SCYA501-KuIMUXT5-BPFC3 Rev.0.3-0.0#УФМ.12.44-12.8 ГГц. RI.s2p",
+    parser.add_argument("-fr", "--freq_resp", type=str, default=os.path.join(os.getcwd(), "SCYA501-KuIMUXT5-BPFC3/SCYA501-KuIMUXT5-BPFC3 Rev.0.3-0.0#УФМ.12.44-12.8 ГГц. RI.s2p"),
                         help="Путь к .s2p файлу с частотными характеристиками фильтра")
-    parser.add_argument("-m", "--matrix", type=str, default=os.getcwd()+"\\SCYA501-KuIMUXT5-BPFC3/SCYA501-KuIMUXT5-BPFC3 Rev.0.3-0.0#Матрица связи.txt", help="Путь к файлу .txt с матрицей связи фильтра")
+    parser.add_argument("-m", "--matrix", type=str, default=os.path.join(os.getcwd(), "origins", "SCYA501-KuIMUXT5-BPFC3/SCYA501-KuIMUXT5-BPFC3 Rev.0.3-0.0#Матрица связи.txt"), help="Путь к файлу .txt с матрицей связи фильтра")
     parser.add_argument("-f0", "--center_freq", type=str, default="12700.012", help="Центральная частота фильтра в МГц")
     parser.add_argument("-bw", "--bandwidth", type=str, default="77.238", help="Ширина полосы пропускания фильтра в МГц")
     parser.add_argument("-q", "--quality_factor", type=str, default="6100", help="Значение добротности")
@@ -41,7 +41,7 @@ def main():
     matrix = cm.CouplingMatrix.from_file(args.matrix)
     net = rf.Network(args.freq_resp)
 
-    path_to_save = args.path_to_save + "\\" + filter_name+"_modify.s2p"
+    path_to_save = os.path.join(args.path_to_save, filter_name+"_modify.s2p")
     new_td = mwlab.TouchstoneData(
         network=rf.Network(frequency=net.frequency, s=net.s, z0=net.z0),
         params={"f0": args.center_freq, "bw": args.bandwidth, "Q": args.quality_factor, "N": matrix.matrix_order-2}
