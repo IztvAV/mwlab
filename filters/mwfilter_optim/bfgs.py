@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 
 @torch.no_grad()
 def optimize_cm(pred_filter:MWFilter, orig_filter: MWFilter):
+    @torch.no_grad()
     def cost(x, *args):
         """ х - элементы матрицы связи (сначала главная диагональ D, потом D+1, потом побочная d, потом d+1"""
         fast_calc, orig_filter, s11_origin, s21_origin = args
@@ -36,8 +37,8 @@ def optimize_cm(pred_filter:MWFilter, orig_filter: MWFilter):
         if optim_res.nit == 0:
             print("Number of iteration is 0. Break loop")
             break
-        elif abs(optim_res.fun - prev_cost) < 1e-2:
-            print("Different between cost function values less than 1e-2. Break loop")
+        elif abs(optim_res.fun - prev_cost) < 5e-1:
+            print("Different between cost function values less than 5e-1. Break loop")
             break
         elif abs(optim_res.fun) < 1:
             print("Cost function value less than 1. Break loop")
@@ -53,13 +54,11 @@ def optimize_cm(pred_filter:MWFilter, orig_filter: MWFilter):
     s21_optim_db = MWFilter.to_db(s21_optim_resp)
 
     plt.figure()
-    plt.title("S11")
-    plt.plot(w, s11_origin_db, w, s11_optim_db)
+    plt.title("S-параметры")
+    plt.plot(w, s11_origin_db)
+    plt.plot(w, s11_optim_db, linestyle=':')
+    plt.plot(w, s21_origin_db)
+    plt.plot(w, s21_optim_db, linestyle=':')
     plt.legend(["Origin", "Optimized"])
 
-    plt.figure()
-    plt.title("S21")
-    plt.plot(w, s21_origin_db, w, s21_optim_db)
-    plt.legend(["Origin", "Optimized"])
-
-    return optim_res.x
+    return CouplingMatrix(optim_matrix)
