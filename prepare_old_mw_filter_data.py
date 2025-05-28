@@ -1,9 +1,9 @@
 import argparse
 import os
 import skrf as rf
-from filter import couplilng_matrix as cm
+from filters.filter import couplilng_matrix as cm
 import copy
-from filter.mwfilter import MWFilter
+from filters.filter.mwfilter import MWFilter
 import mwlab
 
 
@@ -28,13 +28,13 @@ def save_matrix_to_s2p_single_comment(matrix_indices, matrix_values):
 def main():
     # Парсинг аргументов командной строки
     parser = argparse.ArgumentParser(description="Генератор .s2p файлов для добавления информации о МС и параметрах фильтра. Корректирует старые данные для использования их в обучении ИИ")
-    parser.add_argument("-fr", "--freq_resp", type=str, default=os.path.join(os.getcwd(), "SCYA501-KuIMUXT5-BPFC3/SCYA501-KuIMUXT5-BPFC3 Rev.0.3-0.0#УФМ.12.44-12.8 ГГц. RI.s2p"),
+    parser.add_argument("-fr", "--freq_resp", type=str, default=os.path.join(os.getcwd(), "filters", "origins", "EAMU4-KuIMUXT3-BPFC1", "EAMU4-KuIMUXT3-BPFC1 Rev.0.2-0.1#ЭДМ. Сборка. 12.5-12.85 ГГц. RI.s2p"),
                         help="Путь к .s2p файлу с частотными характеристиками фильтра")
-    parser.add_argument("-m", "--matrix", type=str, default=os.path.join(os.getcwd(), "origins", "SCYA501-KuIMUXT5-BPFC3/SCYA501-KuIMUXT5-BPFC3 Rev.0.3-0.0#Матрица связи.txt"), help="Путь к файлу .txt с матрицей связи фильтра")
-    parser.add_argument("-f0", "--center_freq", type=str, default="12700.012", help="Центральная частота фильтра в МГц")
-    parser.add_argument("-bw", "--bandwidth", type=str, default="77.238", help="Ширина полосы пропускания фильтра в МГц")
+    parser.add_argument("-m", "--matrix", type=str, default=os.path.join(os.getcwd(), "filters", "origins", "EAMU4-KuIMUXT3-BPFC1", "cst_matrix.txt"), help="Путь к файлу .txt с матрицей связи фильтра")
+    parser.add_argument("-f0", "--center_freq", type=str, default="12604.396", help="Центральная частота фильтра в МГц")
+    parser.add_argument("-bw", "--bandwidth", type=str, default="38.889", help="Ширина полосы пропускания фильтра в МГц")
     parser.add_argument("-q", "--quality_factor", type=str, default="6100", help="Значение добротности")
-    parser.add_argument("-p", "--path_to_save", type=str, default=os.getcwd(), help="Путь для сохранения измененного файла")
+    parser.add_argument("-p", "--path_to_save", type=str, default=os.path.join(os.getcwd(), "filters", "origins", "EAMU4-KuIMUXT3-BPFC1"), help="Путь для сохранения измененного файла")
 
     args = parser.parse_args()
     filter_name = get_filter_name(path_to_s_parameters=args.freq_resp)

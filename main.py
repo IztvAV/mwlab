@@ -24,8 +24,8 @@ from filters.mwfilter_optim.bfgs import optimize_cm
 torch.set_float32_matmul_precision("medium")
 
 BATCH_SIZE = 64
-BASE_DATASET_SIZE = 250_000
-FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
+BASE_DATASET_SIZE = 50_000
+FILTER_NAME = "EAMU4-KuIMUXT3-BPFC1"
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "datasets_data")
 
