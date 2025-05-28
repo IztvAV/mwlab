@@ -16,7 +16,7 @@ import lightning as L
 import pickle
 
 
-DATASET_SIZE = 100_000
+DATASET_SIZE = 50_000
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "optimize_data")
 ENV_STUDY_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "study_results")
@@ -45,8 +45,34 @@ def create_samplers(orig_filter: MWFilter):
     samplers_lhs_all_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
                                                                                     samplers_type=SamplerTypes.SAMPLER_LATIN_HYPERCUBE(one_param=False),
                                                                                     **sampler_configs)
-    return samplers_lhs_all_params
+    samplers_lhs_all_params_shuffle_cms_cols = CMTheoreticalDatasetGeneratorSamplers(
+        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=1),
+        pss=samplers_lhs_all_params.pss)
+    samplers_lhs_all_params_shuffle_pss_cols = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_lhs_all_params.cms,
+                                                                                pss=samplers_lhs_all_params.pss.shuffle(
+                                                                                    ratio=1, dim=1))
+    samplers_lhs_all_params_shuffle_cms_rows = CMTheoreticalDatasetGeneratorSamplers(
+        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=0),
+        pss=samplers_lhs_all_params.pss)
+    samplers_lhs_all_params_shuffle_pss_rows = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_lhs_all_params.cms,
+                                                                                pss=samplers_lhs_all_params.pss.shuffle(
+                                                                                    ratio=1, dim=0))
+    samplers_lhs_all_params_shuffle_all_cols = CMTheoreticalDatasetGeneratorSamplers(
+        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=1),
+        pss=samplers_lhs_all_params.pss.shuffle(ratio=1, dim=1)
+    )
+    samplers_lhs_all_params_shuffle_all_rows = CMTheoreticalDatasetGeneratorSamplers(
+        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=0),
+        pss=samplers_lhs_all_params.pss.shuffle(ratio=1, dim=0)
+    )
 
+    total_samplers = CMTheoreticalDatasetGeneratorSamplers.concat(
+            (samplers_lhs_all_params_shuffle_cms_cols, samplers_lhs_all_params_shuffle_pss_cols,
+             samplers_lhs_all_params_shuffle_cms_rows, samplers_lhs_all_params_shuffle_pss_rows,
+             samplers_lhs_all_params_shuffle_all_cols, samplers_lhs_all_params_shuffle_all_rows,
+             samplers_lhs_all_params)
+    )
+    return total_samplers
 
 
 # 2. Определяем целевую функцию для Optuna
@@ -71,10 +97,8 @@ def objective(trial):
         'lr': trial.suggest_float('lr', 1e-5, 1e-1, log=True),
         'gamma': trial.suggest_float('gamma', 0.1, 1.0, step=0.1),
         'step_size': trial.suggest_int('step_size', 1, 30),
-        'activation_in': trial.suggest_categorical('activation_in', ['relu', 'elu', 'leaky_relu', 'selu', 'gelu',
-                                                                     'tanh', 'sigmoid', 'swish', 'mish']),
-        'activation_block': trial.suggest_categorical('activation_block', ['relu', 'elu', 'leaky_relu', 'selu', 'gelu',
-                                                                     'tanh', 'sigmoid', 'swish', 'mish'])
+        'activation_in': trial.suggest_categorical('activation_in', models.get_available_activations()),
+        'activation_block': trial.suggest_categorical('activation_block', models.get_available_activations())
     }
 
     # 2. Создаем модель
@@ -178,21 +202,21 @@ def main():
     # 3. Создаем study и запускаем оптимизацию
     study = optuna.create_study(direction='minimize')  # Мы хотим максимизировать accuracy
     study.enqueue_trial(
-        {'first_conv_channels': 128,
-         'first_conv_kernel': 11,
-         'layer1_channels': 128,
-         'layer2_channels': 256,
-         'layer3_channels': 512,
-         'layer4_channels': 512,
+        {'first_conv_channels': 64,
+         'first_conv_kernel': 8,
+         'layer1_channels': 64,
+         'layer2_channels': 64,
+         'layer3_channels': 128,
+         'layer4_channels': 256,
          'layer1_blocks': 1,
-         'layer2_blocks': 1,
-         'layer3_blocks': 5,
-         'layer4_blocks': 3,
-         'lr': 0.0017552306729777972,
+         'layer2_blocks': 4,
+         'layer3_blocks': 3,
+         'layer4_blocks': 5,
+         'lr': 0.0005587648891507119,
          'gamma': 0.1,
-         'step_size': 10,
-         'activation_in': 'relu',
-         'activation_block': 'relu'}
+         'step_size': 20,
+         'activation_in': 'sigmoid',
+         'activation_block': 'swish'}
     )
     study.optimize(objective, n_trials=TRIAL_NUM)  # Количество итераций оптимизации
 
