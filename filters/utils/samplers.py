@@ -228,19 +228,25 @@ class Sampler:
     def space(self):
         return self._space
 
-    def shuffle(self, ratio=0.3, random_state=None):
+    def shuffle(self, ratio=0.3, dim=1, random_state=None):
         if random_state is not None:
             np.random.seed(random_state)
 
         space = self.space.copy()
         n_rows, n_cols = space.shape
 
-        for col in range(n_cols):
-            n_shuffle = int(n_rows * ratio)
-            shuffle_indices = np.random.choice(n_rows, size=n_shuffle, replace=False)
-            shuffled_values = np.random.permutation(space[shuffle_indices, col])
-            space[shuffle_indices, col] = shuffled_values
-
+        if dim == 1:
+            for col in range(n_cols):
+                n_shuffle = int(n_rows * ratio)
+                shuffle_indices = np.random.choice(n_rows, size=n_shuffle, replace=False)
+                shuffled_values = np.random.permutation(space[shuffle_indices, col])
+                space[shuffle_indices, col] = shuffled_values
+        else:
+            for row in range(n_rows):
+                n_shuffle = int(n_cols * ratio)
+                shuffle_indices = np.random.choice(n_cols, size=n_shuffle, replace=False)
+                shuffled_values = np.random.permutation(space[row, shuffle_indices])
+                space[row, shuffle_indices] = shuffled_values
         return Sampler(type=self.type, space=space)
 
     def __str__(self):

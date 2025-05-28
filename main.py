@@ -68,23 +68,36 @@ def create_samplers(orig_filter: MWFilter):
     samplers_lhs_all_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
                                                                                     samplers_type=SamplerTypes.SAMPLER_LATIN_HYPERCUBE(one_param=False),
                                                                                     **sampler_configs)
-    samplers_lhs_all_params_shuffle_cms = CMTheoreticalDatasetGeneratorSamplers(
-        cms=samplers_lhs_all_params.cms.shuffle(ratio=1),
+    samplers_lhs_all_params_shuffle_cms_cols = CMTheoreticalDatasetGeneratorSamplers(
+        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=1),
         pss=samplers_lhs_all_params.pss)
-    samplers_lhs_all_params_shuffle_pss = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_lhs_all_params.cms,
+    samplers_lhs_all_params_shuffle_pss_cols = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_lhs_all_params.cms,
                                                                                 pss=samplers_lhs_all_params.pss.shuffle(
-                                                                                    ratio=1))
-    samplers_lhs_all_params_shuffle_all = CMTheoreticalDatasetGeneratorSamplers(
-        cms=samplers_lhs_all_params.cms.shuffle(ratio=1),
-        pss=samplers_lhs_all_params.pss.shuffle(ratio=1))
+                                                                                    ratio=1, dim=1))
+    samplers_lhs_all_params_shuffle_cms_rows = CMTheoreticalDatasetGeneratorSamplers(
+        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=0),
+        pss=samplers_lhs_all_params.pss)
+    samplers_lhs_all_params_shuffle_pss_rows = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_lhs_all_params.cms,
+                                                                                pss=samplers_lhs_all_params.pss.shuffle(
+                                                                                    ratio=1, dim=0))
+    samplers_lhs_all_params_shuffle_all_cols = CMTheoreticalDatasetGeneratorSamplers(
+        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=1),
+        pss=samplers_lhs_all_params.pss.shuffle(ratio=1, dim=1)
+    )
+    samplers_lhs_all_params_shuffle_all_rows = CMTheoreticalDatasetGeneratorSamplers(
+        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=0),
+        pss=samplers_lhs_all_params.pss.shuffle(ratio=1, dim=0)
+    )
 
     sampler_configs["samplers_size"] = int(BASE_DATASET_SIZE/100)
     samplers_lhs_with_one_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
                                                                                          samplers_type=SamplerTypes.SAMPLER_LATIN_HYPERCUBE(one_param=True),
                                                                                          **sampler_configs)
     total_samplers = CMTheoreticalDatasetGeneratorSamplers.concat(
-            (samplers_lhs_all_params_shuffle_cms, samplers_lhs_all_params_shuffle_pss,
-             samplers_lhs_all_params_shuffle_all, samplers_lhs_all_params)
+            (samplers_lhs_all_params_shuffle_cms_cols, samplers_lhs_all_params_shuffle_pss_cols,
+             samplers_lhs_all_params_shuffle_cms_rows, samplers_lhs_all_params_shuffle_pss_rows,
+             samplers_lhs_all_params_shuffle_all_cols, samplers_lhs_all_params_shuffle_all_rows,
+             samplers_lhs_all_params)
     )
     return total_samplers
 
@@ -103,9 +116,7 @@ def main():
     ds_gen.generate(samplers)
 
     ds = TouchstoneDataset(source=ds_gen.backend, in_memory=True)
-    plot_distribution(ds, num_params=len(ds_gen.origin_filter.coupling_matrix.links))
-
-    # plt.show()
+    # plot_distribution(ds, num_params=len(ds_gen.origin_filter.coupling_matrix.links))
 
     codec = MWFilterTouchstoneCodec.from_dataset(ds)
     codec.exclude_keys(["f0", "bw", "N", "Q"])
@@ -148,10 +159,12 @@ def main():
     model = models.ResNet1DFlexible(
         in_channels=len(codec.y_channels),
         out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
-        num_blocks=[1, 1, 6, 3],
-        layer_channels=[128, 256, 512, 512],
-        first_conv_kernel=11,
-        first_conv_channels=128,
+        num_blocks=[1, 4, 3, 5],
+        layer_channels=[64, 64, 128, 256],
+        first_conv_kernel=8,
+        first_conv_channels=64,
+        activation_in='sigmoid',
+        activation_block='swish'
     )
 
     lit_model = MWFilterBaseLMWithMetrics(
@@ -160,12 +173,12 @@ def main():
         scaler_in=dm.scaler_in,  # Скейлер для входных данных
         scaler_out=dm.scaler_out,  # Скейлер для выходных данных
         codec=codec,  # Кодек для преобразования данных
-        optimizer_cfg={"name": "Adam", "lr": 0.0017552306729777972},
-        scheduler_cfg={"name": "StepLR", "step_size": 10, "gamma": 0.1},
+        optimizer_cfg={"name": "Adam", "lr": 0.0005587648891507119},
+        scheduler_cfg={"name": "StepLR", "step_size": 20, "gamma": 0.1},
         loss_fn=nn.MSELoss()
     )
 
-    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=15, mode="min", min_delta=0.00001)
+    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=10, mode="min", min_delta=0.00001)
     checkpoint = L.pytorch.callbacks.ModelCheckpoint(monitor="val_loss", dirpath="saved_models/" + FILTER_NAME,
                                                      filename="best-{epoch}-{val_loss:.5f}-{train_loss:.5f}",
                                                      mode="min",
@@ -185,7 +198,7 @@ def main():
             checkpoint
         ]
     )
-    # # Загружаем лучшую модель
+    # Загружаем лучшую модель
     # lit_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
     #     checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=10-val_loss=0.01374-train_loss=0.01136.ckpt",
     #     model=model
@@ -198,19 +211,26 @@ def main():
 
     # Загружаем лучшую модель
     inference_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
+        # checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=12-val_loss=0.01266-train_loss=0.01224.ckpt",
         checkpoint_path=checkpoint.best_model_path,
         model=model
     ).to(lit_model.device)
     orig_fil, pred_fil = inference_model.predict(dm, idx=0)
     inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
-    optimize_cm(pred_fil, orig_fil)
+    optim_matrix = optimize_cm(pred_fil, orig_fil)
+    optim_matrix.plot_matrix(title="Optimized matrix")
+    pred_fil.coupling_matrix.plot_matrix(title="Predict matrix")
+    orig_fil.coupling_matrix.plot_matrix(title="Origin matrix")
 
     # Предсказываем эталонный фильтр
     orig_fil = ds_gen.origin_filter
     pred_prms = inference_model.predict_x(orig_fil)
     pred_fil = inference_model.create_filter_from_prediction(orig_fil, pred_prms, meta)
     inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
-    optimize_cm(pred_fil, orig_fil)
+    optim_matrix = optimize_cm(pred_fil, orig_fil)
+    optim_matrix.plot_matrix(title="Optimized matrix ideal")
+    pred_fil.coupling_matrix.plot_matrix(title="Predict matrix ideal")
+    orig_fil.coupling_matrix.plot_matrix(title="Origin matrix ideal")
     plt.show()
 
 
