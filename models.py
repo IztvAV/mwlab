@@ -4,10 +4,7 @@ import torch.nn.functional as F
 
 from filters import MWFilter
 
-
-def _get_activation(name):
-    """Возвращает функцию активации по имени"""
-    activations = {
+_activations = {
         'relu': F.relu,
         'leaky_relu': F.leaky_relu,
         'elu': F.elu,
@@ -17,9 +14,19 @@ def _get_activation(name):
         'swish': lambda x: x * torch.sigmoid(x),
         'mish': lambda x: x * torch.tanh(F.softplus(x)),
         'gelu': F.gelu,
-        'none': lambda x: x
+        'none': lambda x: x,
+        'rrelu': F.rrelu,
+        'prelu': F.prelu,
+        'soft_sign': F.softsign,
+        'soft_plus': F.softplus
     }
-    return activations.get(name.lower(), F.relu)
+
+def get_activation(name):
+    """Возвращает функцию активации по имени"""
+    return _activations.get(name.lower(), F.relu)
+
+def get_available_activations():
+    return list(_activations.keys())
 
 
 class LSTM(nn.Module):
@@ -164,7 +171,7 @@ class BasicBlock1D(nn.Module):
             )
 
         # Выбор функции активации
-        self.activation = _get_activation(activation)
+        self.activation = get_activation(activation)
 
     def forward(self, x):
         out = self.activation(self.bn1(self.conv1(x)))
@@ -219,7 +226,7 @@ class ResNet1DFlexible(nn.Module):
 
         # Сохраняем параметр активации
         self.activation_name = activation_in
-        self.activation = _get_activation(activation_in)
+        self.activation = get_activation(activation_in)
 
         # Первый сверточный слой
         self.conv1 = nn.Conv1d(in_channels, first_conv_channels,
