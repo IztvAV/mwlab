@@ -36,7 +36,7 @@ class FastMN2toSParamCalculation:
         # print(f"Time to calc inverse matrix by torch.linalg.inv(A) = {(stop_time - start_time)/1e3} usec")
 
         # start_time = time.time_ns()
-        b = torch.zeros(A.shape[0], A.shape[1], 1, dtype=torch.complex64)
+        b = torch.zeros(A.shape[0], A.shape[1], 1, dtype=torch.complex128)
         b[:, 0, 0] = 1
         Ainv = torch.linalg.solve(A, b)
         # stop_time = time.time_ns()
