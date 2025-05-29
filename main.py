@@ -24,8 +24,9 @@ from filters.mwfilter_optim.bfgs import optimize_cm
 torch.set_float32_matmul_precision("medium")
 
 BATCH_SIZE = 64
-BASE_DATASET_SIZE = 50_000
+BASE_DATASET_SIZE = 1_000
 FILTER_NAME = "EAMU4-KuIMUXT3-BPFC1"
+# FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "datasets_data")
 
@@ -178,7 +179,7 @@ def main():
         loss_fn=nn.MSELoss()
     )
 
-    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=10, mode="min", min_delta=0.00001)
+    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min", min_delta=0.00001)
     checkpoint = L.pytorch.callbacks.ModelCheckpoint(monitor="val_loss", dirpath="saved_models/" + FILTER_NAME,
                                                      filename="best-{epoch}-{val_loss:.5f}-{train_loss:.5f}",
                                                      mode="min",
@@ -206,13 +207,14 @@ def main():
 
 
     # Запуск процесса обучения
-    trainer.fit(lit_model, dm)
+    # trainer.fit(lit_model, dm)
     print(f"Best model saved into: {checkpoint.best_model_path}")
 
     # Загружаем лучшую модель
     inference_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
         # checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=12-val_loss=0.01266-train_loss=0.01224.ckpt",
-        checkpoint_path=checkpoint.best_model_path,
+        checkpoint_path="saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=11-val_loss=0.01305-train_loss=0.01285.ckpt",
+        # checkpoint_path=checkpoint.best_model_path,
         model=model
     ).to(lit_model.device)
     orig_fil, pred_fil = inference_model.predict(dm, idx=0)

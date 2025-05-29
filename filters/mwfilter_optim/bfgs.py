@@ -64,9 +64,37 @@
 
 import numpy as np
 from scipy.optimize import minimize
+from scipy import optimize
 import torch
 import time
 import matplotlib.pyplot as plt
+from filters.filter import MWFilter
+from filters.filter.couplilng_matrix import CouplingMatrix
+from scipy.optimize import minimize
+from filters.mwfilter_optim.base import FastMN2toSParamCalculation
+
+
+def create_bounds(origin_matrix: CouplingMatrix):
+    Mmin = origin_matrix.matrix
+    Mmax = origin_matrix.matrix
+
+    for (i, j) in origin_matrix.links:
+        if i == j:
+            Mmin[i][j] -= 0.99*Mmin[i][j]
+            Mmax[i][j] += 0.2*Mmax[i][j]
+        elif j == (i + 1):
+            Mmin[i][j] -= 0.3*Mmin[i][j]
+            Mmin[j][i] -= 0.3*Mmin[j][i]
+            Mmax[i][j] += 0.3*Mmax[i][j]
+            Mmax[j][i] += 0.3*Mmax[j][i]
+        else:
+            Mmin[i][j] -= 0.5*Mmin[i][j]
+            Mmin[j][i] -= 0.5*Mmin[j][i]
+            Mmax[i][j] += 0.5*Mmax[i][j]
+            Mmax[j][i] += 0.5*Mmax[j][i]
+    return CouplingMatrix(torch.tensor(Mmin, dtype=torch.float32)), CouplingMatrix(torch.tensor(Mmax, dtype=torch.float32))
+
+
 
 def optimize_cm(pred_filter: MWFilter, orig_filter: MWFilter):
     def cost_with_grad(x_np, *args):
@@ -81,6 +109,7 @@ def optimize_cm(pred_filter: MWFilter, orig_filter: MWFilter):
                torch.sum(torch.abs(s21_origin_db - MWFilter.to_db(s21_pred)))
 
         loss.backward()
+        # print(f"{loss.item()}")
         return loss.item(), x.grad.detach().numpy()
 
     print("Start optimize (L-BFGS-B)")
@@ -93,28 +122,48 @@ def optimize_cm(pred_filter: MWFilter, orig_filter: MWFilter):
                                            Q=orig_filter.Q,
                                            fbw=orig_filter.fbw)
 
-    s11_origin_db = orig_filter.s_db[:, 0, 0]
-    s21_origin_db = orig_filter.s_db[:, 1, 0]
+    s11_origin = orig_filter.s[:, 0, 0]
+    s21_origin = orig_filter.s[:, 1, 0]
 
     # Преобразуем в тензоры один раз
-    s11_origin_db = torch.tensor(s11_origin_db, dtype=torch.float32)
-    s21_origin_db = torch.tensor(s21_origin_db, dtype=torch.float32)
+    s11_origin_db = MWFilter.to_db(torch.tensor(s11_origin, dtype=torch.complex128))
+    s21_origin_db = MWFilter.to_db(torch.tensor(s21_origin, dtype=torch.complex128))
 
-    # Ограничения на x (например, от -3 до 3)
-    bounds = [(0.5 * xi, 1.5 * xi) if xi != 0 else (-1.0, 1.0) for xi in x0]
+    # [(min(0.5*xi, 1*xi), max(0.5*xi, 1 * xi)) if xi != 0 else (-0.5, 0.5) for xi in x0]
 
     start_time = time.time()
-
     result = minimize(
         fun=cost_with_grad,
         x0=x0,
-        method='L-BFGS-B',
+        method='BFGS',
+        jac=True,
+        args=(fast_calc, orig_filter, s11_origin_db, s21_origin_db, links, matrix_order),
+        options={'disp': True, 'maxiter': 100000, 'ftol': 1e-9, 'gtol': 1e-6, 'return_all': True}
+    )
+
+    Mmin, Mmax = create_bounds(pred_filter.coupling_matrix)
+    bounds = [(min(m_min, m_max), max(m_min, m_max)) for m_min, m_max in tuple(zip(Mmin.factors, Mmax.factors))]
+    result = minimize(
+        fun=cost_with_grad,
+        x0=result.x,
+        method='l-bfgs-b',
         jac=True,
         bounds=bounds,
         args=(fast_calc, orig_filter, s11_origin_db, s21_origin_db, links, matrix_order),
-        options={'disp': True, 'maxiter': 200, 'ftol': 1e-9, 'gtol': 1e-6}
+        options={'disp': True, 'maxiter': 100000, 'ftol': 1e-9, 'gtol': 1e-6}
     )
 
+    result = minimize(
+        fun=cost_with_grad,
+        x0=result.x,
+        method='bfgs',
+        jac=True,
+        bounds=bounds,
+        args=(fast_calc, orig_filter, s11_origin_db, s21_origin_db, links, matrix_order),
+        options={'disp': True, 'maxiter': 100000, 'ftol': 1e-9, 'gtol': 1e-6}
+    )
+
+    print(f"Cost after BFGS: {result.fun}")
     stop_time = time.time()
     print(f"Optimize time: {stop_time - start_time:.3f} sec")
 

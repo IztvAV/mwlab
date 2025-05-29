@@ -26,7 +26,7 @@ class FastMN2toSParamCalculation:
 
     def RespM2(self, M):
         # Батчевое создание матриц A
-        MR = torch.tensor(M) - self.R
+        MR = M - self.R
         A = MR + self.w_calc * self.I - self.G
 
         # start_time = time.time_ns()
@@ -36,7 +36,7 @@ class FastMN2toSParamCalculation:
         # print(f"Time to calc inverse matrix by torch.linalg.inv(A) = {(stop_time - start_time)/1e3} usec")
 
         # start_time = time.time_ns()
-        b = torch.zeros(A.shape[0], A.shape[1], 1, dtype=torch.complex128)
+        b = torch.zeros(A.shape[0], A.shape[1], 1, dtype=torch.complex64)
         b[:, 0, 0] = 1
         Ainv = torch.linalg.solve(A, b)
         # stop_time = time.time_ns()
