@@ -1,6 +1,7 @@
 import copy
 import os
 import numpy as np
+import torch
 from mwlab import TouchstoneData, TouchstoneDataset
 from ..filter import MWFilter, CouplingMatrix
 from ..utils import Sampler, SamplerTypes
@@ -184,7 +185,7 @@ class CMTheoreticalDatasetGenerator:
         size = len(samplers.cms)
         for idx in tqdm(range(size), desc=f"Генерация датасета в путь: {self._path_to_save_dataset}"):
             cm_factors = samplers.cms[idx]
-            new_matrix = CouplingMatrix.from_factors(factors=cm_factors, links=self.origin_filter.coupling_matrix.links,
+            new_matrix = CouplingMatrix.from_factors(factors=torch.tensor(cm_factors, dtype=torch.float32), links=self.origin_filter.coupling_matrix.links,
                                         matrix_order=self.origin_filter.coupling_matrix.matrix_order)
             ps_shifts = samplers.pss[idx]
             s_params = MWFilter.response_from_coupling_matrix(M=new_matrix, f0=self._origin_filter.f0,
