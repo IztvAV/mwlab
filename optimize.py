@@ -16,7 +16,7 @@ import lightning as L
 import pickle
 
 
-DATASET_SIZE = 50_000
+DATASET_SIZE = 25_000
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "optimize_data")
 ENV_STUDY_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "study_results")
@@ -51,68 +51,19 @@ def create_samplers(orig_filter: MWFilter):
     samplers_lhs_all_params_shuffle_pss_cols = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_lhs_all_params.cms,
                                                                                 pss=samplers_lhs_all_params.pss.shuffle(
                                                                                     ratio=1, dim=1))
-    samplers_lhs_all_params_shuffle_cms_rows = CMTheoreticalDatasetGeneratorSamplers(
-        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=0),
-        pss=samplers_lhs_all_params.pss)
-    samplers_lhs_all_params_shuffle_pss_rows = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_lhs_all_params.cms,
-                                                                                pss=samplers_lhs_all_params.pss.shuffle(
-                                                                                    ratio=1, dim=0))
     samplers_lhs_all_params_shuffle_all_cols = CMTheoreticalDatasetGeneratorSamplers(
         cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=1),
         pss=samplers_lhs_all_params.pss.shuffle(ratio=1, dim=1)
     )
-    samplers_lhs_all_params_shuffle_all_rows = CMTheoreticalDatasetGeneratorSamplers(
-        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=0),
-        pss=samplers_lhs_all_params.pss.shuffle(ratio=1, dim=0)
-    )
 
     total_samplers = CMTheoreticalDatasetGeneratorSamplers.concat(
-            (samplers_lhs_all_params_shuffle_cms_cols, samplers_lhs_all_params_shuffle_pss_cols,
-             samplers_lhs_all_params_shuffle_cms_rows, samplers_lhs_all_params_shuffle_pss_rows,
-             samplers_lhs_all_params_shuffle_all_cols, samplers_lhs_all_params_shuffle_all_rows,
+            (samplers_lhs_all_params_shuffle_cms_cols, samplers_lhs_all_params_shuffle_pss_cols, samplers_lhs_all_params_shuffle_all_cols,
              samplers_lhs_all_params)
     )
     return total_samplers
 
 
-# 2. Определяем целевую функцию для Optuna
-def objective(trial):
-    # 1. Определяем пространство поиска параметров
-    params = {
-        'first_conv_channels': trial.suggest_categorical('first_conv_channels', [16, 32, 64, 128]),
-        'first_conv_kernel': trial.suggest_int('first_conv_kernel', 5, 11, step=1),  # Нечетные размеры ядра
-        'layer_channels': [
-            trial.suggest_categorical('layer1_channels', [16, 32, 64, 128]),
-            trial.suggest_categorical('layer2_channels', [32, 64, 128, 256]),
-            trial.suggest_categorical('layer3_channels', [64, 128, 256, 512]),
-            trial.suggest_categorical('layer4_channels', [128, 256, 512, 1024]),
-        ],
-        'num_blocks': [
-            trial.suggest_int('layer1_blocks', 1, 5),
-            trial.suggest_int('layer2_blocks', 1, 5),
-            trial.suggest_int('layer3_blocks', 1, 5),
-            trial.suggest_int('layer4_blocks', 1, 5),
-        ],
-        # 'batch_size': trial.suggest_categorical('batch_size', [32, 64, 128]),
-        'lr': trial.suggest_float('lr', 1e-5, 1e-1, log=True),
-        'gamma': trial.suggest_float('gamma', 0.1, 1.0, step=0.1),
-        'step_size': trial.suggest_int('step_size', 1, 30),
-        'activation_in': trial.suggest_categorical('activation_in', models.get_available_activations()),
-        'activation_block': trial.suggest_categorical('activation_block', models.get_available_activations())
-    }
-
-    # 2. Создаем модель
-    model = models.ResNet1DFlexible(
-        in_channels=8,  # По вашему исходному коду
-        out_channels=30,  # По вашему исходному коду
-        first_conv_channels=params['first_conv_channels'],
-        first_conv_kernel=params['first_conv_kernel'],
-        layer_channels=params['layer_channels'],
-        num_blocks=params['num_blocks'],
-        activation_in=params['activation_in'],
-        activation_block=params['activation_block']
-    )
-
+def base_objective(model: nn.Module, optimizer_cfg: dict, scheduler_cfg: dict, metric: str="val_mse"):
     # 3. Создаем DataLoader
     dm = TouchstoneLDataModule(
         source=ds_gen.backend,  # Путь к датасету
@@ -139,8 +90,8 @@ def objective(trial):
         scaler_in=dm.scaler_in,  # Скейлер для входных данных
         scaler_out=dm.scaler_out,  # Скейлер для выходных данных
         codec=codec,  # Кодек для преобразования данных
-        optimizer_cfg={"name": "Adam", "lr": params['lr']},  # Конфигурация оптимизатора
-        scheduler_cfg={"name": "StepLR", "step_size": params['step_size'], "gamma": params['gamma']},
+        optimizer_cfg=optimizer_cfg,  # Конфигурация оптимизатора
+        scheduler_cfg=scheduler_cfg,
         loss_fn=nn.MSELoss()
     )
 
@@ -167,37 +118,52 @@ def objective(trial):
 
     # Запуск процесса обучения
     trainer.fit(lit_model, dm)
-
-    val_loss = checkpoint.best_model_score
-    score = val_loss
-
+    score = trainer.callback_metrics[metric].item()
     return score
 
 
-def main():
-    # 1. Загрузка данных
-    print("Создаем фильтр")
-    orig_filter = create_origin_filter(ENV_ORIGIN_DATA_PATH)
-    print("Создаем сэмплеры")
-    samplers = create_samplers(orig_filter)
-    global ds_gen
-    ds_gen = CMTheoreticalDatasetGenerator(
-        path_to_save_dataset=os.path.join(ENV_DATASET_PATH, samplers.cms.type.name, f"{len(samplers.cms)}"),
-        backend_type='ram',
-        orig_filter=orig_filter,
-        filename="Dataset",
-    )
-    ds_gen.generate(samplers)
+def optimize_resnet():
+    # 2. Определяем целевую функцию для Optuna
+    def objective(trial):
+        # 1. Определяем пространство поиска параметров
+        params = {
+            'first_conv_channels': trial.suggest_categorical('first_conv_channels', [16, 32, 64, 128]),
+            'first_conv_kernel': trial.suggest_int('first_conv_kernel', 5, 11, step=1),  # Нечетные размеры ядра
+            'layer_channels': [
+                trial.suggest_categorical('layer1_channels', [16, 32, 64, 128]),
+                trial.suggest_categorical('layer2_channels', [32, 64, 128, 256]),
+                trial.suggest_categorical('layer3_channels', [64, 128, 256, 512]),
+                trial.suggest_categorical('layer4_channels', [128, 256, 512, 1024]),
+            ],
+            'num_blocks': [
+                trial.suggest_int('layer1_blocks', 1, 5),
+                trial.suggest_int('layer2_blocks', 1, 5),
+                trial.suggest_int('layer3_blocks', 1, 5),
+                trial.suggest_int('layer4_blocks', 1, 5),
+            ],
+            # 'batch_size': trial.suggest_categorical('batch_size', [32, 64, 128]),
+            'lr': trial.suggest_float('lr', 1e-5, 1e-1, log=True),
+            'gamma': trial.suggest_float('gamma', 0.1, 1.0, step=0.1),
+            'step_size': trial.suggest_int('step_size', 1, 30),
+            'activation_in': trial.suggest_categorical('activation_in', models.get_available_activations()),
+            'activation_block': trial.suggest_categorical('activation_block', models.get_available_activations())
+        }
 
-
-    global codec
-    codec = MWFilterTouchstoneCodec.from_dataset(TouchstoneDataset(source=ds_gen.backend, in_memory=True))
-    codec.exclude_keys(["f0", "bw", "N", "Q"])
-    print(codec)
-
-    # Исключаем из анализа ненужные x-параметры
-    print("Каналы:", codec.y_channels)
-    print("Количество каналов:", len(codec.y_channels))
+        # 2. Создаем модель
+        model = models.ResNet1DFlexible(
+            in_channels=len(codec.y_channels),  # По вашему исходному коду
+            out_channels=len(codec.x_keys),  # По вашему исходному коду
+            first_conv_channels=params['first_conv_channels'],
+            first_conv_kernel=params['first_conv_kernel'],
+            layer_channels=params['layer_channels'],
+            num_blocks=params['num_blocks'],
+            activation_in=params['activation_in'],
+            activation_block=params['activation_block']
+        )
+        optimizer_cfg = {"name": "Adam", "lr": params['lr']}
+        scheduler_cfg = {"name": "StepLR", "step_size": params['step_size'], "gamma": params['gamma']}
+        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric="val_mse")
+        return score
 
     # 3. Создаем study и запускаем оптимизацию
     study = optuna.create_study(direction='minimize')  # Мы хотим максимизировать accuracy
@@ -219,17 +185,108 @@ def main():
          'activation_block': 'swish'}
     )
     study.optimize(objective, n_trials=TRIAL_NUM)  # Количество итераций оптимизации
+    return study
+
+
+def optimize_resnet_with_mlp_correction():
+    def objective(trial):
+        # 1. Определяем пространство поиска параметров
+        params = {
+            'hidden_dims': [
+                trial.suggest_int('hidden1_features', 8, 2048, step=8),
+                trial.suggest_int('hidden2_features', 8, 2048, step=8),
+                trial.suggest_int('hidden3_features', 8, 2048, step=8),
+            ],
+            'lr': trial.suggest_float('lr', 1e-5, 1e-1, log=True),
+            'gamma': trial.suggest_float('gamma', 0.1, 1.0, step=0.1),
+            'step_size': trial.suggest_int('step_size', 1, 30),
+            'activation_fun': trial.suggest_categorical('activation_fun', models.get_available_activations()),
+        }
+
+        # 2. Создаем модель
+        main = models.ResNet1DFlexible(
+            in_channels=len(codec.y_channels),
+            out_channels=len(codec.x_keys),
+            num_blocks=[1, 4, 3, 5],
+            layer_channels=[64, 64, 128, 256],
+            first_conv_kernel=8,
+            first_conv_channels=64,
+            activation_in='sigmoid',
+            activation_block='swish'
+        )
+
+        correction = models.CorrectionMLP(
+            input_dim=len(codec.x_keys),
+            output_dim=len(codec.x_keys),
+            hidden_dims=params['hidden_dims'],
+            activation_fun=params['activation_fun']
+        )
+
+        model = models.ModelWithCorrection(
+            main_model=main,
+            correction_model=correction
+        )
+        optimizer_cfg = {"name": "Adam", "lr": params['lr']}
+        scheduler_cfg = {"name": "StepLR", "step_size": params['step_size'], "gamma": params['gamma']}
+        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric="val_r2")
+        return score
+
+    # 3. Создаем study и запускаем оптимизацию
+    study = optuna.create_study(direction='maximize')  # Мы хотим максимизировать accuracy
+    study.enqueue_trial(
+        {'hidden1_features': 128,
+         'hidden2_features': 256,
+         'hidden3_features': 512,
+         'lr': 0.0005587648891507119,
+         'gamma': 0.1,
+         'step_size': 20,
+         'activation_fun': 'relu'
+         }
+    )
+    study.optimize(objective, n_trials=TRIAL_NUM)  # Количество итераций оптимизации
+    return study
+
+
+def main():
+    # 1. Загрузка данных
+    print("Создаем фильтр")
+    orig_filter = create_origin_filter(ENV_ORIGIN_DATA_PATH)
+    print("Создаем сэмплеры")
+    samplers = create_samplers(orig_filter)
+    global ds_gen
+    ds_gen = CMTheoreticalDatasetGenerator(
+        path_to_save_dataset=os.path.join(ENV_DATASET_PATH, samplers.cms.type.name, f"{len(samplers.cms)}"),
+        backend_type='ram',
+        orig_filter=orig_filter,
+        filename="Dataset",
+    )
+    ds_gen.generate(samplers)
+
+
+    global codec
+    codec = MWFilterTouchstoneCodec.from_dataset(ds=TouchstoneDataset(source=ds_gen.backend, in_memory=True),
+                                                 keys_for_analysis=[f"m_{r}_{c}" for r, c in orig_filter.coupling_matrix.links])
+    codec.exclude_keys(["f0", "bw", "N", "Q"])
+    print(codec)
+
+    # Исключаем из анализа ненужные x-параметры
+    print("Каналы:", codec.y_channels)
+    print("Количество каналов:", len(codec.y_channels))
+
+    study = optimize_resnet_with_mlp_correction()
 
     # 4. Выводим результаты
     print(f"Лучшие параметры: {study.best_params}")
-    print(f"Лучшая accuracy: {study.best_value:.4f}")
+    print(f"Лучшая метрика: {study.best_value:.4f}")
 
     if not os.path.exists(ENV_STUDY_PATH):
         os.makedirs(ENV_STUDY_PATH)
-    save_study_pickle(study, path=os.path.join(ENV_STUDY_PATH, f"study_dataset-dataset={DATASET_SIZE}-trials={TRIAL_NUM}.pkl"))
+    save_study_pickle(study, path=os.path.join(ENV_STUDY_PATH,
+                                               f"study_dataset-dataset={DATASET_SIZE}-trials={TRIAL_NUM}.pkl"))
     # 5. Визуализация (опционально)
     optuna.visualization.plot_optimization_history(study).show()
     optuna.visualization.plot_param_importances(study).show()
+
 
 
 if __name__ == "__main__":

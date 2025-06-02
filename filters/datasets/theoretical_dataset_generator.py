@@ -15,6 +15,21 @@ from mwlab.transforms import TComposite
 import matplotlib.pyplot as plt
 
 
+class DatasetMWFilter(MWFilter):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def to_touchstone_data(self, path=None) -> TouchstoneData:
+        params = {"f0": self.f0, "bw": self.bw, "Q": self.Q, "N": self.order}
+        M = self.coupling_matrix.matrix.cpu().numpy() if torch.is_tensor(
+            self.coupling_matrix.matrix) else self.coupling_matrix.matrix
+
+        params.update({f"m_{row}_{col}": M[row, col] for row, col in self.coupling_matrix.links_for_analysis})
+        td = TouchstoneData(network=self, params=params, path=path)
+        return td
+
+
+
 @dataclass
 class CMShifts:
     self_coupling: float
