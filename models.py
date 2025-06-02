@@ -2,7 +2,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from filters import MWFilter
+from filters import MWFilter, CouplingMatrix
+from filters.mwfilter_optim.base import FastMN2toSParamCalculation
 
 _activations = {
         'relu': F.relu,
@@ -16,7 +17,7 @@ _activations = {
         'gelu': F.gelu,
         'none': lambda x: x,
         'rrelu': F.rrelu,
-        'prelu': F.prelu,
+        'relu6': F.relu6,
         'soft_sign': F.softsign,
         'soft_plus': F.softplus
     }
@@ -156,8 +157,26 @@ class VGG1D(nn.Module):
         return x
 
 
+class SEBlock1D(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super(SEBlock1D, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1)
+        return x * y.expand_as(x)
+
+
 class BasicBlock1D(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1, activation='relu'):
+    def __init__(self, in_channels, out_channels, stride=1, activation='relu', use_se=False, se_reduction=16):
         super().__init__()
         self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1)
         self.bn1 = nn.BatchNorm1d(out_channels)
@@ -172,10 +191,15 @@ class BasicBlock1D(nn.Module):
 
         # Выбор функции активации
         self.activation = get_activation(activation)
+        self.use_se = use_se
+        if use_se:
+            self.se = SEBlock1D(out_channels, reduction=se_reduction)
 
     def forward(self, x):
         out = self.activation(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
+        if self.use_se:
+            out = self.se(out)
         out += self.shortcut(x)  # Residual connection
         out = self.activation(out)
         return out
@@ -221,38 +245,43 @@ class ResNet1DFlexible(nn.Module):
                  first_conv_channels=64, first_conv_kernel=7,
                  layer_channels=[64, 128, 256, 512],
                  num_blocks=[1, 2, 3, 1],
-                 activation_in='relu', activation_block='relu'):
+                 activation_in='relu', activation_block='relu',
+                 use_se=True, se_reduction=16):
         super().__init__()
 
-        # Сохраняем параметр активации
         self.activation_name = activation_in
         self.activation = get_activation(activation_in)
 
-        # Первый сверточный слой
         self.conv1 = nn.Conv1d(in_channels, first_conv_channels,
                                kernel_size=first_conv_kernel,
                                stride=2,
                                padding=first_conv_kernel // 2)
         self.bn1 = nn.BatchNorm1d(first_conv_channels)
+        # self.bn1 = nn.GroupNorm(num_groups=8, num_channels=first_conv_channels)
         self.maxpool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
 
-        # Создаем слои ResNet
         self.layers = nn.ModuleList()
         in_ch = first_conv_channels
         for out_ch, n_blocks in zip(layer_channels, num_blocks):
-            self.layers.append(self.make_layer(in_ch, out_ch, n_blocks,
-                                               stride=2 if in_ch != out_ch else 1,
-                                               activation=activation_block))
+            self.layers.append(
+                self.make_layer(in_ch, out_ch, n_blocks,
+                                stride=2 if in_ch != out_ch else 1,
+                                activation=activation_block,
+                                use_se=use_se,
+                                se_reduction=se_reduction)
+            )
             in_ch = out_ch
 
         self.avgpool = nn.AdaptiveAvgPool1d(1)
         self.fc = nn.Linear(in_ch, out_channels)
 
     @staticmethod
-    def make_layer(in_channels, out_channels, num_blocks, stride, activation):
-        layers = [BasicBlock1D(in_channels, out_channels, stride, activation)]
+    def make_layer(in_channels, out_channels, num_blocks, stride, activation, use_se, se_reduction):
+        layers = [BasicBlock1D(in_channels, out_channels, stride, activation,
+                               use_se=use_se, se_reduction=se_reduction)]
         for _ in range(1, num_blocks):
-            layers.append(BasicBlock1D(out_channels, out_channels, stride=1, activation=activation))
+            layers.append(BasicBlock1D(out_channels, out_channels, stride=1,
+                                       activation=activation, use_se=use_se, se_reduction=se_reduction))
         return nn.Sequential(*layers)
 
     def forward(self, x):
@@ -266,6 +295,142 @@ class ResNet1DFlexible(nn.Module):
         x = x.view(x.size(0), -1)
         x = self.fc(x)
         return x
+    # def forward(self, x):
+    #     residual = x  # Сохраняем вход
+    #     x = self.activation(self.bn1(self.conv1(x)))
+    #     x = self.maxpool(x)
+    #
+    #     for layer in self.layers:
+    #         x = layer(x)
+    #
+    #     x = self.avgpool(x)
+    #     x = x.view(x.size(0), -1)
+    #
+    #     # Глобальный скип-коннекшен, если размерности совпадают
+    #     if residual.shape[1] == x.shape[1]:
+    #         x += residual.mean(dim=2)  # Приводим residual к размерности (batch, channels)
+    #     else:
+    #         # Приводим residual к размерности выхода
+    #         residual_proj = nn.AdaptiveAvgPool1d(1)(residual)
+    #         residual_proj = residual_proj.view(residual_proj.size(0), -1)
+    #         if residual_proj.shape[1] != x.shape[1]:
+    #             # 1x1 "проекционный слой"
+    #             proj = nn.Linear(residual_proj.shape[1], x.shape[1]).to(x.device)
+    #             residual_proj = proj(residual_proj)
+    #         x += residual_proj
+    #
+    #     x = self.fc(x)
+    #     return x
+
+    # def forward(self, x):
+    #     x = self.activation(self.bn1(self.conv1(x)))
+    #     x = self.maxpool(x)
+    #
+    #     for layer in self.layers:
+    #         residual = x
+    #         x = layer(x)
+    #         if residual.shape == x.shape:
+    #             x += residual  # межблочный скип-коннекшен
+    #
+    #     x = self.avgpool(x)
+    #     x = x.view(x.size(0), -1)
+    #     x = self.fc(x)
+    #     return x
+
+
+class ModelWithCorrection(nn.Module):
+    def __init__(self,
+                 main_model: nn.Module, correction_model: nn.Module,
+                 *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._main_model = main_model
+        self._correction_model = correction_model
+
+    def forward(self, x):
+        main_output = self._main_model(x)
+        correction = self._correction_model(main_output)
+        final = main_output + correction
+
+        # matrix = CouplingMatrix.from_factors(main_output, links=self._origin_filter.coupling_matrix.links,
+        #                                      matrix_order=self._origin_filter.coupling_matrix.matrix_order,
+        #                                      device=x.device)
+        # _, s11_pred, s21_pred, s22_pred = self._fast_calc.BatchedRespM2(matrix, with_s22=True)
+        # # Разделим на действительную и мнимую части
+        # s11_re, s11_im = s11_pred.real, s11_pred.imag
+        # s21_re, s21_im = s21_pred.real, s21_pred.imag
+        # s22_re, s22_im = s22_pred.real, s22_pred.imag
+        #
+        # # Соберём в нужном порядке: [re..., im...]
+        # s_parts = [s11_re, s21_re, s22_re, s11_im, s21_im, s22_im]
+        # s_concat = torch.stack(s_parts, dim=1)  # shape: [batch_size, 6, freq_len]
+        #
+        # # scaled_decoded = self._scaler_in(s_concat)
+        # decoded = self._correction_model(s_concat)
+        return final
+
+
+class CorrectionTransformer(nn.Module):
+    def __init__(self, d_model=64, nhead=4, num_layers=2):
+        super().__init__()
+        self.input_proj = nn.Linear(1, d_model)
+        encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=nhead)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.output_proj = nn.Linear(d_model, 1)
+
+    def forward(self, x):
+        x = x.unsqueeze(-1)  # (B, 30, 1)
+        x = self.input_proj(x)  # (B, 30, d_model)
+        x = x.permute(1, 0, 2)  # (30, B, d_model)
+        x = self.transformer(x)
+        x = x.permute(1, 0, 2)
+        x = self.output_proj(x).squeeze(-1)  # (B, 30)
+        return x
+
+
+class CorrectionMLP(nn.Module):
+    def __init__(self, input_dim=30, hidden_dims=[64, 128, 64], output_dim=30, activation_fun='relu'):
+        super().__init__()
+        self.activation_fun = get_activation(activation_fun)
+
+        # Сохраняем линейные слои в ModuleList
+        self.layers = nn.ModuleList()
+        self.normalizations = nn.ModuleList()
+        in_dim = input_dim
+        for h_dim in hidden_dims:
+            self.layers.append(nn.Linear(in_dim, h_dim))
+            self.normalizations.append(nn.LayerNorm(h_dim))
+            in_dim = h_dim
+
+        self.out_layer = nn.Linear(in_dim, output_dim)
+
+    def forward(self, x):
+        identity = x
+        for layer, norm in tuple(zip(self.layers, self.normalizations)):
+            x = layer(x)
+            x = norm(x)
+            x = self.activation_fun(x)
+        x = self.out_layer(x)
+        x += identity
+        return x
+
+
+class CorrectionCNN1D(nn.Module):
+    def __init__(self, input_len=30, output_dim=30):
+        super().__init__()
+        self.conv1 = nn.Conv1d(1, 16, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(16, 32, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv1d(32, 16, kernel_size=3, padding=1)
+        self.fc = nn.Linear(16 * input_len, output_dim)
+
+    def forward(self, x):
+        x = x.unsqueeze(1)  # (B, 1, 30)
+        x = torch.relu(self.conv1(x))
+        x = torch.relu(self.conv2(x))
+        x = torch.relu(self.conv3(x))
+        x = x.flatten(1)  # (B, 16*30)
+        x = self.fc(x)
+        return x
+
 
 
 class Bottleneck1D(nn.Module):
@@ -716,103 +881,3 @@ class ResNetRNN1D(nn.Module):
         # Get final predictions
         output = self.fc_final(rnn_output.squeeze(1))
         return output
-
-
-class SEBlock1D(nn.Module):
-    def __init__(self, channels, reduction=16):
-        super().__init__()
-        self.avg_pool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(channels, channels // reduction),
-            nn.ReLU(inplace=True),
-            nn.Linear(channels // reduction, channels),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        b, c, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1)
-        return x * y.expand_as(x)
-
-
-class SEBasicBlock1D(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1, reduction=16):
-        super().__init__()
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm1d(out_channels)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm1d(out_channels)
-        self.se = SEBlock1D(out_channels, reduction)
-
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_channels != out_channels:
-            self.shortcut = nn.Sequential(
-                nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm1d(out_channels)
-            )
-
-    def forward(self, x):
-        residual = self.shortcut(x)
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out = self.se(out)
-        out += residual
-        return F.relu(out)
-
-
-class SENet1D(nn.Module):
-    def __init__(self, in_channels=1, num_classes=10, block_config=[2, 2, 2],
-                 init_channels=64, reduction=16, dropout=0.2):
-        super().__init__()
-
-        # Initial layers
-        self.features = nn.Sequential(
-            nn.Conv1d(in_channels, init_channels, kernel_size=7, stride=2, padding=3, bias=False),
-            nn.BatchNorm1d(init_channels),
-            nn.ReLU(inplace=True),
-            nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
-        )
-
-        # Residual layers
-        self.layers = nn.ModuleList()
-        channels = init_channels
-
-        for i, num_blocks in enumerate(block_config):
-            out_channels = channels * (2 if i > 0 else 1)  # Double channels after first layer
-            self.layers.append(self._make_layer(channels, out_channels, num_blocks,
-                                                stride=1 if i == 0 else 2,
-                                                reduction=reduction))
-            channels = out_channels
-
-        # Final layers
-        self.avgpool = nn.AdaptiveAvgPool1d(1)
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(channels, num_classes)
-
-        # Weight initialization
-        for m in self.modules():
-            if isinstance(m, nn.Conv1d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm1d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-
-    def _make_layer(self, in_channels, out_channels, blocks, stride, reduction):
-        layers = []
-        layers.append(SEBasicBlock1D(in_channels, out_channels, stride, reduction))
-        for _ in range(1, blocks):
-            layers.append(SEBasicBlock1D(out_channels, out_channels, 1, reduction))
-        return nn.Sequential(*layers)
-
-    def forward(self, x):
-        x = self.features(x)  # [batch, init_channels, L//4]
-
-        for layer in self.layers:
-            x = layer(x)  # После каждого слоя: [batch, channels*, L*]
-
-        x = self.avgpool(x)  # [batch, channels, 1]
-        x = torch.flatten(x, 1)  # [batch, channels]
-        x = self.dropout(x)
-        x = self.fc(x)  # [batch, num_classes]
-        return x

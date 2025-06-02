@@ -204,7 +204,6 @@ class MWFilter(rf.Network):
         )
 
     @staticmethod
-    @torch.no_grad()
     def response_from_coupling_matrix(M, f0, FBW, Q, frange, NRNlist=[], Rs=1, Rl=1, PSs=None, device='cpu'):
         """Vectorized calculation of filter S-parameters from coupling matrix on GPU/CPU."""
         M = M.to(device) if torch.is_tensor(M) else torch.tensor(M, dtype=torch.complex64, device=device)
