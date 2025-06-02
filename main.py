@@ -24,7 +24,7 @@ from filters.mwfilter_optim.bfgs import optimize_cm
 torch.set_float32_matmul_precision("medium")
 
 BATCH_SIZE = 64
-BASE_DATASET_SIZE = 1_000
+BASE_DATASET_SIZE = 10_000
 FILTER_NAME = "EAMU4-KuIMUXT3-BPFC1"
 # FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
@@ -74,30 +74,29 @@ def create_samplers(orig_filter: MWFilter):
         pss=samplers_lhs_all_params.pss)
     samplers_lhs_all_params_shuffle_pss_cols = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_lhs_all_params.cms,
                                                                                 pss=samplers_lhs_all_params.pss.shuffle(
-                                                                                    ratio=1, dim=1))
-    samplers_lhs_all_params_shuffle_cms_rows = CMTheoreticalDatasetGeneratorSamplers(
-        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=0),
-        pss=samplers_lhs_all_params.pss)
-    samplers_lhs_all_params_shuffle_pss_rows = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_lhs_all_params.cms,
-                                                                                pss=samplers_lhs_all_params.pss.shuffle(
-                                                                                    ratio=1, dim=0))
+                                                                                ratio=1, dim=1))
     samplers_lhs_all_params_shuffle_all_cols = CMTheoreticalDatasetGeneratorSamplers(
         cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=1),
         pss=samplers_lhs_all_params.pss.shuffle(ratio=1, dim=1)
     )
-    samplers_lhs_all_params_shuffle_all_rows = CMTheoreticalDatasetGeneratorSamplers(
-        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=0),
-        pss=samplers_lhs_all_params.pss.shuffle(ratio=1, dim=0)
-    )
+    # samplers_lhs_all_params_shuffle_cms_rows = CMTheoreticalDatasetGeneratorSamplers(
+    #     cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=0),
+    #     pss=samplers_lhs_all_params.pss)
+    # samplers_lhs_all_params_shuffle_pss_rows = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_lhs_all_params.cms,
+    #                                                                             pss=samplers_lhs_all_params.pss.shuffle(
+    #                                                                                 ratio=1, dim=0))
+    # samplers_lhs_all_params_shuffle_all_rows = CMTheoreticalDatasetGeneratorSamplers(
+    #     cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=0),
+    #     pss=samplers_lhs_all_params.pss.shuffle(ratio=1, dim=0)
+    # )
 
     sampler_configs["samplers_size"] = int(BASE_DATASET_SIZE/100)
     samplers_lhs_with_one_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
                                                                                          samplers_type=SamplerTypes.SAMPLER_LATIN_HYPERCUBE(one_param=True),
                                                                                          **sampler_configs)
     total_samplers = CMTheoreticalDatasetGeneratorSamplers.concat(
-            (samplers_lhs_all_params_shuffle_cms_cols, samplers_lhs_all_params_shuffle_pss_cols,
-             samplers_lhs_all_params_shuffle_cms_rows, samplers_lhs_all_params_shuffle_pss_rows,
-             samplers_lhs_all_params_shuffle_all_cols, samplers_lhs_all_params_shuffle_all_rows,
+            (samplers_lhs_all_params_shuffle_cms_cols, samplers_lhs_all_params_shuffle_pss_cols, samplers_lhs_all_params_shuffle_all_cols,
+             # samplers_lhs_all_params_shuffle_cms_rows, samplers_lhs_all_params_shuffle_pss_rows, samplers_lhs_all_params_shuffle_all_rows,
              samplers_lhs_all_params)
     )
     return total_samplers
@@ -119,11 +118,12 @@ def main():
     ds = TouchstoneDataset(source=ds_gen.backend, in_memory=True)
     # plot_distribution(ds, num_params=len(ds_gen.origin_filter.coupling_matrix.links))
 
-    codec = MWFilterTouchstoneCodec.from_dataset(ds)
-    codec.exclude_keys(["f0", "bw", "N", "Q"])
+    codec = MWFilterTouchstoneCodec.from_dataset(ds=ds,
+                                                 keys_for_analysis=[f"m_{r}_{c}" for r, c in orig_filter.coupling_matrix.links])
+
     print(codec)
-    # Исключаем из анализа ненужные x-параметры
-    print("Каналы:", codec.y_channels)
+    print("Каналы Y:", codec.y_channels)
+    print("Каналы X:", codec.x_keys)
     print("Количество каналов:", len(codec.y_channels))
 
     dm = TouchstoneLDataModule(
@@ -157,15 +157,37 @@ def main():
     print(f"Размер валидационного набора: {len(dm.val_ds)}")
     print(f"Размер тестового набора: {len(dm.test_ds)}")
 
-    model = models.ResNet1DFlexible(
+    main = models.ResNet1DFlexible(
         in_channels=len(codec.y_channels),
-        out_channels=len(ds_gen.origin_filter.coupling_matrix.links),
+        out_channels=len(codec.x_keys),
         num_blocks=[1, 4, 3, 5],
         layer_channels=[64, 64, 128, 256],
         first_conv_kernel=8,
         first_conv_channels=64,
         activation_in='sigmoid',
-        activation_block='swish'
+        activation_block='swish',
+        use_se=False,
+        se_reduction=1
+    )
+
+    # correction = models.CorrectionTransformer(
+    #     num_layers=3,
+    #     nhead=4,
+    #     d_model=64,
+    # )
+    correction = models.CorrectionMLP(
+        input_dim=len(codec.x_keys),
+        output_dim=len(codec.x_keys),
+        hidden_dims=[128, 256, 512],
+    )
+    # correction = models.CorrectionCNN1D(
+    #     input_len=len(codec.x_keys),
+    #     output_dim=len(codec.x_keys)
+    # )
+
+    model = models.ModelWithCorrection(
+        main_model=main,
+        correction_model=correction,
     )
 
     lit_model = MWFilterBaseLMWithMetrics(
@@ -181,7 +203,7 @@ def main():
 
     stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min", min_delta=0.00001)
     checkpoint = L.pytorch.callbacks.ModelCheckpoint(monitor="val_loss", dirpath="saved_models/" + FILTER_NAME,
-                                                     filename="best-{epoch}-{val_loss:.5f}-{train_loss:.5f}",
+                                                     filename="best-{epoch}-{val_loss:.5f}-{train_loss:.5f}-{val_r2:.5f}",
                                                      mode="min",
                                                      save_top_k=1,  # Сохраняем только одну лучшую
                                                      save_weights_only=False,
@@ -207,14 +229,14 @@ def main():
 
 
     # Запуск процесса обучения
-    # trainer.fit(lit_model, dm)
+    trainer.fit(lit_model, dm)
     print(f"Best model saved into: {checkpoint.best_model_path}")
 
     # Загружаем лучшую модель
     inference_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
         # checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=12-val_loss=0.01266-train_loss=0.01224.ckpt",
-        checkpoint_path="saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=11-val_loss=0.01305-train_loss=0.01285.ckpt",
-        # checkpoint_path=checkpoint.best_model_path,
+        # checkpoint_path="saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=11-val_loss=0.01305-train_loss=0.01285.ckpt",
+        checkpoint_path=checkpoint.best_model_path,
         model=model
     ).to(lit_model.device)
     orig_fil, pred_fil = inference_model.predict(dm, idx=0)
