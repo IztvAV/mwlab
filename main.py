@@ -24,7 +24,7 @@ from filters.mwfilter_optim.bfgs import optimize_cm
 torch.set_float32_matmul_precision("medium")
 
 BATCH_SIZE = 64
-BASE_DATASET_SIZE = 10_000
+BASE_DATASET_SIZE = 25_000
 FILTER_NAME = "EAMU4-KuIMUXT3-BPFC1"
 # FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
@@ -178,7 +178,7 @@ def main():
     correction = models.CorrectionMLP(
         input_dim=len(codec.x_keys),
         output_dim=len(codec.x_keys),
-        hidden_dims=[128, 256, 512],
+        hidden_dims=[256, 32, 128],
     )
     # correction = models.CorrectionCNN1D(
     #     input_len=len(codec.x_keys),
@@ -196,8 +196,8 @@ def main():
         scaler_in=dm.scaler_in,  # Скейлер для входных данных
         scaler_out=dm.scaler_out,  # Скейлер для выходных данных
         codec=codec,  # Кодек для преобразования данных
-        optimizer_cfg={"name": "Adam", "lr": 0.0005587648891507119},
-        scheduler_cfg={"name": "StepLR", "step_size": 20, "gamma": 0.1},
+        optimizer_cfg={"name": "Adam", "lr": 0.0006859984857331174},
+        scheduler_cfg={"name": "StepLR", "step_size": 13, "gamma": 0.3},
         loss_fn=nn.MSELoss()
     )
 

@@ -193,9 +193,9 @@ def optimize_resnet_with_mlp_correction():
         # 1. Определяем пространство поиска параметров
         params = {
             'hidden_dims': [
-                trial.suggest_int('hidden1_features', 8, 2048, step=8),
-                trial.suggest_int('hidden2_features', 8, 2048, step=8),
-                trial.suggest_int('hidden3_features', 8, 2048, step=8),
+                trial.suggest_categorical('hidden1_features', [8, 16, 32, 64, 128, 256, 512, 1024, 2048]),
+                trial.suggest_categorical('hidden2_features', [8, 16, 32, 64, 128, 256, 512, 1024, 2048]),
+                trial.suggest_categorical('hidden3_features', [8, 16, 32, 64, 128, 256, 512, 1024, 2048]),
             ],
             'lr': trial.suggest_float('lr', 1e-5, 1e-1, log=True),
             'gamma': trial.suggest_float('gamma', 0.1, 1.0, step=0.1),
