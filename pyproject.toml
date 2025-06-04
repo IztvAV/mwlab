@@ -34,5 +34,10 @@ doe = [
     "pyDOE2 >=1.3"
 ]
 
+# Для анализа чувствительности параметров устройств
+analysis = [
+    "SALib>=1.4"
+]
+
 [tool.setuptools.packages.find]
 where = ["mwlab"]

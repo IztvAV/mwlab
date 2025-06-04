@@ -97,8 +97,8 @@ class ContinuousVar(BaseVar):
                 raise ValueError("ContinuousVar: задайте либо (lower,upper), либо (center,delta)")
             self.lower = float(self.center - self.delta)
             self.upper = float(self.center + self.delta)
-        if self.upper <= self.lower:
-            raise ValueError("upper must be > lower")
+        if self.upper < self.lower:
+            raise ValueError("upper must be >= lower")
 
     # ---------------- реализация API
     def bounds(self) -> Tuple[float, float]:
@@ -110,7 +110,10 @@ class ContinuousVar(BaseVar):
 
     def from_unit(self, x: float) -> float:
         lo, hi = self.bounds()
-        return (float(x) - lo) / (hi - lo)
+        width = hi - lo
+        if width == 0:  # переменная «заморожена»
+            return 0.0  # любое значение нормируется в 0
+        return (float(x) - lo) / width
 
     # ---------------- (де)сериализация
     def to_json(self) -> Dict[str, JSONable]:
@@ -319,29 +322,90 @@ class DesignSpace:
             raise RuntimeError("DesignSpace.sample: не удалось набрать валидных точек – увеличьте max_attempts")
         return pts[:n]
 
+    # ---------------- freeze_axes
+    def freeze_axes(self, inactive: Iterable[str]) -> "DesignSpace":
+        """Возвращает копию пространства с δ=0 для указанных имён."""
+        new = {n: v for n, v in self._vars.items()}
+        for n in inactive:
+            if n in new:
+                c = 0.5 * sum(new[n].bounds())  # центр
+                new[n] = ContinuousVar(lower=c, upper=c)  # точечная переменная
+        return DesignSpace(new)
+
     # ---------------- from_center_delta helper
     @classmethod
     def from_center_delta(
-        cls,
-        centers: Mapping[str, float],
-        *,
-        delta: float | Mapping[str, float],
-        mode: str = "abs",  # "abs" | "rel" (% от центра)
-        unit: str = "",
+            cls,
+            centers: Mapping[str, float],
+            *,
+            delta: float | Mapping[str, float | Tuple[float, float]],
+            mode: str = "abs", # "abs" | "rel" (% от центра)
+            unit: str = "",
     ) -> "DesignSpace":
-        """Быстрый билдер: все переменные – ContinuousVar.
+        """
+        delta:
+            • число → один радиус для всех переменных;
+            • dict[name → δ]   – радиус каждой переменной;
+            • dict[name → (–δ⁻, +δ⁺)]  – асимметричный допуск.
 
-        * `delta` – либо число для всех, либо dict[key→δ].
-        * `mode="rel"` – интерпретируем δ как долю: 0.1 → ±10 %.
+        mode:
+            'abs' – δ в абсолютных единицах (по умолчанию);
+            'rel' – интерпретировать δ как долю от |center|.
         """
         vars: Dict[str, BaseVar] = {}
         for k, center in centers.items():
+            # ---------- определяем «минус» и «плюс» радиусы ----------
             d = delta[k] if isinstance(delta, Mapping) else delta
-            d = float(d)
+
+            # (a) скаляр δ → симметрия
+            if not isinstance(d, tuple):
+                d_minus = d_plus = float(d)
+            # (b) кортеж (–δ⁻, +δ⁺)
+            else:
+                d_minus, d_plus = map(abs, d)  # знак не важен
+
             if mode == "rel":
-                d = d * abs(center)
-            vars[k] = ContinuousVar(center=center, delta=d, unit=unit)
+                scale = abs(center)
+                d_minus *= scale
+                d_plus *= scale
+
+            lower = center - d_minus
+            upper = center + d_plus
+            vars[k] = ContinuousVar(lower=lower, upper=upper, unit=unit)
+
         return cls(vars)
+
+    # ---------------- to_center_delta helper
+    def to_center_delta(
+            self,
+            centers: Mapping[str, float] | None = None,
+            *,
+            sym: bool = False,
+    ) -> Dict[str, Tuple[float, float]]:
+        """
+        Возвращает допуски относительно переданных центров.
+
+        Parameters
+        ----------
+        centers : dict | None
+            k → X₀k, относительно которого считаем δ.
+            Если None, берётся середина интервала (lo+hi)/2.
+        sym : bool, default False
+            True  → делаем симметричными (r = max(δ⁻, δ⁺)).
+            False → оставляем как есть.
+        """
+        out: Dict[str, Tuple[float, float]] = {}
+        for n, var in self._vars.items():
+            lo, hi = var.bounds()
+            c = centers[n] if centers is not None else 0.5 * (lo + hi)
+            dm = max(0.0, c - lo)
+            dp = max(0.0, hi - c)
+            if sym:
+                r = max(dm, dp)
+                out[n] = (-r, r)
+            else:
+                out[n] = (-dm, dp)
+        return out
 
     # ---------------- I/O JSON/YAML
     def to_json(self) -> Dict[str, Any]:

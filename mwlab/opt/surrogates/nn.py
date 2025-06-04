@@ -133,29 +133,55 @@ class NNSurrogate(BaseSurrogate):
 
     # ----------------------------------------------- оптимизированный passes_spec
     def passes_spec(self, xs, spec):
-        # одиночная точка → наследуем дефолт
+        """
+        Быстрая проверка спецификации для батча X-параметров.
+
+        • Если `xs` — одиночный dict → вызываем базовый метод
+          (он пройдёт через обычный `predict`).
+
+        • Для батча:
+          1. Кодируем X-вектор каждого dict через `codec.encode_x`.
+          2. Склеиваем их в один тензор (B,Dx) и прогоняем сеть
+             **одним** forward-проходом (GPU-friendly).
+          3. Приводим результат к NumPy и пытаемся отдать его в
+             `spec.fast_is_ok` — это самый быстрый путь.
+          4. Если `fast_is_ok` нет, декодируем каждую строку в
+             `rf.Network` через `codec.decode_s` и вызываем `is_ok`.
+        """
+        # -------- одиночная точка ------------------------------------
         if isinstance(xs, Mapping):
             return super().passes_spec(xs, spec)
 
         codec = getattr(self.model, "codec", None)
-        if codec is None:
+        if codec is None:                         # safety-fallback
             return super().passes_spec(xs, spec)
 
+        # -------- векторный encode X ---------------------------------
         with torch.no_grad():
-            X = codec.encode_x_batch(xs).to(self.model.device)
-            Y = self.model(X)                         # (N, features)
+            X = torch.stack([codec.encode_x(p) for p in xs]) \
+                    .to(self.model.device)       # (B,Dx)
+            Y = self.model(X)                    # (B,C,F)  или (B,*)
             if self.model.scaler_out is not None:
                 Y = self.model._apply_inverse(self.model.scaler_out, Y)
-            Y = Y.cpu().numpy()
+            Y_np = Y.cpu().numpy()               # → NumPy
 
-        # Быстрый способ, если в Specification он есть
+        # -------- fast path через Specification ----------------------
         if hasattr(spec, "fast_is_ok"):
-            return spec.fast_is_ok(Y)
+            try:
+                return spec.fast_is_ok(Y_np)     # (B,) bool
+            except Exception:
+                # если векторная реализация упала — откатываемся
+                pass
 
-        # Иначе медленно декодируем в rf.Network
+        # -------- медленный fallback ---------------------------------
         return np.fromiter(
-            (spec.is_ok(codec.decode_s(row)) for row in Y),
-            dtype=bool,
+            (
+                spec.is_ok(
+                    codec.decode_s(torch.as_tensor(row, dtype=torch.float32))
+                )
+                for row in Y_np
+            ),
+            dtype = bool,
         )
 
     # -------------------------------------------------------------------

@@ -57,25 +57,45 @@ class BaseSurrogate(ABC):
                 ys.append(out)
         return (ys, sig) if (return_std and self.supports_uncertainty) else ys
 
-    def passes_spec(                     # <-- универсальный интерфейс
-        self,
-        xs: Union[Mapping[str, float],
-                  Sequence[Mapping[str, float]]],
-        spec: "Specification",
+    def passes_spec(
+            self,
+            xs: Union[Mapping[str, float],
+            Sequence[Mapping[str, float]]],
+            spec: "Specification",
     ):
         """
-        Вернуть указатель(и) «проходит ли *spec*».
+        Проверяет, удовлетворяют ли *предсказания* surrogate
+        переданной `Specification`.
 
-        • Если `xs` – один словарь → bool.
-        • Если `xs` – последовательность → numpy.bool_ массив.
+        Параметры
+        ----------
+        xs : dict | list[dict]
+            • Если передан **один** словарь параметров — метод
+              возвращает `bool`.
+            • Если передан **batch** (последовательность словарей) —
+              возвращает `np.ndarray` булевого типа, где `mask[i]`
+              соответствует `xs[i]`.
+        spec : Specification
+            Объект спецификации, содержащий набор критериев `is_ok()`.
+
+        Базовая реализация *ничего не знает* о внутреннем формате
+        surrogate: она вызывает `predict` / `batch_predict`, а затем
+        перебирает элементы, передавая их в `spec.is_ok()`.
+        Потомки могут переопределить метод и вернуть маску быстрее
+        (без создания тяжёлых объектов).
         """
-        if isinstance(xs, Mapping):          # одиночная точка
-            y = self.predict(xs)
+        # --- одиночная точка ----------------------------------------
+        if isinstance(xs, Mapping):
+            y = self.predict(xs)  # → rf.Network / ndarray …
             return bool(spec.is_ok(y))
 
-        # fallback-batch: используем batch_predict + поэлементно
-        preds = self.batch_predict(xs)
-        return np.fromiter((spec.is_ok(p) for p in preds), dtype=bool)
+        # --- batch: fallback через batch_predict --------------------
+        preds = self.batch_predict(xs)  # list[Network|…]
+        # np.fromiter быстрее, чем list → np.array → .astype(bool)
+        return np.fromiter(
+            (spec.is_ok(p) for p in preds),  # генератор bool
+            dtype=bool
+        )
 
     # ────────────────────────────── Persistence ─────────────────────────
     def save(self, path: str | Path):
