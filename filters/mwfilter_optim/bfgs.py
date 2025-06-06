@@ -81,18 +81,18 @@ def create_bounds(origin_matrix: CouplingMatrix):
 
     for (i, j) in origin_matrix.links:
         if i == j:
-            Mmin[i][j] -= 0.5*Mmin[i][j]
-            Mmax[i][j] += 0.5*Mmax[i][j]
+            Mmin[i][j] -= 2.0*Mmin[i][j]
+            Mmax[i][j] += 2.0*Mmax[i][j]
         elif j == (i + 1):
-            Mmin[i][j] -= 0.5*Mmin[i][j]
-            Mmin[j][i] -= 0.5*Mmin[j][i]
-            Mmax[i][j] += 0.5*Mmax[i][j]
-            Mmax[j][i] += 0.5*Mmax[j][i]
+            Mmin[i][j] -= 2.0*Mmin[i][j]
+            Mmin[j][i] -= 2.0*Mmin[j][i]
+            Mmax[i][j] += 2.0*Mmax[i][j]
+            Mmax[j][i] += 2.0*Mmax[j][i]
         else:
-            Mmin[i][j] -= 0.5*Mmin[i][j]
-            Mmin[j][i] -= 0.5*Mmin[j][i]
-            Mmax[i][j] += 0.5*Mmax[i][j]
-            Mmax[j][i] += 0.5*Mmax[j][i]
+            Mmin[i][j] -= 2.0*Mmin[i][j]
+            Mmin[j][i] -= 2.0*Mmin[j][i]
+            Mmax[i][j] += 2.0*Mmax[i][j]
+            Mmax[j][i] += 2.0*Mmax[j][i]
     return CouplingMatrix(torch.tensor(Mmin, dtype=torch.float32)), CouplingMatrix(torch.tensor(Mmax, dtype=torch.float32))
 
 
@@ -100,15 +100,16 @@ def create_bounds(origin_matrix: CouplingMatrix):
 def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
     def cost_with_grad(x_np, *args):
         """Функция стоимости + градиент для scipy"""
-        fast_calc, orig_filter, s11_origin_db, s21_origin_db, links, matrix_order = args
+        fast_calc, orig_filter, s11_origin_db, s21_origin_db, s22_origin_db, links, matrix_order = args
         x = torch.tensor(x_np, dtype=torch.float32, requires_grad=True)
 
         M = CouplingMatrix.from_factors(x, links, matrix_order)
         _, s11_pred, s21_pred = fast_calc.RespM2(M)
 
-        loss = torch.sum(torch.abs(s11_origin_db - DatasetMWFilter.to_db(s11_pred))) + \
-               torch.sum(torch.abs(s21_origin_db - DatasetMWFilter.to_db(s21_pred)))
-
+        loss = (
+                torch.nn.MSELoss()(MWFilter.to_db(s11_pred), s11_origin_db) +
+                torch.nn.MSELoss()(MWFilter.to_db(s21_pred), s21_origin_db)
+                )
         loss.backward()
         # print(f"{loss.item()}")
         return loss.item(), x.grad.detach().numpy()
@@ -125,10 +126,12 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
 
     s11_origin = orig_filter.s[:, 0, 0]
     s21_origin = orig_filter.s[:, 1, 0]
+    s22_origin = orig_filter.s[:, 1, 1]
 
     # Преобразуем в тензоры один раз
-    s11_origin_db = DatasetMWFilter.to_db(torch.tensor(s11_origin, dtype=torch.complex128))
-    s21_origin_db = DatasetMWFilter.to_db(torch.tensor(s21_origin, dtype=torch.complex128))
+    s11_origin_db = DatasetMWFilter.to_db(torch.tensor(s11_origin, dtype=torch.complex64))
+    s21_origin_db = DatasetMWFilter.to_db(torch.tensor(s21_origin, dtype=torch.complex64))
+    s22_origin_db = DatasetMWFilter.to_db(torch.tensor(s22_origin, dtype=torch.complex64))
 
     # [(min(0.5*xi, 1*xi), max(0.5*xi, 1 * xi)) if xi != 0 else (-0.5, 0.5) for xi in x0]
 
@@ -141,19 +144,19 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
         method='l-bfgs-b',
         jac=True,
         bounds=bounds,
-        args=(fast_calc, orig_filter, s11_origin_db, s21_origin_db, links, matrix_order),
+        args=(fast_calc, orig_filter, s11_origin_db, s21_origin_db, s22_origin_db, links, matrix_order),
         options={'disp': True, 'maxiter': 100000, 'ftol': 1e-9, 'gtol': 1e-6}
     )
     print(f"Cost after L-BFGS-B: {result.fun}")
 
-    result = minimize(
-        fun=cost_with_grad,
-        x0=result.x,
-        method='BFGS',
-        jac=True,
-        args=(fast_calc, orig_filter, s11_origin_db, s21_origin_db, links, matrix_order),
-        options={'disp': True, 'maxiter': 100000, 'ftol': 1e-9, 'gtol': 1e-6, 'return_all': True}
-    )
+    # result = minimize(
+    #     fun=cost_with_grad,
+    #     x0=result.x,
+    #     method='BFGS',
+    #     jac=True,
+    #     args=(fast_calc, orig_filter, s11_origin_db, s21_origin_db, s22_origin_db, links, matrix_order),
+    #     options={'disp': True, 'maxiter': 100000, 'ftol': 1e-9, 'gtol': 1e-6, 'return_all': True}
+    # )
 
     print(f"Cost after BFGS: {result.fun}")
     stop_time = time.time()
