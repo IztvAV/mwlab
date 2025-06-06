@@ -1,4 +1,5 @@
 import torch
+from numpy.ma.core import identity
 from torch import nn
 import torch.nn.functional as F
 
@@ -172,7 +173,8 @@ class SEBlock1D(nn.Module):
         b, c, _ = x.size()
         y = self.avg_pool(x).view(b, c)
         y = self.fc(y).view(b, c, 1)
-        return x * y.expand_as(x)
+        final = x * y.expand_as(x)
+        return final
 
 
 class BasicBlock1D(nn.Module):
@@ -393,6 +395,7 @@ class CorrectionMLP(nn.Module):
         self.activation_fun = get_activation(activation_fun)
 
         # Сохраняем линейные слои в ModuleList
+        self.identity = nn.Identity()
         self.layers = nn.ModuleList()
         self.normalizations = nn.ModuleList()
         in_dim = input_dim
@@ -400,17 +403,15 @@ class CorrectionMLP(nn.Module):
             self.layers.append(nn.Linear(in_dim, h_dim))
             self.normalizations.append(nn.LayerNorm(h_dim))
             in_dim = h_dim
-
+        self.dropout = nn.Dropout()
         self.out_layer = nn.Linear(in_dim, output_dim)
 
     def forward(self, x):
-        identity = x
         for layer, norm in tuple(zip(self.layers, self.normalizations)):
             x = layer(x)
-            x = norm(x)
             x = self.activation_fun(x)
+            x = norm(x)
         x = self.out_layer(x)
-        x += identity
         return x
 
 

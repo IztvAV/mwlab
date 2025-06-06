@@ -24,7 +24,7 @@ from filters.mwfilter_optim.bfgs import optimize_cm
 torch.set_float32_matmul_precision("medium")
 
 BATCH_SIZE = 64
-BASE_DATASET_SIZE = 25_000
+BASE_DATASET_SIZE = 500_000
 FILTER_NAME = "EAMU4-KuIMUXT3-BPFC1"
 # FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
@@ -167,7 +167,7 @@ def main():
         activation_in='sigmoid',
         activation_block='swish',
         use_se=False,
-        se_reduction=1
+        se_reduction=32
     )
 
     # correction = models.CorrectionTransformer(
@@ -196,7 +196,7 @@ def main():
         scaler_in=dm.scaler_in,  # Скейлер для входных данных
         scaler_out=dm.scaler_out,  # Скейлер для выходных данных
         codec=codec,  # Кодек для преобразования данных
-        optimizer_cfg={"name": "Adam", "lr": 0.0006859984857331174},
+        optimizer_cfg={"name": "AdamW", "lr": 0.0006859984857331174},
         scheduler_cfg={"name": "StepLR", "step_size": 13, "gamma": 0.3},
         loss_fn=nn.MSELoss()
     )
@@ -235,7 +235,7 @@ def main():
     # Загружаем лучшую модель
     inference_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
         # checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=12-val_loss=0.01266-train_loss=0.01224.ckpt",
-        # checkpoint_path="saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=11-val_loss=0.01305-train_loss=0.01285.ckpt",
+        # checkpoint_path="saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=65-val_loss=0.02332-train_loss=0.02032-val_r2=0.71465.ckpt",
         checkpoint_path=checkpoint.best_model_path,
         model=model
     ).to(lit_model.device)
