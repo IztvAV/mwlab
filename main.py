@@ -24,7 +24,7 @@ from filters.mwfilter_optim.bfgs import optimize_cm
 torch.set_float32_matmul_precision("medium")
 
 BATCH_SIZE = 64
-BASE_DATASET_SIZE = 500_000
+BASE_DATASET_SIZE = 25_000
 FILTER_NAME = "EAMU4-KuIMUXT3-BPFC1"
 # FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
@@ -104,7 +104,7 @@ def create_samplers(orig_filter: MWFilter):
 
 def main():
     print("Создаем фильтр")
-    orig_filter = create_origin_filter(ENV_ORIGIN_DATA_PATH)
+    orig_filter = create_origin_filter(ENV_ORIGIN_DATA_PATH, resample_scale=512)
     print("Создаем сэмплеры")
     samplers = create_samplers(orig_filter)
     ds_gen = CMTheoreticalDatasetGenerator(
@@ -160,7 +160,7 @@ def main():
     main = models.ResNet1DFlexible(
         in_channels=len(codec.y_channels),
         out_channels=len(codec.x_keys),
-        num_blocks=[1, 4, 3, 5],
+        num_blocks=[1, 4, 3, 6],
         layer_channels=[64, 64, 128, 256],
         first_conv_kernel=8,
         first_conv_channels=64,
@@ -178,7 +178,7 @@ def main():
     correction = models.CorrectionMLP(
         input_dim=len(codec.x_keys),
         output_dim=len(codec.x_keys),
-        hidden_dims=[256, 32, 128],
+        hidden_dims=[128, 256, 512],
     )
     # correction = models.CorrectionCNN1D(
     #     input_len=len(codec.x_keys),
@@ -196,12 +196,12 @@ def main():
         scaler_in=dm.scaler_in,  # Скейлер для входных данных
         scaler_out=dm.scaler_out,  # Скейлер для выходных данных
         codec=codec,  # Кодек для преобразования данных
-        optimizer_cfg={"name": "AdamW", "lr": 0.0006859984857331174},
-        scheduler_cfg={"name": "StepLR", "step_size": 13, "gamma": 0.3},
+        optimizer_cfg={"name": "Adam", "lr": 0.0006859984857331174},
+        scheduler_cfg={"name": "StepLR", "step_size": 15, "gamma": 0.1},
         loss_fn=nn.MSELoss()
     )
 
-    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min", min_delta=0.00001)
+    stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=10, mode="min", min_delta=0.00001)
     checkpoint = L.pytorch.callbacks.ModelCheckpoint(monitor="val_loss", dirpath="saved_models/" + FILTER_NAME,
                                                      filename="best-{epoch}-{val_loss:.5f}-{train_loss:.5f}-{val_r2:.5f}",
                                                      mode="min",
@@ -234,8 +234,6 @@ def main():
 
     # Загружаем лучшую модель
     inference_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
-        # checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=12-val_loss=0.01266-train_loss=0.01224.ckpt",
-        # checkpoint_path="saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=65-val_loss=0.02332-train_loss=0.02032-val_r2=0.71465.ckpt",
         checkpoint_path=checkpoint.best_model_path,
         model=model
     ).to(lit_model.device)

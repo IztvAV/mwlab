@@ -180,9 +180,9 @@ class SEBlock1D(nn.Module):
 class BasicBlock1D(nn.Module):
     def __init__(self, in_channels, out_channels, stride=1, activation='relu', use_se=False, se_reduction=16):
         super().__init__()
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1)
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, padding_mode="zeros")
         self.bn1 = nn.BatchNorm1d(out_channels)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1, padding_mode="zeros")
         self.bn2 = nn.BatchNorm1d(out_channels)
         self.shortcut = nn.Sequential()
         if stride != 1 or in_channels != out_channels:
@@ -276,6 +276,11 @@ class ResNet1DFlexible(nn.Module):
 
         self.avgpool = nn.AdaptiveAvgPool1d(1)
         self.fc = nn.Linear(in_ch, out_channels)
+        self.shortcut = nn.Sequential(
+            nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=1),
+            nn.BatchNorm1d(out_channels),
+            nn.AdaptiveAvgPool1d(1)
+        )
 
     @staticmethod
     def make_layer(in_channels, out_channels, num_blocks, stride, activation, use_se, se_reduction):
@@ -287,6 +292,8 @@ class ResNet1DFlexible(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
+        identity = self.shortcut(x)
+        identity = identity.view(identity.size(0), -1)
         x = self.activation(self.bn1(self.conv1(x)))
         x = self.maxpool(x)
 
@@ -296,48 +303,8 @@ class ResNet1DFlexible(nn.Module):
         x = self.avgpool(x)
         x = x.view(x.size(0), -1)
         x = self.fc(x)
+        x += identity
         return x
-    # def forward(self, x):
-    #     residual = x  # Сохраняем вход
-    #     x = self.activation(self.bn1(self.conv1(x)))
-    #     x = self.maxpool(x)
-    #
-    #     for layer in self.layers:
-    #         x = layer(x)
-    #
-    #     x = self.avgpool(x)
-    #     x = x.view(x.size(0), -1)
-    #
-    #     # Глобальный скип-коннекшен, если размерности совпадают
-    #     if residual.shape[1] == x.shape[1]:
-    #         x += residual.mean(dim=2)  # Приводим residual к размерности (batch, channels)
-    #     else:
-    #         # Приводим residual к размерности выхода
-    #         residual_proj = nn.AdaptiveAvgPool1d(1)(residual)
-    #         residual_proj = residual_proj.view(residual_proj.size(0), -1)
-    #         if residual_proj.shape[1] != x.shape[1]:
-    #             # 1x1 "проекционный слой"
-    #             proj = nn.Linear(residual_proj.shape[1], x.shape[1]).to(x.device)
-    #             residual_proj = proj(residual_proj)
-    #         x += residual_proj
-    #
-    #     x = self.fc(x)
-    #     return x
-
-    # def forward(self, x):
-    #     x = self.activation(self.bn1(self.conv1(x)))
-    #     x = self.maxpool(x)
-    #
-    #     for layer in self.layers:
-    #         residual = x
-    #         x = layer(x)
-    #         if residual.shape == x.shape:
-    #             x += residual  # межблочный скип-коннекшен
-    #
-    #     x = self.avgpool(x)
-    #     x = x.view(x.size(0), -1)
-    #     x = self.fc(x)
-    #     return x
 
 
 class ModelWithCorrection(nn.Module):
@@ -352,22 +319,6 @@ class ModelWithCorrection(nn.Module):
         main_output = self._main_model(x)
         correction = self._correction_model(main_output)
         final = main_output + correction
-
-        # matrix = CouplingMatrix.from_factors(main_output, links=self._origin_filter.coupling_matrix.links,
-        #                                      matrix_order=self._origin_filter.coupling_matrix.matrix_order,
-        #                                      device=x.device)
-        # _, s11_pred, s21_pred, s22_pred = self._fast_calc.BatchedRespM2(matrix, with_s22=True)
-        # # Разделим на действительную и мнимую части
-        # s11_re, s11_im = s11_pred.real, s11_pred.imag
-        # s21_re, s21_im = s21_pred.real, s21_pred.imag
-        # s22_re, s22_im = s22_pred.real, s22_pred.imag
-        #
-        # # Соберём в нужном порядке: [re..., im...]
-        # s_parts = [s11_re, s21_re, s22_re, s11_im, s21_im, s22_im]
-        # s_concat = torch.stack(s_parts, dim=1)  # shape: [batch_size, 6, freq_len]
-        #
-        # # scaled_decoded = self._scaler_in(s_concat)
-        # decoded = self._correction_model(s_concat)
         return final
 
 
@@ -407,11 +358,14 @@ class CorrectionMLP(nn.Module):
         self.out_layer = nn.Linear(in_dim, output_dim)
 
     def forward(self, x):
+        identity = x
         for layer, norm in tuple(zip(self.layers, self.normalizations)):
             x = layer(x)
-            x = self.activation_fun(x)
             x = norm(x)
+            x = self.activation_fun(x)
         x = self.out_layer(x)
+        # x += identity
+        # x = self.activation_fun(x)
         return x
 
 
@@ -882,3 +836,146 @@ class ResNetRNN1D(nn.Module):
         # Get final predictions
         output = self.fc_final(rnn_output.squeeze(1))
         return output
+
+import math
+
+class Swish(nn.Module):
+    """Активация Swish (Silu)"""
+    def forward(self, x):
+        return x * torch.sigmoid(x)
+
+class MBConv1DBlock(nn.Module):
+    """MBConv-блок для 1D данных (аналог MobileNetV2 + SE-блок)"""
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int,
+        expand_ratio: int,
+        se_ratio: float = 0.25,
+        dropout_rate: float = 0.0,
+    ):
+        super().__init__()
+        expanded_channels = in_channels * expand_ratio
+        self.use_residual = (in_channels == out_channels) and (stride == 1)
+
+        # Expansion phase (если expand_ratio != 1)
+        self.expand = None
+        if expand_ratio != 1:
+            self.expand = nn.Sequential(
+                nn.Conv1d(in_channels, expanded_channels, 1, bias=False),
+                nn.BatchNorm1d(expanded_channels),
+                Swish(),
+            )
+
+        # Depthwise-свертка
+        self.depthwise = nn.Sequential(
+            nn.Conv1d(
+                expanded_channels,
+                expanded_channels,
+                kernel_size,
+                stride=stride,
+                padding=kernel_size // 2,
+                groups=expanded_channels,
+                bias=False,
+            ),
+            nn.BatchNorm1d(expanded_channels),
+            Swish(),
+        )
+
+        # Squeeze-and-Excitation (SE-блок)
+        squeezed_channels = max(1, int(in_channels * se_ratio))
+        self.se = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Conv1d(expanded_channels, squeezed_channels, 1),
+            Swish(),
+            nn.Conv1d(squeezed_channels, expanded_channels, 1),
+            nn.Sigmoid(),
+        )
+
+        # Pointwise-свертка
+        self.project = nn.Sequential(
+            nn.Conv1d(expanded_channels, out_channels, 1, bias=False),
+            nn.BatchNorm1d(out_channels),
+        )
+
+        self.dropout = nn.Dropout(dropout_rate) if dropout_rate > 0 else nn.Identity()
+
+    def forward(self, x):
+        residual = x
+        if self.expand:
+            x = self.expand(x)
+        x = self.depthwise(x)
+        x = self.se(x) * x  # SE-блок
+        x = self.project(x)
+        if self.use_residual:
+            x = self.dropout(x)
+            x = x + residual
+        return x
+
+class EfficientNet1D(nn.Module):
+    """1D-версия EfficientNet с настраиваемыми гиперпараметрами"""
+    def __init__(
+        self,
+        in_channels: int = 1,
+        num_classes: int = 1,  # Для регрессии
+        width_coeff: float = 1.0,
+        depth_coeff: float = 1.0,
+        dropout_rate: float = 0.2,
+        se_ratio: float = 0.25,
+        stochastic_depth: bool = False,
+    ):
+        super().__init__()
+        # Базовые параметры блоков (аналоги EfficientNet-B0)
+        base_channels = [32, 16, 24, 40, 80, 112, 192, 320]
+        base_depths = [1, 2, 2, 3, 3, 4, 1]
+        kernel_sizes = [3, 3, 5, 3, 5, 5, 3]
+        strides = [1, 2, 2, 2, 1, 2, 1]
+        expand_ratios = [1, 6, 6, 6, 6, 6, 6]
+
+        # Масштабирование ширины и глубины
+        channels = [math.ceil(c * width_coeff) for c in base_channels]
+        depths = [math.ceil(d * depth_coeff) for d in base_depths]
+
+        # Первая свертка
+        self.stem = nn.Sequential(
+            nn.Conv1d(in_channels, channels[0], 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm1d(channels[0]),
+            Swish(),
+        )
+
+        # MBConv-блоки
+        blocks = []
+        for i in range(7):
+            for j in range(depths[i]):
+                stride = strides[i] if j == 0 else 1
+                blocks.append(
+                    MBConv1DBlock(
+                        in_channels=channels[i] if j == 0 else channels[i + 1],
+                        out_channels=channels[i + 1],
+                        kernel_size=kernel_sizes[i],
+                        stride=stride,
+                        expand_ratio=expand_ratios[i],
+                        se_ratio=se_ratio,
+                        dropout_rate=dropout_rate,
+                    )
+                )
+        self.blocks = nn.Sequential(*blocks)
+
+        # Финальные слои
+        self.head = nn.Sequential(
+            nn.Conv1d(channels[-2], channels[-1], 1, bias=False),
+            nn.BatchNorm1d(channels[-1]),
+            Swish(),
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(channels[-1], num_classes),
+        )
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.blocks(x)
+        x = self.head(x)
+        return x
