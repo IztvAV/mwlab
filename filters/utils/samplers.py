@@ -60,6 +60,15 @@ class Sampler:
     def std(cls, start, stop, num, mu=0.0, std=1.0, one_param=False, device='cpu'):
         """
         Normal distribution with option to vary one parameter at a time
+
+        Parameters:
+            start: Tensor or array-like of minimum values
+            stop: Tensor or array-like of maximum values
+            num: Number of samples to generate
+            mu: Center shift (-1 to 1)
+            std: Standard deviation scale factor
+            one_param: Whether to vary one parameter at a time
+            device: Device to use ('cpu' or 'cuda')
         """
         if one_param:
             return cls._one_param_std(start, stop, num, mu, std, device)
@@ -70,11 +79,18 @@ class Sampler:
         if len(start) != len(stop):
             raise ValueError("Start and stop must have same length")
 
+        # Calculate mean and std
         mu_tensor = (start + stop) / 2 + mu * (stop - start) / 2
         base_sigma = torch.abs(stop - start) / 6
         sigma = base_sigma * std
 
-        space = torch.normal(mean=mu_tensor, std=sigma, size=(num, len(mu_tensor)), device=device)
+        # Expand to (num, vector_size) shape
+        mu_expand = mu_tensor.unsqueeze(0).repeat(num, 1)
+        sigma_expand = sigma.unsqueeze(0).repeat(num, 1)
+
+        # Generate normal distribution samples
+        space = torch.normal(mu_expand, sigma_expand)
+
         return cls(type=SamplerTypes.SAMPLER_STD, space=space)
 
     @classmethod
