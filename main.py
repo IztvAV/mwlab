@@ -97,7 +97,7 @@ def main():
     main = models.ResNet1DFlexible(
         in_channels=len(codec.y_channels),
         out_channels=len(codec.x_keys),
-        num_blocks=[1, 4, 3, 5],
+        num_blocks=[1, 4, 3, 6],
         layer_channels=[64, 64, 128, 256],
         first_conv_kernel=8,
         first_conv_channels=64,
@@ -105,7 +105,7 @@ def main():
         activation_in='sigmoid',
         activation_block='swish',
         use_se=False,
-        se_reduction=1
+        se_reduction=32
     )
 
     mlp = models.CorrectionMLP(
