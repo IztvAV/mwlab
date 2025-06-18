@@ -27,8 +27,8 @@ class MWFilter(rf.Network):
             if k.startswith("m_"):
                 _, i, j = k.split("_")
                 i, j = int(i), int(j)
-                M[i, j] = v
-                M[j, i] = v  # symmetric
+                M[i, j] = torch.tensor(v, dtype=torch.float32)
+                M[j, i] = torch.tensor(v, dtype=torch.float32)  # symmetric
         return M
 
     def to_touchstone_data(self, path=None) -> mwlab.TouchstoneData:

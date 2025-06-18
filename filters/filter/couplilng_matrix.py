@@ -70,6 +70,15 @@ class CouplingMatrix:
         nonzero_indices = torch.nonzero(upper_tri)
         return [(i.item(), j.item()) for i, j in nonzero_indices]
 
+    @classmethod
+    def error_matrix(cls, orig_matrix, pred_matrix):
+        links = torch.tensor(orig_matrix.links).T
+        orig_elements = orig_matrix.matrix[links[0], links[1]]
+        pred_elements = pred_matrix.matrix[links[0], links[1]]
+        error_elements = torch.abs((orig_elements - pred_elements) / orig_elements) * 100
+        error_matrix = CouplingMatrix.from_factors(error_elements, links.T, orig_matrix.matrix_order)
+        return cls(error_matrix)
+
     def _get_main_diagonals_indices(self, matrix):
         arr = np.array(matrix)
         n = arr.shape[0]

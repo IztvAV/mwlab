@@ -1,3 +1,5 @@
+import copy
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -157,6 +159,87 @@ class VGG1D(nn.Module):
         return x
 
 
+class DenseLayer1D(nn.Module):
+    def __init__(self, in_channels, growth_rate, kernel_size=3, activation='relu'):
+        super().__init__()
+        self.norm = nn.GroupNorm(num_groups=8, num_channels=in_channels)
+        self.activation = get_activation(activation)
+        self.conv = nn.Conv1d(in_channels, growth_rate, kernel_size=kernel_size,
+                               padding=kernel_size // 2, bias=False)
+
+    def forward(self, x):
+        out = self.conv(self.activation(self.norm(x)))
+        return out
+
+
+class DenseBlock1D(nn.Module):
+    def __init__(self, in_channels, growth_rate, num_layers, activation='relu'):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        channels = in_channels
+        for _ in range(num_layers):
+            self.layers.append(DenseLayer1D(channels, growth_rate, activation=activation))
+            channels += growth_rate  # каждый слой добавляет новые каналы
+
+    def forward(self, x):
+        features = [x]
+        for layer in self.layers:
+            new_feat = layer(torch.cat(features, dim=1))
+            features.append(new_feat)
+        return torch.cat(features, dim=1)
+
+
+class ResNet1DFlexibleDense(nn.Module):
+    def __init__(self, in_channels=8, out_channels=10,
+                 first_conv_channels=64, first_conv_kernel=7,
+                 dense_blocks_cfg=[(64, 32, 4), (128, 32, 4)],
+                 activation_in='relu', activation_block='relu'):
+        """
+        dense_blocks_cfg: список кортежей (in_channels, growth_rate, num_layers)
+        """
+        super().__init__()
+        self.activation_name = activation_in
+        self.activation = get_activation(activation_in)
+
+        self.conv1 = nn.Conv1d(in_channels, first_conv_channels,
+                               kernel_size=first_conv_kernel, stride=2,
+                               padding=first_conv_kernel // 2)
+        self.norm1 = nn.GroupNorm(num_groups=8, num_channels=first_conv_channels)
+        self.maxpool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
+
+        # Создаем Dense-блоки
+        self.dense_blocks = nn.ModuleList()
+        self.transition_blocks = nn.ModuleList()
+        in_ch = first_conv_channels
+        for out_ch, growth_rate, num_layers in dense_blocks_cfg:
+            dense_block = DenseBlock1D(in_ch, growth_rate, num_layers,
+                                       activation=activation_block)
+            self.dense_blocks.append(dense_block)
+
+            # После каждого DenseBlock делаем bottleneck 1x1 conv, чтобы привести к out_ch
+            total_channels = in_ch + growth_rate * num_layers
+            transition = nn.Conv1d(total_channels, out_ch, kernel_size=1, bias=False)
+            self.transition_blocks.append(transition)
+
+            in_ch = out_ch
+
+        self.avgpool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Linear(in_ch, out_channels)
+
+    def forward(self, x):
+        x = self.activation(self.norm1(self.conv1(x)))
+        x = self.maxpool(x)
+
+        for dense_block, transition in zip(self.dense_blocks, self.transition_blocks):
+            x = dense_block(x)
+            x = transition(x)
+
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        out = self.fc(x)
+        return out
+
+
 class SEBlock1D(nn.Module):
     def __init__(self, channels, reduction=16):
         super(SEBlock1D, self).__init__()
@@ -194,6 +277,7 @@ class BasicBlock1D(nn.Module):
         self.use_se = use_se
         if use_se:
             self.se = SEBlock1D(out_channels, reduction=se_reduction)
+        self.dropout = nn.Dropout1d(p=0.1)
 
     def forward(self, x):
         out = self.activation(self.bn1(self.conv1(x)))
@@ -243,6 +327,7 @@ class ResNet1D(nn.Module):
 class ResNet1DFlexible(nn.Module):
     def __init__(self, in_channels=8, out_channels=10,
                  first_conv_channels=64, first_conv_kernel=7,
+                 first_maxpool_kernel=3,
                  layer_channels=[64, 128, 256, 512],
                  num_blocks=[1, 2, 3, 1],
                  activation_in='relu', activation_block='relu',
@@ -252,13 +337,15 @@ class ResNet1DFlexible(nn.Module):
         self.activation_name = activation_in
         self.activation = get_activation(activation_in)
 
+        dilation = 1
         self.conv1 = nn.Conv1d(in_channels, first_conv_channels,
                                kernel_size=first_conv_kernel,
                                stride=2,
-                               padding=first_conv_kernel // 2)
+                               padding=dilation*(first_conv_kernel // 2),
+                               dilation=dilation)
         self.bn1 = nn.BatchNorm1d(first_conv_channels)
         # self.bn1 = nn.GroupNorm(num_groups=8, num_channels=first_conv_channels)
-        self.maxpool = nn.MaxPool1d(kernel_size=3, stride=2, padding=1)
+        self.maxpool = nn.MaxPool1d(kernel_size=first_maxpool_kernel, stride=2, padding=1)
 
         self.layers = nn.ModuleList()
         in_ch = first_conv_channels
@@ -273,7 +360,15 @@ class ResNet1DFlexible(nn.Module):
             in_ch = out_ch
 
         self.avgpool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Linear(in_ch, out_channels)
+        self.fc = nn.Sequential(
+            # nn.LayerNorm(in_ch),
+            nn.Linear(in_ch, out_channels)
+        )
+        self.shortcut = nn.Sequential(
+            nn.BatchNorm1d(in_channels),
+            nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=1),
+            nn.AdaptiveAvgPool1d(1)
+        )
 
     @staticmethod
     def make_layer(in_channels, out_channels, num_blocks, stride, activation, use_se, se_reduction):
@@ -285,6 +380,8 @@ class ResNet1DFlexible(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
+        identity = self.shortcut(x)
+        identity = identity.view(identity.size(0), -1)
         x = self.activation(self.bn1(self.conv1(x)))
         x = self.maxpool(x)
 
@@ -292,8 +389,10 @@ class ResNet1DFlexible(nn.Module):
             x = layer(x)
 
         x = self.avgpool(x)
-        x = x.view(x.size(0), -1)
+        if type(self.fc) != nn.Identity:
+            x = x.view(x.size(0), -1)
         x = self.fc(x)
+        x += identity
         return x
     # def forward(self, x):
     #     residual = x  # Сохраняем вход
@@ -369,6 +468,29 @@ class ModelWithCorrection(nn.Module):
         return final
 
 
+class CorrectEachFeature(nn.Module):
+    def __init__(self,
+                 main_model: nn.Module, correction_model: nn.Module, correct_features: int,
+                 *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._main_model = main_model
+        self._correction_models = [copy.deepcopy(correction_model).to("cuda") for _ in range(correct_features)]
+
+    def forward(self, x):
+        main_output = self._main_model(x)
+        # Разбиваем на отдельные признаки
+        corrected_features = []
+        for i, corr_model in enumerate(self._correction_models):
+            feature = main_output[:, i].unsqueeze(1)  # [batch_size, 1]
+            correction = corr_model(feature)  # [batch_size, 1]
+            corrected_feature = feature + correction  # [batch_size, 1]
+            corrected_features.append(corrected_feature)
+
+        # Собираем обратно
+        final = torch.cat(corrected_features, dim=1)  # [batch_size, output_size]
+        return final
+
+
 class CorrectionTransformer(nn.Module):
     def __init__(self, d_model=64, nhead=4, num_layers=2):
         super().__init__()
@@ -393,6 +515,8 @@ class CorrectionMLP(nn.Module):
         self.activation_fun = get_activation(activation_fun)
 
         # Сохраняем линейные слои в ModuleList
+        self.in_activation = nn.ReLU()
+        self.norm = nn.LayerNorm(input_dim)
         self.layers = nn.ModuleList()
         self.normalizations = nn.ModuleList()
         in_dim = input_dim
@@ -400,8 +524,15 @@ class CorrectionMLP(nn.Module):
             self.layers.append(nn.Linear(in_dim, h_dim))
             self.normalizations.append(nn.LayerNorm(h_dim))
             in_dim = h_dim
-
-        self.out_layer = nn.Linear(in_dim, output_dim)
+        self.out_layer = nn.Sequential(
+            nn.LayerNorm(in_dim),
+            nn.Linear(in_dim, output_dim)
+        )
+        self.shortcut = nn.Sequential(
+            nn.BatchNorm1d(1),
+            nn.Conv1d(1, output_dim, kernel_size=1, stride=1),
+            nn.AdaptiveAvgPool1d(1)
+        )
 
     def forward(self, x):
         identity = x
@@ -418,17 +549,21 @@ class CorrectionCNN1D(nn.Module):
     def __init__(self, input_len=30, output_dim=30):
         super().__init__()
         self.conv1 = nn.Conv1d(1, 16, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm1d(16)
         self.conv2 = nn.Conv1d(16, 32, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm1d(32)
         self.conv3 = nn.Conv1d(32, 16, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm1d(16)
+        self.norm = nn.LayerNorm(16*input_len)
         self.fc = nn.Linear(16 * input_len, output_dim)
 
     def forward(self, x):
         x = x.unsqueeze(1)  # (B, 1, 30)
-        x = torch.relu(self.conv1(x))
-        x = torch.relu(self.conv2(x))
-        x = torch.relu(self.conv3(x))
+        x = torch.relu(self.bn1(self.conv1(x)))
+        x = torch.relu(self.bn2(self.conv2(x)))
+        x = torch.relu(self.bn3(self.conv3(x)))
         x = x.flatten(1)  # (B, 16*30)
-        x = self.fc(x)
+        x = self.fc(self.norm(x))
         return x
 
 
@@ -618,47 +753,6 @@ class LeNet1D(nn.Module):
         return x
 
 
-class DenseBlock1D(nn.Module):
-    def __init__(self, in_channels, growth_rate, num_layers):
-        super().__init__()
-        self.layers = nn.ModuleList()
-        for i in range(num_layers):
-            self.layers.append(nn.Sequential(
-                nn.BatchNorm1d(in_channels + i * growth_rate),
-                nn.ReLU(),
-                nn.Conv1d(in_channels + i * growth_rate, growth_rate, kernel_size=3, padding=1)
-            ))
-
-    def forward(self, x):
-        features = [x]
-        for layer in self.layers:
-            new_features = layer(torch.cat(features, dim=1))
-            features.append(new_features)
-        return torch.cat(features, dim=1)
-
-
-class DenseNet1D(nn.Module):
-    def __init__(self, in_channels=8, growth_rate=32, num_classes=10):
-        super().__init__()
-        self.conv1 = nn.Conv1d(in_channels, 64, kernel_size=7, stride=2, padding=3)
-        self.block1 = DenseBlock1D(64, growth_rate, 6)
-        self.transition = nn.Sequential(
-            nn.BatchNorm1d(64 + 6 * growth_rate),
-            nn.Conv1d(64 + 6 * growth_rate, 128, kernel_size=1)
-        )
-        self.block2 = DenseBlock1D(128, growth_rate, 12)
-        self.avgpool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Linear(128 + 12 * growth_rate, num_classes)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.block1(x)
-        x = self.transition(x)
-        x = self.block2(x)
-        x = self.avgpool(x)
-        return self.fc(x.view(x.size(0), -1))
-
-
 class Simple_Opt_3(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super(Simple_Opt_3, self).__init__()
@@ -820,64 +914,253 @@ class BiRNNResNet1D(nn.Module):
         return self.fc(resnet_out)
 
 
-class ResNetRNN1D(nn.Module):
-    def __init__(self, in_channels=8, out_channels=10,
-                 resnet_hidden_size=512, rnn_hidden_size=256,
-                 rnn_layers=1, rnn_type='LSTM', bidirectional=False):
+class ResNetRNN(nn.Module):
+    def __init__(self,
+                 resnet_model,  # Экземпляр ResNet1DFlexible
+                 rnn_type='LSTM',  # 'LSTM' или 'GRU'
+                 rnn_hidden_size=128,
+                 rnn_num_layers=1,
+                 rnn_bidirectional=False,
+                 out_features=1,  # Размер выходного вектора
+                 dropout=0.0):
         super().__init__()
 
-        # ResNet part
-        self.resnet = ResNet1D(in_channels, resnet_hidden_size)
+        self.resnet = resnet_model
 
-        # RNN part
-        self.rnn_type = rnn_type
-        self.rnn_layers = rnn_layers
-        self.bidirectional = bidirectional
-        self.rnn_hidden_size = rnn_hidden_size
+        # Получаем размер выхода ResNet (число каналов после avgpool + fc)
+        dummy_input = torch.randn(1, resnet_model.conv1.in_channels, 64)
+        with torch.no_grad():
+            resnet_out = resnet_model(dummy_input)
+        resnet_out_dim = resnet_out.shape[-1]
 
-        if rnn_type.upper() == 'LSTM':
-            self.rnn = nn.LSTM(
-                input_size=out_channels,  # Using ResNet output as RNN input
-                hidden_size=rnn_hidden_size,
-                num_layers=rnn_layers,
-                bidirectional=bidirectional,
-                batch_first=True
-            )
-        elif rnn_type.upper() == 'GRU':
-            self.rnn = nn.GRU(
-                input_size=out_channels,
-                hidden_size=rnn_hidden_size,
-                num_layers=rnn_layers,
-                bidirectional=bidirectional,
-                batch_first=True
-            )
-        else:
-            raise ValueError("rnn_type must be either 'LSTM' or 'GRU'")
+        # RNN: LSTM или GRU
+        rnn_cls = nn.LSTM if rnn_type == 'LSTM' else nn.GRU
+        self.rnn = rnn_cls(input_size=resnet_out_dim,
+                           hidden_size=rnn_hidden_size,
+                           num_layers=rnn_num_layers,
+                           bidirectional=rnn_bidirectional,
+                           batch_first=True,
+                           dropout=dropout if rnn_num_layers > 1 else 0)
 
-        # Final fully connected layer
-        direction_multiplier = 2 if bidirectional else 1
-        self.fc_final = nn.Linear(rnn_hidden_size * direction_multiplier, out_channels)
+        # Выходной слой
+        rnn_out_dim = rnn_hidden_size * (2 if rnn_bidirectional else 1)
+        self.fc_out = nn.Linear(rnn_out_dim, out_features)
 
     def forward(self, x):
-        # Get initial predictions from ResNet
-        resnet_output = self.resnet(x)  # shape: (batch_size, out_channels)
+        """
+        x: (batch_size, channels, points_num)
+        """
+        # Пропускаем через ResNet
+        batch_size = x.size(0)
 
-        # Prepare for RNN - add sequence dimension (sequence length = 1)
-        # We're treating each ResNet output as a single timestep
-        rnn_input = resnet_output.unsqueeze(1)  # shape: (batch_size, 1, out_channels)
+        # Получаем признаковое представление
+        resnet_features = self.resnet(x)
+        # resnet_features: (batch_size, resnet_out_dim)
 
-        # RNN processing
-        if self.rnn_type.upper() == 'LSTM':
-            h0 = torch.zeros(self.rnn_layers * (2 if self.bidirectional else 1),
-                             rnn_input.size(0), self.rnn_hidden_size).to(x.device)
-            c0 = torch.zeros(self.rnn_layers * (2 if self.bidirectional else 1),
-                             rnn_input.size(0), self.rnn_hidden_size).to(x.device)
-            rnn_output, _ = self.rnn(rnn_input, (h0, c0))
+        # Для RNN требуется размерность (batch, seq_len, feature)
+        # Если seq_len=1 (один шаг), можем expand или reshape
+        resnet_features = resnet_features.unsqueeze(1)  # (batch_size, 1, feature)
+
+        # Пропускаем через RNN
+        rnn_out, _ = self.rnn(resnet_features)  # (batch_size, 1, hidden)
+        rnn_out = rnn_out.squeeze(1)  # (batch_size, hidden)
+
+        # Финальный выход
+        out = self.fc_out(rnn_out)
+        return out
+
+
+class MLPMixerBlock1D(nn.Module):
+    def __init__(self, num_tokens, num_channels, token_dim, channel_dim):
+        super().__init__()
+        # Token-mixing MLP
+        self.token_mixing = nn.Sequential(
+            nn.LayerNorm(num_tokens),
+            nn.Linear(num_tokens, token_dim),
+            nn.GELU(),
+            nn.Linear(token_dim, num_tokens),
+        )
+        # Channel-mixing MLP
+        self.channel_mixing = nn.Sequential(
+            nn.LayerNorm(num_channels),
+            nn.Linear(num_channels, channel_dim),
+            nn.GELU(),
+            nn.Linear(channel_dim, num_channels),
+        )
+
+    def forward(self, x):
+        # x: (B, C, T)
+        y = x.transpose(1, 2)  # (B, T, C)
+        y = y + self.token_mixing(y)
+        y = y.transpose(1, 2)  # (B, C, T)
+        y = y + self.channel_mixing(y)
+        return y
+
+class MLPMixer1D(nn.Module):
+    def __init__(self, input_channels, input_length, num_blocks=4,
+                 token_dim=64, channel_dim=128, hidden_dim=256, output_dim=1):
+        super().__init__()
+        # "Patch embedding": в 1D это conv1d
+        self.patch_embed = nn.Conv1d(input_channels, hidden_dim, kernel_size=3, padding=1)
+        # Mixer blocks
+        self.mixer_blocks = nn.Sequential(
+            *[MLPMixerBlock1D(input_length, hidden_dim, token_dim, channel_dim)
+              for _ in range(num_blocks)]
+        )
+        # Final head
+        self.pool = nn.AdaptiveAvgPool1d(1)
+        self.fc = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x):
+        # x: (B, C, T)
+        x = self.patch_embed(x)  # (B, hidden_dim, T)
+        x = self.mixer_blocks(x)  # (B, hidden_dim, T)
+        x = self.pool(x).squeeze(-1)  # (B, hidden_dim)
+        x = self.fc(x)  # (B, output_dim)
+        return x
+
+
+class ResNetRNNSequence(nn.Module):
+    def __init__(self,
+                 resnet_model,  # Экземпляр ResNet1DFlexible (без avgpool!)
+                 rnn_type='LSTM',  # 'LSTM' или 'GRU'
+                 rnn_hidden_size=128,
+                 rnn_num_layers=1,
+                 rnn_bidirectional=False,
+                 out_features=1,  # Выходной размер
+                 dropout=0.0,
+                 return_sequences=False):  # True: выход всей последовательности
+        super().__init__()
+
+        self.resnet = resnet_model
+        self.return_sequences = return_sequences
+
+        # Удаляем avgpool и fc ResNet-а, т.к. они делают "глобальное усреднение"
+        self.resnet.avgpool = nn.Identity()
+        self.resnet.fc = nn.Identity()
+
+        # Примерный размер выхода после ResNet
+        dummy_input = torch.randn(1, resnet_model.conv1.in_channels, 128)
+        with torch.no_grad():
+            resnet_features = self.resnet(dummy_input)
+            feature_dim = resnet_features.shape[1]
+            seq_len = resnet_features.shape[2]
+
+        # RNN
+        rnn_cls = nn.LSTM if rnn_type == 'LSTM' else nn.GRU
+        self.rnn = rnn_cls(input_size=feature_dim,
+                           hidden_size=rnn_hidden_size,
+                           num_layers=rnn_num_layers,
+                           bidirectional=rnn_bidirectional,
+                           batch_first=True,
+                           dropout=dropout if rnn_num_layers > 1 else 0)
+
+        # Финальный FC слой
+        rnn_out_dim = rnn_hidden_size * (2 if rnn_bidirectional else 1)
+        self.fc_out = CorrectionMLP(input_dim=rnn_out_dim, output_dim=out_features,
+                                    hidden_dims=[128, 256, 512])
+        # self.fc_out = nn.Linear(rnn_out_dim, out_features)
+
+    def forward(self, x):
+        """
+        x: (batch_size, channels, points_num)
+        """
+        # Получаем последовательность признаков
+        features = self.resnet(x)  # (batch, feature_dim, seq_len)
+
+        # Транспонируем в (batch, seq_len, feature_dim)
+        features = features.permute(0, 2, 1)
+
+        # Пропускаем через RNN
+        rnn_out, _ = self.rnn(features)  # (batch, seq_len, hidden)
+
+        if self.return_sequences:
+            # Выдаем все временные шаги
+            out = self.fc_out(rnn_out)  # (batch, seq_len, out_features)
         else:
-            h0 = torch.zeros(self.rnn_layers * (2 if self.bidirectional else 1),
-                             rnn_input.size(0), self.rnn_hidden_size).to(x.device)
-            rnn_output, _ = self.rnn(rnn_input, h0)
+            # Берем только последний временной шаг
+            last_out = rnn_out[:, -1, :]  # (batch, hidden)
+            out = self.fc_out(last_out)  # (batch, out_features)
 
-        # Get final predictions
-        output = self.fc_final(rnn_output.squeeze(1))
-        return output
+        return out
+
+
+class MultiChannel1Dto2D(nn.Module):
+    def __init__(self, input_channels=8, output_size=(64, 80), latent_channels=64,
+                 selected_indices=None):
+        super().__init__()
+        self.output_size = output_size
+        self.latent_H, self.latent_W = output_size  # латентный размер (для reshape перед декодером)
+        self.latent_channels = latent_channels
+
+        self.selected_indices_rc = selected_indices
+        if selected_indices is not None:
+            # Преобразуем список (row, col) в плоские индексы [row * W + col]
+            H, W = output_size
+            flat_indices = [r * W + c for r, c in selected_indices]
+            self.selected_indices = torch.tensor(flat_indices, dtype=torch.long)
+        else:
+            self.selected_indices = None
+
+        self.encoder = ResNet1DFlexible(
+            in_channels=input_channels,
+            out_channels=self.latent_channels * self.latent_H * self.latent_W,
+            num_blocks=[1, 4, 3, 5],
+            layer_channels=[64, 64, 128, 256],
+            first_conv_kernel=8,
+            first_conv_channels=64,
+            activation_in='sigmoid',
+            activation_block='swish',
+            use_se=False,
+            se_reduction=1
+        )
+
+        # self.encoder = nn.Sequential(
+        #     nn.BatchNorm1d(input_channels),
+        #     nn.Conv1d(input_channels, 32, kernel_size=3, padding=1),
+        #     nn.ReLU(),
+        #     nn.BatchNorm1d(32),
+        #     nn.Conv1d(32, 64, kernel_size=3, padding=1),
+        #     nn.ReLU(),
+        #     nn.AdaptiveAvgPool1d(1),
+        #     nn.Flatten(),
+        #     nn.LayerNorm(64),
+        #     nn.Linear(64, self.latent_channels * self.latent_H * self.latent_W),
+        #     nn.ReLU()
+        # )
+
+        self.decoder = nn.Sequential(
+            nn.BatchNorm2d(self.latent_channels),
+            nn.ConvTranspose2d(self.latent_channels, 32, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(32),
+            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(),
+            nn.BatchNorm2d(16),
+            nn.ConvTranspose2d(16, 1, kernel_size=4, stride=2, padding=1),
+        )
+
+    def forward(self, x):
+        B = x.shape[0]
+        x = self.encoder(x)
+        x = x.view(B, self.latent_channels, self.latent_H, self.latent_W)
+        x = self.decoder(x)  # [B, 1, H, W]
+        x = x.squeeze(1)  # [B, H, W]
+
+        if self.selected_indices is not None:
+            # Вынимаем выбранные элементы
+            x_flat = x.view(B, -1)  # [B, H*W]
+            out = x_flat[:, self.selected_indices.to(x.device)]
+            return out
+
+        return x
+        if self.selected_indices is not None:
+            # selected_indices: [num_indices]
+            # нужно извлечь эти элементы из каждого примера батча
+            # reshape в [B, H*W]
+            x_flat = x.view(B, -1)
+            # используем индексы для отбора по последнему измерению
+            out = x_flat[:, self.selected_indices.to(x.device)]  # [B, num_indices]
+            return out
+
+        return x

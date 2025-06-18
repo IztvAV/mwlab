@@ -212,3 +212,71 @@ class MinMaxScaler(_Base):
     def extra_repr(self) -> str:
         return f"dim={self.default_dim}, range=({self.min_val}, {self.max_val}), eps={self.eps}"
 
+
+# class FromUniformToNormal(_Base):
+#     def __init__(self, dim: Sequence[int] | int | None = 0, eps: float | None = None, *, unbiased: bool = False,
+#                  mean: float = 0.0, std: float = 1.0, feature_range: Tuple[float, float] = (0.0, 1.0)):
+#         super().__init__(dim, eps)
+#         self.unbiased = bool(unbiased)
+#
+#         # сохраняем init-параметры для корректной сериализации
+#         self._init_kwargs = {
+#             "dim": dim,
+#             "eps": eps,
+#             "unbiased": unbiased
+#         }
+#         self.mean = mean
+#         self.std = std
+#         self.min_val, self.max_val = feature_range
+#
+#         # «пустые» буферы-заглушки; реальные значения появятся после fit()
+#         self.register_buffer("mean", torch.tensor(mean))
+#         self.register_buffer("std", torch.tensor(std))
+#
+#     # ────────────────────────────────────────────────────────────────────────
+#     @torch.no_grad()
+#     def fit(self, data: torch.Tensor, dim: Sequence[int] | int | None = None):
+#         """
+#            Преобразует данные (не обязательно в [0, 1]) в нормальное распределение с заданными mean и std.
+#            data: [N, d] — любые данные (считаем, что они равномерно распределены, но не обязательно в [0, 1])
+#            mean: среднее нормального распределения
+#            std: стандартное отклонение нормального распределения
+#            eps: маленькое число для численной устойчивости
+#            """
+#         # 1. Приведение данных в [0, 1] — MinMax Scaling
+#         data_min = data.min(dim=0, keepdim=True).values
+#         data_max = data.max(dim=0, keepdim=True).values
+#         scaled_data = (data - data_min) / (data_max - data_min + self.eps)
+#
+#         # 2. Применяем обратную функцию CDF нормального распределения (probit)
+#         normal = torch.distributions.Normal(0, 1)
+#         normal_data = normal.icdf(scaled_data.clamp(min=self.eps, max=1 - self.eps))  # clamp для устранения NaN
+#
+#         _update_buffer(self, "mean", self.mean.detach())
+#         _update_buffer(self, "std", self.std.detach())
+#
+#         # 3. Масштабируем до заданного нормального распределения
+#         return normal_data * self.std + self.mean
+#
+#         # dims = _norm_dim(dim) if dim is not None else self.default_dim
+#         #
+#         # mean = self._reduce(data, torch.mean, dims)
+#         # std = self._reduce(data, lambda x, dim, keepdim: torch.std(x, dim=dim, keepdim=keepdim, unbiased=self.unbiased),
+#         #                    dims).clamp_min(self.eps)
+#         #
+#         # # приводим device / dtype к data
+#         # mean, std = self._cast_like(mean, data), self._cast_like(std, data)
+#         #
+#         # _update_buffer(self, "mean", mean.detach())
+#         # _update_buffer(self, "std", std.detach())
+#         # return self
+#
+#     # ────────────────────────────────────────────────────────────────────────
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         return (x - self.mean) / self.std
+#
+#     def inverse(self, z: torch.Tensor) -> torch.Tensor:
+#         return z * self.std + self.mean
+#
+#     def extra_repr(self) -> str:  # для красивого print(module)
+#         return f"dim={self.default_dim}, unbiased={self.unbiased}, eps={self.eps}"

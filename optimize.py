@@ -16,14 +16,21 @@ import lightning as L
 import pickle
 
 
-DATASET_SIZE = 25_000
+DATASET_SIZE = 10_000
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "optimize_data")
 ENV_STUDY_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "study_results")
-TRIAL_NUM = 100
+TRIAL_NUM = 80
 
 ds_gen = None
 codec = None
+
+
+# Настраиваем, чтобы после каждого trial печатать лучшие параметры
+def print_best_callback(study, trial):
+    print(f"\n--- Trial #{trial.number} завершился ---")
+    print(f"Best value so far: {study.best_value}")
+    print(f"Best params so far: {study.best_params}\n")
 
 
 def save_study_pickle(study, path):
@@ -57,7 +64,9 @@ def create_samplers(orig_filter: MWFilter):
     )
 
     total_samplers = CMTheoreticalDatasetGeneratorSamplers.concat(
-            (samplers_lhs_all_params_shuffle_cms_cols, samplers_lhs_all_params_shuffle_pss_cols, samplers_lhs_all_params_shuffle_all_cols,
+            (samplers_lhs_all_params_shuffle_cms_cols,
+             samplers_lhs_all_params_shuffle_pss_cols,
+             samplers_lhs_all_params_shuffle_all_cols,
              samplers_lhs_all_params)
     )
     return total_samplers
@@ -107,6 +116,7 @@ def base_objective(model: nn.Module, optimizer_cfg: dict, scheduler_cfg: dict, m
 
     # Обучение модели с помощью PyTorch Lightning
     trainer = L.Trainer(
+        deterministic=True,
         max_epochs=500,  # Максимальное количество эпох обучения
         accelerator="auto",  # Автоматический выбор устройства (CPU/GPU)
         log_every_n_steps=100,  # Частота логирования в процессе обучения
@@ -142,7 +152,7 @@ def optimize_resnet():
                 trial.suggest_int('layer4_blocks', 1, 5),
             ],
             # 'batch_size': trial.suggest_categorical('batch_size', [32, 64, 128]),
-            'lr': trial.suggest_float('lr', 1e-5, 1e-1, log=True),
+            'lr': trial.suggest_float('lr', 1e-4, 1e-1, log=True),
             'gamma': trial.suggest_float('gamma', 0.1, 1.0, step=0.1),
             'step_size': trial.suggest_int('step_size', 1, 30),
             'activation_in': trial.suggest_categorical('activation_in', models.get_available_activations()),
@@ -188,18 +198,18 @@ def optimize_resnet():
     return study
 
 
-def optimize_resnet_with_mlp_correction():
+def optimize_resnet_with_mlp_correction(metric: str="val_mse", direction: str="minimize"):
     def objective(trial):
         # 1. Определяем пространство поиска параметров
         params = {
             'hidden_dims': [
-                trial.suggest_categorical('hidden1_features', [8, 16, 32, 64, 128, 256, 512, 1024, 2048]),
-                trial.suggest_categorical('hidden2_features', [8, 16, 32, 64, 128, 256, 512, 1024, 2048]),
-                trial.suggest_categorical('hidden3_features', [8, 16, 32, 64, 128, 256, 512, 1024, 2048]),
+                trial.suggest_categorical('hidden1_features', [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]),
+                trial.suggest_categorical('hidden2_features', [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]),
+                trial.suggest_categorical('hidden3_features', [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]),
             ],
-            'lr': trial.suggest_float('lr', 1e-5, 1e-1, log=True),
-            'gamma': trial.suggest_float('gamma', 0.1, 1.0, step=0.1),
-            'step_size': trial.suggest_int('step_size', 1, 30),
+            'lr': trial.suggest_float('lr', 1e-6, 1e-1, log=True),
+            'gamma': trial.suggest_float('gamma', 0.05, 1.0, step=0.05),
+            'step_size': trial.suggest_int('step_size', 1, 20, step=1),
             'activation_fun': trial.suggest_categorical('activation_fun', models.get_available_activations()),
         }
 
@@ -228,22 +238,22 @@ def optimize_resnet_with_mlp_correction():
         )
         optimizer_cfg = {"name": "Adam", "lr": params['lr']}
         scheduler_cfg = {"name": "StepLR", "step_size": params['step_size'], "gamma": params['gamma']}
-        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric="val_r2")
+        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric=metric)
         return score
 
     # 3. Создаем study и запускаем оптимизацию
-    study = optuna.create_study(direction='maximize')  # Мы хотим максимизировать accuracy
+    study = optuna.create_study(direction=direction)  # Мы хотим максимизировать accuracy
     study.enqueue_trial(
         {'hidden1_features': 128,
          'hidden2_features': 256,
          'hidden3_features': 512,
          'lr': 0.0005587648891507119,
          'gamma': 0.1,
-         'step_size': 20,
-         'activation_fun': 'relu'
+         'step_size': 15,
+         'activation_fun': 'swish'
          }
     )
-    study.optimize(objective, n_trials=TRIAL_NUM)  # Количество итераций оптимизации
+    study.optimize(objective, n_trials=TRIAL_NUM, callbacks=[print_best_callback])  # Количество итераций оптимизации
     return study
 
 
@@ -273,7 +283,7 @@ def main():
     print("Каналы:", codec.y_channels)
     print("Количество каналов:", len(codec.y_channels))
 
-    study = optimize_resnet_with_mlp_correction()
+    study = optimize_resnet_with_mlp_correction(metric="val_r2", direction="maximize")
 
     # 4. Выводим результаты
     print(f"Лучшие параметры: {study.best_params}")
@@ -288,6 +298,6 @@ def main():
     optuna.visualization.plot_param_importances(study).show()
 
 
-
 if __name__ == "__main__":
+    L.seed_everything(0)
     main()
