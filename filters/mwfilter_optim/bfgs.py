@@ -17,6 +17,7 @@ def create_bounds(origin_matrix: CouplingMatrix):
 
     for (i, j) in origin_matrix.links:
         if i == j:
+<<<<<<< HEAD
             Mmin[i][j] -= 1.5*Mmin[i][j]
             Mmax[i][j] += 1.5*Mmax[i][j]
         elif j == (i + 1):
@@ -29,6 +30,20 @@ def create_bounds(origin_matrix: CouplingMatrix):
             Mmin[j][i] -= 1.1*Mmin[j][i]
             Mmax[i][j] += 1.1*Mmax[i][j]
             Mmax[j][i] += 1.1*Mmax[j][i]
+=======
+            Mmin[i][j] -= 2.0*Mmin[i][j]
+            Mmax[i][j] += 2.0*Mmax[i][j]
+        elif j == (i + 1):
+            Mmin[i][j] -= 2.0*Mmin[i][j]
+            Mmin[j][i] -= 2.0*Mmin[j][i]
+            Mmax[i][j] += 2.0*Mmax[i][j]
+            Mmax[j][i] += 2.0*Mmax[j][i]
+        else:
+            Mmin[i][j] -= 2.0*Mmin[i][j]
+            Mmin[j][i] -= 2.0*Mmin[j][i]
+            Mmax[i][j] += 2.0*Mmax[i][j]
+            Mmax[j][i] += 2.0*Mmax[j][i]
+>>>>>>> e2172defb4cb3c46a7dc7c9d3a212447d5bcc82d
     return CouplingMatrix(torch.tensor(Mmin, dtype=torch.float32)), CouplingMatrix(torch.tensor(Mmax, dtype=torch.float32))
 
 
