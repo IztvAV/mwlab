@@ -41,12 +41,12 @@ def create_origin_filter(path_orig_filter: str, f_start=None, f_stop=None, f_uni
     return origin_filter
 
 
-def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_param: bool=False):
+def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_param: bool=False, dataset_size=configs.BASE_DATASET_SIZE):
     sampler_configs = {
         "pss_origin": PSShift(phi11=0.547, phi21=-1.0, theta11=0.01685, theta21=0.017),
         "pss_shifts_delta": PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
         "cm_shifts_delta": CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=0.005),
-        "samplers_size": configs.BASE_DATASET_SIZE,
+        "samplers_size": dataset_size,
     }
     samplers_all_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
                                                                                     samplers_type=sampler_type(
@@ -63,7 +63,7 @@ def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_p
         pss=samplers_all_params.pss.shuffle(ratio=1, dim=0)
     )
 
-    sampler_configs["samplers_size"] = int(configs.BASE_DATASET_SIZE / 100)
+    sampler_configs["samplers_size"] = int(dataset_size / 100)
     samplers_with_one_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
                                                                                          samplers_type=sampler_type(
                                                                                              one_param=True),

@@ -1,7 +1,10 @@
 import optuna
 import os
+
+import common
 import models
-from main import FILTER_NAME, BATCH_SIZE, create_origin_filter
+from configs import FILTER_NAME, BATCH_SIZE
+from common import create_origin_filter
 from mwlab.io.backends import RAMBackend
 from filters.mwfilter_lightning import MWFilterBaseLModule, MWFilterBaseLMWithMetrics
 from filters.datasets import CMTheoreticalDatasetGenerator, CMTheoreticalDatasetGeneratorSamplers
@@ -16,7 +19,7 @@ import lightning as L
 import pickle
 
 
-DATASET_SIZE = 10_000
+DATASET_SIZE = 50_000
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "optimize_data")
 ENV_STUDY_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "study_results")
@@ -40,36 +43,6 @@ def save_study_pickle(study, path):
 def load_study_pickle(path):
     with open(path, 'rb') as f:
         return pickle.load(f)
-
-
-def create_samplers(orig_filter: MWFilter):
-    sampler_configs = {
-        "pss_origin": PSShift(phi11=0.547, phi21=-1.0, theta11=0.01685, theta21=0.017),
-        "pss_shifts_delta": PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
-        "cm_shifts_delta": CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=0.005),
-        "samplers_size": DATASET_SIZE,
-    }
-    samplers_lhs_all_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
-                                                                                    samplers_type=SamplerTypes.SAMPLER_LATIN_HYPERCUBE(one_param=False),
-                                                                                    **sampler_configs)
-    samplers_lhs_all_params_shuffle_cms_cols = CMTheoreticalDatasetGeneratorSamplers(
-        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=1),
-        pss=samplers_lhs_all_params.pss)
-    samplers_lhs_all_params_shuffle_pss_cols = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_lhs_all_params.cms,
-                                                                                pss=samplers_lhs_all_params.pss.shuffle(
-                                                                                    ratio=1, dim=1))
-    samplers_lhs_all_params_shuffle_all_cols = CMTheoreticalDatasetGeneratorSamplers(
-        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=1),
-        pss=samplers_lhs_all_params.pss.shuffle(ratio=1, dim=1)
-    )
-
-    total_samplers = CMTheoreticalDatasetGeneratorSamplers.concat(
-            (samplers_lhs_all_params_shuffle_cms_cols,
-             samplers_lhs_all_params_shuffle_pss_cols,
-             samplers_lhs_all_params_shuffle_all_cols,
-             samplers_lhs_all_params)
-    )
-    return total_samplers
 
 
 def base_objective(model: nn.Module, optimizer_cfg: dict, scheduler_cfg: dict, metric: str="val_mse"):
@@ -132,29 +105,30 @@ def base_objective(model: nn.Module, optimizer_cfg: dict, scheduler_cfg: dict, m
     return score
 
 
-def optimize_resnet():
+def optimize_resnet(metric="val_r2", direction="maximize"):
     # 2. Определяем целевую функцию для Optuna
     def objective(trial):
         # 1. Определяем пространство поиска параметров
         params = {
             'first_conv_channels': trial.suggest_categorical('first_conv_channels', [16, 32, 64, 128]),
-            'first_conv_kernel': trial.suggest_int('first_conv_kernel', 5, 11, step=1),  # Нечетные размеры ядра
+            'first_conv_kernel': trial.suggest_int('first_conv_kernel', 3, 11, step=1),  # Нечетные размеры ядра
+            'first_maxpool_kernel': trial.suggest_int('first_maxpool_kernel', 2, 11, step=1),
             'layer_channels': [
-                trial.suggest_categorical('layer1_channels', [16, 32, 64, 128]),
-                trial.suggest_categorical('layer2_channels', [32, 64, 128, 256]),
-                trial.suggest_categorical('layer3_channels', [64, 128, 256, 512]),
-                trial.suggest_categorical('layer4_channels', [128, 256, 512, 1024]),
+                trial.suggest_categorical('layer1_channels', [16, 32, 64, 128, 256, 512, 1024]),
+                trial.suggest_categorical('layer2_channels', [16, 32, 64, 128, 256, 512, 1024]),
+                trial.suggest_categorical('layer3_channels', [16, 32, 64, 128, 256, 512, 1024]),
+                trial.suggest_categorical('layer4_channels', [16, 32, 64, 128, 256, 512, 1024]),
             ],
             'num_blocks': [
-                trial.suggest_int('layer1_blocks', 1, 5),
-                trial.suggest_int('layer2_blocks', 1, 5),
-                trial.suggest_int('layer3_blocks', 1, 5),
-                trial.suggest_int('layer4_blocks', 1, 5),
+                trial.suggest_int('layer1_blocks', 1, 6),
+                trial.suggest_int('layer2_blocks', 1, 6),
+                trial.suggest_int('layer3_blocks', 1, 6),
+                trial.suggest_int('layer4_blocks', 1, 6),
             ],
             # 'batch_size': trial.suggest_categorical('batch_size', [32, 64, 128]),
-            'lr': trial.suggest_float('lr', 1e-4, 1e-1, log=True),
+            'lr': trial.suggest_float('lr', 1e-6, 1e-1, log=True),
             'gamma': trial.suggest_float('gamma', 0.1, 1.0, step=0.1),
-            'step_size': trial.suggest_int('step_size', 1, 30),
+            'step_size': trial.suggest_int('step_size', 1, 20),
             'activation_in': trial.suggest_categorical('activation_in', models.get_available_activations()),
             'activation_block': trial.suggest_categorical('activation_block', models.get_available_activations())
         }
@@ -172,11 +146,11 @@ def optimize_resnet():
         )
         optimizer_cfg = {"name": "Adam", "lr": params['lr']}
         scheduler_cfg = {"name": "StepLR", "step_size": params['step_size'], "gamma": params['gamma']}
-        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric="val_mse")
+        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric=metric)
         return score
 
     # 3. Создаем study и запускаем оптимизацию
-    study = optuna.create_study(direction='minimize')  # Мы хотим максимизировать accuracy
+    study = optuna.create_study(direction=direction)  # Мы хотим максимизировать accuracy
     study.enqueue_trial(
         {'first_conv_channels': 64,
          'first_conv_kernel': 8,
@@ -220,6 +194,7 @@ def optimize_resnet_with_mlp_correction(metric: str="val_mse", direction: str="m
             num_blocks=[1, 4, 3, 5],
             layer_channels=[64, 64, 128, 256],
             first_conv_kernel=8,
+            first_maxpool_kernel=2,
             first_conv_channels=64,
             activation_in='sigmoid',
             activation_block='swish'
@@ -262,7 +237,7 @@ def main():
     print("Создаем фильтр")
     orig_filter = create_origin_filter(ENV_ORIGIN_DATA_PATH)
     print("Создаем сэмплеры")
-    samplers = create_samplers(orig_filter)
+    samplers = common.create_sampler(orig_filter, SamplerTypes.SAMPLER_SOBOL)
     global ds_gen
     ds_gen = CMTheoreticalDatasetGenerator(
         path_to_save_dataset=os.path.join(ENV_DATASET_PATH, samplers.cms.type.name, f"{len(samplers.cms)}"),
@@ -283,7 +258,7 @@ def main():
     print("Каналы:", codec.y_channels)
     print("Количество каналов:", len(codec.y_channels))
 
-    study = optimize_resnet_with_mlp_correction(metric="val_r2", direction="maximize")
+    study = optimize_resnet(metric="val_r2", direction="maximize")
 
     # 4. Выводим результаты
     print(f"Лучшие параметры: {study.best_params}")

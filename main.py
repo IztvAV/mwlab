@@ -156,7 +156,7 @@ def main():
     print("Создаем фильтр")
     orig_filter = common.create_origin_filter(configs.ENV_ORIGIN_DATA_PATH)
     print("Создаем сэмплеры")
-    samplers = common.create_sampler(orig_filter, SamplerTypes.SAMPLER_SOBOL)
+    samplers = common.create_sampler(orig_filter, SamplerTypes.SAMPLER_LATIN_HYPERCUBE)
     ds_gen = CMTheoreticalDatasetGenerator(
         path_to_save_dataset=os.path.join(configs.ENV_DATASET_PATH, samplers.cms.type.name, f"{len(samplers.cms)}"),
         backend_type='ram',
