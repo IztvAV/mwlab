@@ -1,6 +1,9 @@
 import enum
+import math
+
 import torch
 from scipy.stats import qmc
+from torch.quasirandom import SobolEngine
 
 
 class SamplerTypes(enum.Enum):
@@ -11,6 +14,7 @@ class SamplerTypes(enum.Enum):
     SAMPLER_STD = 4
     SAMPLER_GAUSSIAN_SADDLE = 5
     SAMPLER_COMBINE = 6
+    SAMPLER_SOBOL = 7
 
     def __init__(self, value):
         self._value_ = value
@@ -200,6 +204,54 @@ class Sampler:
         return cls(type=SamplerTypes.SAMPLER_GAUSSIAN_SADDLE(one_param=True), space=space)
 
     @classmethod
+    def sobol(
+            cls,
+            start,
+            stop,
+            num,
+            device: str = "cpu",
+            *,
+            one_param: bool = False,
+            seed: int | None = None,
+            baseline=None,
+    ) -> torch.Tensor:
+        start = torch.as_tensor(start, dtype=torch.float32, device=device)
+        stop = torch.as_tensor(stop, dtype=torch.float32, device=device)
+        assert start.shape == stop.shape, "start и stop должны совпадать по размеру"
+        if torch.any(start >= stop):
+            raise ValueError("start[i] должен быть меньше stop[i]")
+        d = start.numel()
+
+        if not one_param:
+            # классический гиперкуб Соболя
+            eng = SobolEngine(dimension=d, scramble=True, seed=seed)
+            u = eng.draw(num).to(device)  # (num, d) в [0,1]
+            space = start + u * (stop - start)
+            return cls(type=SamplerTypes.SAMPLER_SOBOL(one_param=False), space=space)
+
+        else:
+            # базовые (фиксированные) значения
+            if baseline is None:
+                baseline = (start + stop) * 0.5
+            baseline = torch.as_tensor(baseline, dtype=torch.float32, device=device)
+            assert baseline.shape == start.shape, "baseline должен совпадать по размеру"
+
+            # сколько точек на каждую координату
+            n_per = math.ceil(num / d)
+            samples = []
+
+            for i in range(d):
+                # линейная последовательность на отрезке [start[i], stop[i]]
+                vals = torch.linspace(start[i], stop[i], n_per, device=device)
+                # клонируем baseline и подставляем vals по i‑й координате
+                block = baseline.repeat(n_per, 1)
+                block[:, i] = vals
+                samples.append(block)
+
+            space = torch.cat(samples, dim=0)[:num]  # обрезаем до нужного размера
+            return cls(type=SamplerTypes.SAMPLER_SOBOL(one_param=True), space=space)
+
+    @classmethod
     def for_type(cls, start, stop, num, type: SamplerTypes, **kwargs):
         if type == SamplerTypes.SAMPLER_UNIFORM:
             return cls.uniform(start, stop, num, one_param=type.one_param, **kwargs)
@@ -209,6 +261,8 @@ class Sampler:
             return cls.lhs(start, stop, num, one_param=type.one_param, **kwargs)
         elif type == SamplerTypes.SAMPLER_GAUSSIAN_SADDLE:
             return cls.gaussian_saddle(start, stop, num, one_param=type.one_param, **kwargs)
+        elif type == SamplerTypes.SAMPLER_SOBOL:
+            return cls.sobol(start, stop, num, one_param=type.one_param, **kwargs)
         else:
             raise ValueError(f"Selected sampler not implemented: {type}")
 

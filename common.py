@@ -41,70 +41,42 @@ def create_origin_filter(path_orig_filter: str, f_start=None, f_stop=None, f_uni
     return origin_filter
 
 
-def create_lhs_samplers(orig_filter: MWFilter):
+def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_param: bool=False):
     sampler_configs = {
         "pss_origin": PSShift(phi11=0.547, phi21=-1.0, theta11=0.01685, theta21=0.017),
         "pss_shifts_delta": PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
         "cm_shifts_delta": CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=0.005),
         "samplers_size": configs.BASE_DATASET_SIZE,
     }
-    samplers_lhs_all_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
-                                                                                    samplers_type=SamplerTypes.SAMPLER_LATIN_HYPERCUBE(one_param=False),
+    samplers_all_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
+                                                                                    samplers_type=sampler_type(
+                                                                                        one_param=False),
                                                                                     **sampler_configs)
-    samplers_lhs_all_params_shuffle_cms_cols = CMTheoreticalDatasetGeneratorSamplers(
-        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=1),
-        pss=samplers_lhs_all_params.pss)
-    samplers_lhs_all_params_shuffle_pss_cols = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_lhs_all_params.cms,
-                                                                                pss=samplers_lhs_all_params.pss.shuffle(
-                                                                                ratio=1, dim=1))
-    samplers_lhs_all_params_shuffle_all_cols = CMTheoreticalDatasetGeneratorSamplers(
-        cms=samplers_lhs_all_params.cms.shuffle(ratio=1, dim=1),
-        pss=samplers_lhs_all_params.pss.shuffle(ratio=1, dim=1)
-    )
-
-    sampler_configs["samplers_size"] = int(configs.BASE_DATASET_SIZE/100)
-    samplers_lhs_with_one_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
-                                                                                         samplers_type=SamplerTypes.SAMPLER_LATIN_HYPERCUBE(one_param=True),
-                                                                                         **sampler_configs)
-    total_samplers = CMTheoreticalDatasetGeneratorSamplers.concat(
-            (samplers_lhs_all_params_shuffle_cms_cols, samplers_lhs_all_params_shuffle_pss_cols, samplers_lhs_all_params_shuffle_all_cols,
-             samplers_lhs_all_params)
-    )
-    return total_samplers
-
-
-def create_std_samplers(orig_filter: MWFilter):
-    sampler_configs = {
-        "pss_origin": PSShift(phi11=0.547, phi21=-1.0, theta11=0.01685, theta21=0.017),
-        "pss_shifts_delta": PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
-        "cm_shifts_delta": CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=0.005),
-        "samplers_size": configs.BASE_DATASET_SIZE,
-    }
-    samplers_std_all_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
-                                                                                    samplers_type=SamplerTypes.SAMPLER_STD(one_param=False),
-                                                                                    **sampler_configs)
-    samplers_lhs_all_params_shuffle_cms_cols = CMTheoreticalDatasetGeneratorSamplers(
-        cms=samplers_std_all_params.cms.shuffle(ratio=1, dim=1),
-        pss=samplers_std_all_params.pss)
-    samplers_lhs_all_params_shuffle_pss_cols = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_std_all_params.cms,
-                                                                                     pss=samplers_std_all_params.pss.shuffle(
-                                                                                         ratio=1, dim=1))
-    samplers_lhs_all_params_shuffle_all_cols = CMTheoreticalDatasetGeneratorSamplers(
-        cms=samplers_std_all_params.cms.shuffle(ratio=1, dim=1),
-        pss=samplers_std_all_params.pss.shuffle(ratio=1, dim=1)
+    samplers_all_params_shuffle_cms_cols = CMTheoreticalDatasetGeneratorSamplers(
+        cms=samplers_all_params.cms.shuffle(ratio=1, dim=0),
+        pss=samplers_all_params.pss)
+    samplers_all_params_shuffle_pss_cols = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_all_params.cms,
+                                                                                     pss=samplers_all_params.pss.shuffle(
+                                                                                         ratio=1, dim=0))
+    samplers_all_params_shuffle_all_cols = CMTheoreticalDatasetGeneratorSamplers(
+        cms=samplers_all_params.cms.shuffle(ratio=1, dim=0),
+        pss=samplers_all_params.pss.shuffle(ratio=1, dim=0)
     )
 
     sampler_configs["samplers_size"] = int(configs.BASE_DATASET_SIZE / 100)
-    samplers_lhs_with_one_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
-                                                                                         samplers_type=SamplerTypes.SAMPLER_STD(
+    samplers_with_one_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
+                                                                                         samplers_type=sampler_type(
                                                                                              one_param=True),
                                                                                          **sampler_configs)
-    total_samplers = CMTheoreticalDatasetGeneratorSamplers.concat(
-        (samplers_lhs_all_params_shuffle_cms_cols, samplers_lhs_all_params_shuffle_pss_cols,
-         samplers_lhs_all_params_shuffle_all_cols,
-         samplers_std_all_params)
-    )
-    return total_samplers
+    if with_one_param:
+        total_samplers = CMTheoreticalDatasetGeneratorSamplers.concat(
+            (samplers_all_params, samplers_with_one_params)
+        )
+        total_samplers.cms._type = sampler_type
+        total_samplers.pss._type = sampler_type
+        return total_samplers
+    else:
+        return samplers_all_params
 
 
 def get_model(name: str="resnet_with_correction", **kwargs):
