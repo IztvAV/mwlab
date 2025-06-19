@@ -339,13 +339,14 @@ class ResNet1DFlexible(nn.Module):
 
         dilation = 1
         self.conv1 = nn.Conv1d(in_channels, first_conv_channels,
+                               groups=1,
                                kernel_size=first_conv_kernel,
                                stride=2,
                                padding=dilation*(first_conv_kernel // 2),
                                dilation=dilation)
         self.bn1 = nn.BatchNorm1d(first_conv_channels)
         # self.bn1 = nn.GroupNorm(num_groups=8, num_channels=first_conv_channels)
-        self.maxpool = nn.MaxPool1d(kernel_size=first_maxpool_kernel, stride=2, padding=1)
+        self.maxpool = nn.MaxPool1d(kernel_size=first_maxpool_kernel, stride=2, padding=first_maxpool_kernel // 2)
 
         self.layers = nn.ModuleList()
         in_ch = first_conv_channels
