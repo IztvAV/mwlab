@@ -212,3 +212,115 @@ class MinMaxScaler(_Base):
     def extra_repr(self) -> str:
         return f"dim={self.default_dim}, range=({self.min_val}, {self.max_val}), eps={self.eps}"
 
+
+# --------------------------------------------------------------------------- #
+#                               RobustScaler                                  #
+# --------------------------------------------------------------------------- #
+class RobustScaler(_Base):
+    r"""
+    Масштабирование, устойчивое к выбросам (аналог ``sklearn.RobustScaler``).
+
+    Формулы
+    -------
+    .. math::
+
+        \text{forward}(x) = \frac{x - \text{median}}{\text{IQR}},\qquad
+        \text{IQR}=Q_\text{high}-Q_\text{low}
+
+    Параметры
+    ----------
+    dim : int | Sequence[int] | None
+        Измерения, по которым считаются квантиль и медиана. ``None`` — не агрегируем.
+    quantile_range : Tuple[float, float], default=(25.0, 75.0)
+        Нижний и верхний процентили **в процентах** (0–100].
+    eps : float, optional
+        Защита от деления на ноль.
+    """
+
+    def __init__(
+        self,
+        dim: Sequence[int] | int | None = 0,
+        quantile_range: Tuple[float, float] = (25.0, 75.0),
+        eps: float | None = None,
+    ):
+        super().__init__(dim, eps)
+
+        # ── валидация диапазона квантилей ────────────────────────────────
+        if (
+            not isinstance(quantile_range, (tuple, list))
+            or len(quantile_range) != 2
+            or not all(isinstance(q, (int, float)) for q in quantile_range)
+        ):
+            raise TypeError("quantile_range must be tuple/list of two floats")
+        q_low, q_high = map(float, quantile_range)
+        if not (0.0 <= q_low < q_high <= 100.0):
+            raise ValueError("quantile_range must satisfy 0 ≤ low < high ≤ 100")
+
+        self.q_low = q_low / 100.0
+        self.q_high = q_high / 100.0
+
+        # сохраняем init-параметры для корректной сериализации
+        self._init_kwargs = {
+            "dim": dim,
+            "quantile_range": quantile_range,
+            "eps": eps,
+        }
+
+        # ── буферы, наполняемые после fit() ───────────────────────────────
+        self.register_buffer("center", torch.tensor(0.0))
+        self.register_buffer("scale", torch.tensor(1.0))
+
+    # ────────────────────────────────────────────────────────────────────
+    @torch.no_grad()
+    def fit(self, data: torch.Tensor, dim: Sequence[int] | int | None = None):
+        """
+        Вычисляет медиану и интерквантильный размах по указанным измерениям.
+        Возвращает ``self`` для чейнинга.
+        """
+        dims = _norm_dim(dim) if dim is not None else self.default_dim
+
+        # --- медиана ------------------------------------------------------
+        median = self._reduce(
+            data,
+            lambda x, dim, keepdim: torch.median(x, dim=dim, keepdim=keepdim).values,
+            dims,
+        )
+
+        # --- квантиль low / high ------------------------------------------
+        q_low = self._reduce(
+            data,
+            lambda x, dim, keepdim: torch.quantile(
+                x, self.q_low, dim=dim, keepdim=keepdim
+            ),
+            dims,
+        )
+        q_high = self._reduce(
+            data,
+            lambda x, dim, keepdim: torch.quantile(
+                x, self.q_high, dim=dim, keepdim=keepdim
+            ),
+            dims,
+        )
+
+        iqr = (q_high - q_low).clamp_min(self.eps)
+
+        # приводим device / dtype к data
+        median, iqr = self._cast_like(median, data), self._cast_like(iqr, data)
+
+        _update_buffer(self, "center", median.detach())
+        _update_buffer(self, "scale", iqr.detach())
+        return self
+
+    # ────────────────────────────────────────────────────────────────────
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Преобразует данные к устойчивому масштабу."""
+        return (x - self.center) / self.scale
+
+    def inverse(self, z: torch.Tensor) -> torch.Tensor:
+        """Обратное преобразование из робаст-масштаба в оригинальный."""
+        return z * self.scale + self.center
+
+    def extra_repr(self) -> str:
+        low = self.q_low * 100.0
+        high = self.q_high * 100.0
+        return f"dim={self.default_dim}, q_range=({low}%, {high}%), eps={self.eps}"

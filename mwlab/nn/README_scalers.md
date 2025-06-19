@@ -1,115 +1,137 @@
 # mwlab.nn.scalers
 
-Модуль `scalers.py` предоставляет классы нормализации данных для моделей PyTorch. Скейлеры реализованы как `torch.nn.Module` и поддерживают агрегирование статистик по произвольным осям, работу на любом `device`/`dtype`, а также совместимы с пайплайнами Lightning и TorchScript.
+Модуль `mwlab/nn/scalers.py` предоставляет **три** готовых класса
+масштабирования данных для PyTorch‑моделей:
 
-## Возможности
+| Класс           | Алгоритм                     | Устойчивость к выбросам |
+|-----------------|------------------------------|-------------------------|
+| `StdScaler`     | (x − mean) / std             | низкая                  |
+| `MinMaxScaler`  | линейное [min,max] → [a,b]   | низкая                  |
+| `RobustScaler`  | (x − median) / IQR           | **высокая**             |
 
-- Нормализация по среднему и стандартному отклонению (`StdScaler`)
-- Приведение к заданному диапазону (`MinMaxScaler`)
-- Поддержка агрегирования по любым измерениям (`dim`)
-- Автоматическая трансформация на `fit()` / `forward()` / `inverse()`
-- Совместимость с `state_dict()` / `load_state_dict()`
+Все скейлеры наследуются от общего `_Base`, работают на любом `device`/`dtype`,
+поддерживают агрегирование статистик по произвольным осям (`dim`) и
+корректно сохраняются через `state_dict()`.
 
 ---
 
-## Базовый класс: `_Base`
+## Быстрый старт
+
+```python
+import torch
+from mwlab.nn.scalers import RobustScaler  # или StdScaler, MinMaxScaler
+
+x = torch.randn(256, 64)
+x[::30] *= 20                               # имитируем выбросы
+
+scaler = RobustScaler(dim=0)               # агрегируем статистики по features
+scaler.fit(x)
+
+z = scaler(x)           # нормализованные данные
+x_rec = scaler.inverse(z)
+assert torch.allclose(x, x_rec, atol=1e-5)
+```
+
+---
+
+## 1. Базовый класс `_Base`
 
 ```python
 class _Base(nn.Module)
 ```
 
-Абстрактный базовый класс. Определяет базовую логику нормализации и буферов. Пользователю напрямую не нужен, но используется в `StdScaler` и `MinMaxScaler`.
+* **Параметры конструктора**
+  * `dim` — int | Sequence[int] | None. Оси для агрегации статистик (по‑умолчанию 0).
+  * `eps` — float. Защита от деления на 0 (default = 1e‑12).
 
-**Параметры конструктора:**
-
-- `dim`: `int | Sequence[int] | None` – Оси для агрегации статистик. По умолчанию — 0.
-- `eps`: `float`, по умолчанию `1e-12` – Число, предотвращающее деление на 0.
-
-**Методы:**
-
-- `fit(data, dim=None)` – вычисляет статистики по данным
-- `forward(x)` – применяет прямое преобразование
-- `inverse(z)` – обратное преобразование
+* **Методы**
+  * `fit(data, dim=None)` — вычисляет статистики.
+  * `forward(x)` — применяет трансформацию.
+  * `inverse(z)` — обратное преобразование.
 
 ---
 
-## StdScaler
+## 2. StdScaler
+
+Нормализация по среднему и стандартному отклонению:
 
 ```python
-class StdScaler(_Base)
-```
-
-Нормализует входной тензор по формуле:
-
-```text
 z = (x - mean) / std
 ```
 
-### Пример:
-
 ```python
-scaler = StdScaler(dim=0)
-scaler.fit(data)
-z = scaler(data)
-x = scaler.inverse(z)
+scaler = StdScaler(dim=(0, 2), unbiased=False)
+scaler.fit(x)
+z = scaler(x)
+x_back = scaler.inverse(z)
 ```
 
-## MinMaxScaler
+---
+
+## 3. MinMaxScaler
+
+Линейное преобразование в диапазон `[a, b]`:
 
 ```python
-class MinMaxScaler(_Base)
-```
-
-Масштабирует данные линейно в диапазон `[a, b]`:
-
-```text
 y = (x - min) / (max - min) * (b - a) + a
 ```
 
-### Пример:
-
 ```python
 scaler = MinMaxScaler(dim=0, feature_range=(-1.0, 1.0))
-scaler.fit(data)
-y = scaler(data)
-x = scaler.inverse(y)
+scaler.fit(x)
+y = scaler(x)
+x_back = scaler.inverse(y)
 ```
-
-**Дополнительные параметры:**
-
-- `feature_range`: `Tuple[float, float]`, по умолчанию `(0.0, 1.0)`
-
-**Буферы:**
-
-- `data_min`
-- `data_range`
 
 ---
 
-## Типовой сценарий использования
+## 4. **RobustScaler** 
+
+Устойчивое к выбросам масштабирование по медиане и интерквантильному
+размаху (IQR):
 
 ```python
-import torch
-from mwlab.nn.scalers import StdScaler
+z = (x - median) / (Q_high - Q_low)
+```
 
-data = torch.randn(100, 16)
-scaler = StdScaler(dim=0)
-scaler.fit(data)
+*По умолчанию `quantile_range = (25, 75)`, но можно задать любой.*
 
-# Прямое преобразование
-z = scaler(data)
+```python
+scaler = RobustScaler(dim=0, quantile_range=(10, 90))
+scaler.fit(x)
+z = scaler(x)
+x_back = scaler.inverse(z)
+```
 
-# Обратное преобразование
-restored = scaler.inverse(z)
+### Почему «robust»
 
-assert torch.allclose(data, restored, atol=1e-5)
+* Медиана и IQR не «едут», даже если 5–10 % точек экстремальны.
+* Подходит для каналов с резкими всплесками (например, group delay).
+
+---
+
+## 5. Сериализация
+
+Любой скейлер можно сохранять вместе с моделью:
+
+```python
+torch.save({
+    "model": model.state_dict(),
+    "scaler": scaler.state_dict(),
+}, "checkpoint.pt")
+
+# Загрузка
+checkpoint = torch.load("checkpoint.pt")
+model.load_state_dict(checkpoint["model"])
+
+scaler = RobustScaler()      # тот же класс
+scaler.load_state_dict(checkpoint["scaler"])
 ```
 
 ---
 
-## Особенности
+## 6. Советы по применению
 
-- Поддержка трансформаций на батчах, спектрах и многомерных тензорах.
-- `fit()` не обучаемый (параметры не требуют градиента).
-- Совместим с `state_dict()` – можно сохранять и загружать вместе с моделью.
-- Подходит для использования в PyTorch Lightning, включая `predict_step`.
+1. Для **стационарных** распределений без выбросов используйте `StdScaler`.
+2. Если важно жёстко ограничить диапазон — берите `MinMaxScaler`.
+3. При **пикирующих** величинах (delay, ratio dB, power) лучший выбор — `RobustScaler`.
