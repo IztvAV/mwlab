@@ -30,6 +30,7 @@ import numpy as np
 import pytest
 import skrf as rf
 import torch
+import math
 
 from mwlab.codecs.touchstone_codec import TouchstoneCodec
 from mwlab.io.touchstone import TouchstoneData
@@ -65,6 +66,10 @@ def _assert_network_equal(a: rf.Network, b: rf.Network, *, atol=1e-8, rtol=1e-6)
     np.testing.assert_allclose(a.f, b.f, atol=0, rtol=1e-12)
     np.testing.assert_allclose(a.s, b.s, atol=atol, rtol=rtol)
 
+def _group_delay_ref(net: rf.Network, i: int, j: int):
+    """Возвращает эталон GD(i,j) shape (F,)."""
+    return net.group_delay[:, i, j]
+
 
 class _DummyTouchstoneDataset(TouchstoneDataset):
     def __init__(self):
@@ -98,6 +103,31 @@ def test_roundtrip_real_imag(ts_sample, freq_vec):
     codec = TouchstoneCodec(x_keys=["a", "b"], y_channels=y_ch, freq_hz=freq_vec)
     _roundtrip(codec, ts_sample)
 
+def test_roundtrip_real_imag_gd(ts_sample, freq_vec):
+    """Проверяем, что добавление GD-каналов не ломает реконструкцию."""
+
+    y_ch = [                           # real, imag, gd для 2-портов
+        f"S{i}_{j}.{p}"
+        for p in ("real", "imag", "gd")
+        for i in (1, 2)
+        for j in (1, 2)
+    ]
+    codec = TouchstoneCodec(x_keys=["a", "b"], y_channels=y_ch, freq_hz=freq_vec)
+
+    # ----- encode
+    x_t, y_t, meta = codec.encode(ts_sample)
+    assert y_t.shape[0] == 3 * 4          # 3 компонента × 4 пары портов
+
+    # ----- decode  →  сеть не должна менять S-матрицу
+    ts_rec = codec.decode(y_t, meta)
+    _assert_network_equal(ts_sample.network, ts_rec.network, atol=1e-8)
+
+    # ----- sanity-check: строка GD реально совпадает с reference
+    gd_ch_idx = codec.y_channels.index("S1_1.gd")
+    gd_pred   = y_t[gd_ch_idx].numpy()
+    gd_ref    = _group_delay_ref(ts_sample.network, 0, 0)
+    np.testing.assert_allclose(gd_pred, gd_ref, atol=1e-12, rtol=1e-9)
+
 
 def test_roundtrip_db_deg(ts_sample, freq_vec):
     y_ch = [f"S{i}_{j}.{p}" for p in ("db", "deg") for i in (1, 2) for j in (1, 2)]
@@ -123,12 +153,16 @@ def test_amp_only_nan_fill(ts_sample, freq_vec):
     np.testing.assert_allclose(s_rec.imag, 0.0, atol=1e-9)
 
 
-@pytest.mark.parametrize("bad_tag", ["S1X.real", "S223.imag", "S11.foo"])
+@pytest.mark.parametrize("bad_tag", ["S1X.real", "S223.imag", "S11.foo", "S1_1.GDx"])
 def test_parse_channel_validation(bad_tag):
     codec = TouchstoneCodec(x_keys=["a"], y_channels=["S1_1.real"], freq_hz=np.array([1.0]))
     with pytest.raises(ValueError):
         codec._parse_channel(bad_tag)
 
+def test_parse_channel_gd_ok():
+    codec = TouchstoneCodec(x_keys=["a"], y_channels=["S1_1.real"], freq_hz=np.array([1.0]))
+    i, j, part = codec._parse_channel("S1_1.gd")
+    assert (i, j, part) == (0, 0, "gd")
 
 def test_resample_encode(ts_sample):
     freq_new = np.linspace(1e9, 5e9, 51)
@@ -276,12 +310,14 @@ def test_backup_mode_none(ts_sample, freq_vec):
 def test_encode_decode_s(ts_sample, freq_vec):
     codec = TouchstoneCodec(
         x_keys=["a", "b"],
-        y_channels=["S1_1.real", "S1_1.imag"],
+        y_channels=["S1_1.real", "S1_1.imag", "S1_1.gd"],
         freq_hz=freq_vec,
     )
     y_t, meta = codec.encode_s(ts_sample.network)
     ts_rec = codec.decode_s(y_t, meta)
-    np.testing.assert_allclose(ts_rec.s[:, 0, 0], ts_sample.network.s[:, 0, 0], atol=1e-6)
+    np.testing.assert_allclose(ts_rec.s[:, 0, 0],
+                               ts_sample.network.s[:, 0, 0],
+                               atol=1e-6)
 
 def test_encode_decode_x(ts_sample, freq_vec):
     codec = TouchstoneCodec(

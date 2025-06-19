@@ -230,10 +230,21 @@ class TouchstoneCodec:
                 raise ValueError("encode_s: несоответствие частотной сетки")
 
         # 2) y‑тензор (C,F)
-        chans = [
-            self._convert(net.s[:, i, j], part)
-            for (i, j, part) in map(self._parse_channel, self.y_channels)
-        ]
+        gd_cache = None  # вычислим group_delay один раз
+        chans = []
+        for (i, j, part) in map(self._parse_channel, self.y_channels):
+            if part == "gd":
+                if gd_cache is None:
+                    # network.group_delay → ndarray (F, P, P)
+                    gd_cache = net.group_delay
+                arr = gd_cache[:, i, j]
+            else:
+                arr = self._convert(net.s[:, i, j], part)
+
+            if np.iscomplexobj(arr):
+                arr = arr.real
+            chans.append(arr)
+
         y_t = torch.from_numpy(np.stack(chans, axis=0)).float()
 
         # 3) meta (минимальный набор)
@@ -309,6 +320,8 @@ class TouchstoneCodec:
         for k, tag in enumerate(self.y_channels):
             i, j, part = self._parse_channel(tag)
             kind, arr = self._reverse(y_np[k], part)
+            if kind == "skip":  # это GD – пропускаем
+                continue
             {"re": RE, "im": IM, "amp": AMP, "phase": PH}[kind][(i, j)] = arr
 
         # ---------- исходный контейнер S[FxPxP] ---------------------------
@@ -417,7 +430,7 @@ class TouchstoneCodec:
         if not m:
             raise ValueError(f"Invalid channel tag: {tag!r}")
         i, j, part = int(m.group(1)) - 1, int(m.group(2)) - 1, m.group(3).lower()
-        if part not in {"real", "imag", "db", "mag", "deg"}:
+        if part not in {"real", "imag", "db", "mag", "deg", "gd"}:
             raise ValueError(f"Unknown component: {part!r}")
         return i, j, part
 
@@ -449,6 +462,8 @@ class TouchstoneCodec:
             return "amp", 10 ** (arr / 20)
         if p == "deg":
             return "phase", np.deg2rad(arr)
+        if p == "gd":  # для GD нечего восстанавливать
+            return "skip", arr
         raise RuntimeError
 
     # ---------------------------------------------------------------- repr
