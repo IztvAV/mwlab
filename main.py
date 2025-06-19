@@ -1,5 +1,8 @@
 import os
 import time
+from pathlib import Path
+
+from sklearn.ensemble import GradientBoostingRegressor, HistGradientBoostingRegressor
 
 from mwlab.nn.scalers import MinMaxScaler, StdScaler
 from mwlab import TouchstoneDataset, TouchstoneLDataModule, TouchstoneDatasetAnalyzer
@@ -24,7 +27,127 @@ from losses import CustomLosses
 import configs
 import common
 
+import sklearn
+import numpy as np
+from sklearn.multioutput import MultiOutputRegressor
+import joblib
+from tqdm import tqdm
+
 torch.set_float32_matmul_precision("medium")
+
+
+# ---------- 2. Сбор предсказаний ----------
+def collect_nn_predictions(model, dataloader):
+    model.eval()
+    preds, targets = [], []
+
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="NN prediction"):
+            x, y = batch
+            if hasattr(model, 'to'):  # на случай, если это LightningModule
+                x = x.to(model.device)
+            y_pred = model(x).cpu()
+            preds.append(y_pred.numpy())
+            targets.append(y.numpy())
+
+    return np.concatenate(preds, axis=0), np.concatenate(targets, axis=0)
+
+
+def fit_minmax_scalers(preds, targets):
+    pred_scaler = sklearn.preprocessing.MinMaxScaler()
+    target_scaler = sklearn.preprocessing.MinMaxScaler()
+    pred_scaled = pred_scaler.fit_transform(preds)
+    target_scaled = target_scaler.fit_transform(targets)
+    return pred_scaler, target_scaler, pred_scaled, target_scaled
+
+
+def train_boosting_model(X_train_scaled, y_train_scaled, params=None):
+    if params is None:
+        params = dict(
+            n_estimators=200,
+            learning_rate=0.1,
+            max_depth=4,
+            random_state=42,
+            verbose=1
+        )
+
+    base_model = GradientBoostingRegressor(**params)
+    model = MultiOutputRegressor(base_model)
+
+    print("➡️ Обучение модели...")
+    model.fit(X_train_scaled, y_train_scaled)
+
+    print("✅ Обучение завершено. Вычисляю метрики на обучающей выборке...\n")
+
+    y_pred = model.predict(X_train_scaled)
+
+    mse = sklearn.metrics.mean_squared_error(y_train_scaled, y_pred)
+    mae = sklearn.metrics.mean_absolute_error(y_train_scaled, y_pred)
+    r2 = sklearn.metrics.r2_score(y_train_scaled, y_pred)
+
+
+    print("\n📈 Mетрики:")
+    print(f"  MSE = {mse:.4f}")
+    print(f"  R²  = {r2:.4f}")
+    print(f"  MAE = {mae:.4f}")
+
+    return model
+
+
+def save_boosting_pipeline(path: str | Path, model, pred_scaler, target_scaler):
+    path = Path(path)
+    path.mkdir(exist_ok=True, parents=True)
+    joblib.dump(model, path / "gb_model.joblib")
+    joblib.dump(pred_scaler, path / "scaler_pred.joblib")
+    joblib.dump(target_scaler, path / "scaler_target.joblib")
+
+
+def train_corrector(lightning_model, datamodule, output_dir="./gb_corrector"):
+    datamodule.setup("fit")
+    train_loader = datamodule.train_dataloader()
+
+    # Получаем предсказания нейросети
+    print("Get AI-prediction")
+    preds, targets = collect_nn_predictions(lightning_model, train_loader)
+
+    # Нормируем
+    print("Normalize data")
+    pred_scaler, target_scaler, X_scaled, y_scaled = fit_minmax_scalers(preds, targets)
+
+    # Обучаем градиентный бустинг
+    print("Start train ml-model")
+    model = train_boosting_model(X_scaled, y_scaled)
+
+    # Сохраняем модель и скейлеры
+    save_boosting_pipeline(output_dir, model, pred_scaler, target_scaler)
+
+    print(f"✅ Обучение завершено. Модель и скейлеры сохранены в: {output_dir}")
+
+
+def predict_with_corrector(nn_preds: np.ndarray, corrector_dir: str | Path) -> np.ndarray:
+    """
+    Корректирует предсказания нейросети с помощью обученной ML-модели и скейлеров.
+
+    :param nn_preds: numpy-массив предсказаний нейросети (размер [N, D])
+    :param corrector_dir: путь к директории с моделью и скейлерами
+    :return: откорректированные предсказания (в исходном масштабе)
+    """
+    corrector_dir = Path(corrector_dir)
+
+    # Загрузка модели и скейлеров
+    model = joblib.load(corrector_dir / "gb_model.joblib")
+    pred_scaler = joblib.load(corrector_dir / "scaler_pred.joblib")
+    target_scaler = joblib.load(corrector_dir / "scaler_target.joblib")
+
+    # Нормализация входных предсказаний
+    nn_preds_scaled = pred_scaler.transform(nn_preds)
+
+    # Получение откорректированных предсказаний
+    corrected_scaled = model.predict(nn_preds_scaled)
+
+    # Обратное преобразование в исходный масштаб
+    corrected = target_scaler.inverse_transform(corrected_scaled)
+    return corrected
 
 
 
@@ -33,7 +156,7 @@ def main():
     print("Создаем фильтр")
     orig_filter = common.create_origin_filter(configs.ENV_ORIGIN_DATA_PATH)
     print("Создаем сэмплеры")
-    samplers = common.create_lhs_samplers(orig_filter)
+    samplers = common.create_sampler(orig_filter, SamplerTypes.SAMPLER_SOBOL)
     ds_gen = CMTheoreticalDatasetGenerator(
         path_to_save_dataset=os.path.join(configs.ENV_DATASET_PATH, samplers.cms.type.name, f"{len(samplers.cms)}"),
         backend_type='ram',
@@ -43,8 +166,8 @@ def main():
     ds_gen.generate(samplers)
 
     ds = TouchstoneDataset(source=ds_gen.backend, in_memory=True)
-    # plot_distribution(ds, num_params=len(ds_gen.origin_filter.coupling_matrix.links))
-    # plt.show()
+    common.plot_distribution(ds, num_params=len(ds_gen.origin_filter.coupling_matrix.links))
+    plt.show()
 
     codec = MWFilterTouchstoneCodec.from_dataset(ds=ds,
                                                  keys_for_analysis=[f"m_{r}_{c}" for r, c in orig_filter.coupling_matrix.links])
@@ -101,7 +224,7 @@ def main():
         layer_channels=[64, 64, 128, 256],
         first_conv_kernel=8,
         first_conv_channels=64,
-        first_maxpool_kernel=2,
+        first_maxpool_kernel=3,
         activation_in='sigmoid',
         activation_block='swish',
         use_se=False,
@@ -111,7 +234,7 @@ def main():
     mlp = models.CorrectionMLP(
         input_dim=len(codec.x_keys),
         output_dim=len(codec.x_keys),
-        hidden_dims=[8, 64, 4096],
+        hidden_dims=[32, 16, 1024],
         activation_fun='soft_sign'
     )
 
@@ -136,8 +259,8 @@ def main():
         scaler_in=dm.scaler_in,  # Скейлер для входных данных
         scaler_out=dm.scaler_out,  # Скейлер для выходных данных
         codec=codec,  # Кодек для преобразования данных
-        optimizer_cfg={"name": "Adam", "lr": 0.0007526812333573349},
-        scheduler_cfg={"name": "StepLR", "step_size": 14, "gamma": 0.15},
+        optimizer_cfg={"name": "Adam", "lr": 0.0005995097360712593},
+        scheduler_cfg={"name": "StepLR", "step_size": 20, "gamma": 0.05},
         # loss_fn=CustomLosses("error"),
         loss_fn=nn.MSELoss()
     )
@@ -176,25 +299,31 @@ def main():
     # Загружаем лучшую модель
     inference_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
         # checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=12-val_loss=0.01266-train_loss=0.01224.ckpt",
-        # checkpoint_path="saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=47-val_loss=0.01193-train_loss=0.01149-val_r2=0.85343.ckpt",
+        # checkpoint_path="saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=44-val_loss=0.01375-train_loss=0.01269-val_r2=0.83169.ckpt",
         checkpoint_path=checkpoint.best_model_path,
         model=model
     ).to(lit_model.device)
-    orig_fil, pred_fil = inference_model.predict(dm, idx=0)
-    inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
-    optim_matrix = optimize_cm(pred_fil, orig_fil)
-    error_matrix_pred = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, pred_fil.coupling_matrix)
-    error_matrix_optim = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, optim_matrix)
 
-    error_matrix_optim.plot_matrix(title="Optimized de-tuned matrix errors", cmap="YlOrBr")
-    optim_matrix.plot_matrix(title="Optimized de-tuned matrix")
-    error_matrix_pred.plot_matrix(title="Predict de-tuned matrix errors", cmap="YlOrBr")
-    pred_fil.coupling_matrix.plot_matrix(title="Predict de-tuned matrix")
-    orig_fil.coupling_matrix.plot_matrix(title="Origin de-tuned matrix")
+
+    # train_corrector(inference_model, datamodule=dm, output_dir="saved_models\\EAMU4-KuIMUXT3-BPFC1\\ml-correctors")
+
+    # orig_fil, pred_fil = inference_model.predict(dm, idx=0)
+    # inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
+    # optim_matrix = optimize_cm(pred_fil, orig_fil)
+    # error_matrix_pred = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, pred_fil.coupling_matrix)
+    # error_matrix_optim = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, optim_matrix)
+
+    # error_matrix_optim.plot_matrix(title="Optimized de-tuned matrix errors", cmap="YlOrBr")
+    # optim_matrix.plot_matrix(title="Optimized de-tuned matrix")
+    # error_matrix_pred.plot_matrix(title="Predict de-tuned matrix errors", cmap="YlOrBr")
+    # pred_fil.coupling_matrix.plot_matrix(title="Predict de-tuned matrix")
+    # orig_fil.coupling_matrix.plot_matrix(title="Origin de-tuned matrix")
 
     # Предсказываем эталонный фильтр
     orig_fil = ds_gen.origin_filter
     pred_prms = inference_model.predict_x(orig_fil)
+    # corrected = predict_with_corrector(np.array(list(pred_prms.values())).reshape(1, -1), "saved_models\\EAMU4-KuIMUXT3-BPFC1\\ml-correctors")
+    # corr_prms = dict(zip(pred_prms.keys(), list(corrected.reshape(-1))))
     pred_fil = inference_model.create_filter_from_prediction(orig_fil, pred_prms, meta)
     inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
     optim_matrix = optimize_cm(pred_fil, orig_fil)
@@ -203,6 +332,8 @@ def main():
     error_matrix_optim.plot_matrix(title="Optimized tuned matrix errors")
     error_matrix_pred.plot_matrix(title="Predict tuned matrix errors")
     orig_fil.coupling_matrix.plot_matrix(title="Origin tuned matrix")
+    pred_fil.coupling_matrix.plot_matrix(title="Predict tuned matrix")
+    optim_matrix.plot_matrix(title="Optimized tuned matrix")
 
     # start_time = time.time()
     # predict_for_test_dataset(codec_main_coupling=codec_main_coupling, codec_self_coupling=codec_self_coupling,
