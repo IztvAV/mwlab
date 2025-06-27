@@ -17,5 +17,6 @@ mwlab.opt.tolerance
 """
 
 from .core import ToleranceAnalyzer
+from .projection import ProjectionBoxOptimizer
 
-__all__ = ["ToleranceAnalyzer"]
+__all__ = ["ToleranceAnalyzer", "ProjectionBoxOptimizer"]

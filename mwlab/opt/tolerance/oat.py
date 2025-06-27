@@ -15,6 +15,7 @@ oat.py
 
 from __future__ import annotations
 from typing import Dict, Tuple, Sequence
+from tqdm import tqdm
 
 import numpy as np
 
@@ -73,7 +74,7 @@ class IndividualBoundsFinder:
         • `n_mc`      – размер Монте-Карло при оценке yield.
         """
         deltas: Dict[str, float | Tuple[float, float]] = {}
-        for p in params:                                         # TODO: parallel
+        for p in tqdm(params, desc="Поиск допусков для каждого параметра"):            # TODO: parallel
             if p not in self._names:
                 raise KeyError(f"параметр '{p}' не найден в DesignSpace")
             idx = self._names.index(p)
@@ -150,19 +151,21 @@ class IndividualBoundsFinder:
         else:
             raise ValueError(side)
 
-        sub_space = self.space.freeze_axes(
-            [n for n in self._names if n != name]
-        ).from_center_delta(
-            centers={name: self._centers[self._names.index(name)]},
-            delta=delta_dict,
+        # --- формируем «полный» словарь центров и радиусов --------------
+        centers_all = {n: self._centers[self._names.index(n)] for n in self._names}
+        delta_full = {n: 0.0 for n in self._names}  # δ = 0 для неактивных
+        delta_full.update(delta_dict)  # заменяем активный
+
+        sub_space = DesignSpace.from_center_delta(
+            centers_all,
+            delta=delta_full,
             mode="abs",
         )
 
-        yobj = YieldObjective(
-            surrogate=self.sur,
-            spec=self.spec,
-            design_space=sub_space,
-            n_mc=n_mc,
-            sampler=get_sampler("sobol", rng=self.seed),
-        )
-        return yobj()
+        pts = sub_space.sample(n_mc, sampler=get_sampler("latin", rng=self.seed),
+                               reject_invalid=False)
+        preds = self.sur.batch_predict(pts)
+        if isinstance(preds[0], (bool, np.bool_)):
+            return float(np.mean(preds))
+
+        return float(np.mean([self.spec.is_ok(net) for net in preds]))

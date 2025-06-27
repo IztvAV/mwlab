@@ -55,7 +55,7 @@ class JointBoxOptimizer:
         target_yield: float = 0.99,
         n_mc: int = 8192,
         method: str = "slsqp",
-        max_iter: int = 200,
+        max_iter: int = 1000,
         verbose: bool = False,
     ) -> Tuple[Dict[str, float | Tuple[float, float]], OptimizeResult]:
         """
@@ -64,6 +64,15 @@ class JointBoxOptimizer:
         δ_dict содержит **симметричные** или асимметричные радиусы,
         точно в той же форме, что и `delta_upper`.
         """
+
+        # отфильтровываем нулевые δ (важно для CMA-ES)
+        delta_upper = {k: v for k, v in delta_upper.items()
+                       if (isinstance(v, tuple) and (v[0] != 0 or v[1] != 0))
+                       or (not isinstance(v, tuple) and v != 0)}
+
+        if not delta_upper:
+            raise ValueError("Все радиусы δ равны 0 — оптимизировать нечего")
+
         names = list(delta_upper)
         k = len(names)
 
@@ -109,12 +118,15 @@ class JointBoxOptimizer:
 
         def _subspace(vec):
             δ = _dict_from_vec(vec)
-            # переводим в формат DesignSpace.from_center_delta
-            return self.space.freeze_axes(
-                [q for q in self._names if q not in names]
-            ).from_center_delta(
-                centers={n: self._centers[self._names.index(n)] for n in names},
-                delta=δ,
+            # --- формируем ПОЛНЫЙ словарь центров + радиусов ------------
+            centers_all = {n: self._centers[self._names.index(n)]
+                           for n in self._names}          # все параметры
+            delta_full = {n: 0.0 for n in self._names}  # δ=0 по умолчанию
+            delta_full.update(δ)  # активные δ
+
+            return DesignSpace.from_center_delta(
+                centers_all,
+                delta=delta_full,
                 mode="abs",
             )
 
@@ -124,14 +136,22 @@ class JointBoxOptimizer:
 
         def yield_constraint(vec):
             ds = _subspace(vec)
-            y = YieldObjective(
-                surrogate=self.sur,
-                spec=self.spec,
-                design_space=ds,
-                sampler=get_sampler("sobol", rng=self.seed),
-                n_mc=n_mc
-            )()
-            return y - target_yield
+            # --- Monte-Carlo выборка -----------------------------------
+            pts = ds.sample(
+                n_mc,
+                sampler=get_sampler("latin", rng=self.seed),
+                reject_invalid=False,
+            )
+            preds = self.sur.batch_predict(pts)
+            # Если surrogate выдаёт bool → берём среднее.
+            # Иначе (старые surrogate)     → проверяем через Specification.
+            if isinstance(preds[0], (bool, np.bool_)):
+                yld = float(np.mean(preds))
+            else:
+                ok = [self.spec.is_ok(net) for net in preds]
+                yld = float(np.mean(ok))
+
+            return yld - target_yield
 
         # ---------------------- запуск оптимизации -----------------------
         if method.lower() == "slsqp":
@@ -164,6 +184,7 @@ class JointBoxOptimizer:
                 es.tell(xs, fs)
             best = es.result.xbest
             res = OptimizeResult(x=best, fun=objective(best), nit=es.result.iterations)
+            print(_dict_from_vec(best))
             return _dict_from_vec(best), res
 
         else:
