@@ -8,3 +8,6 @@ pandas
 xarray
 lightning
 h5py
+scikit-learn
+lightgbm
+catboost

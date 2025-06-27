@@ -1,1 +1,1 @@
-from .scalers import StdScaler, MinMaxScaler
+from .scalers import StdScaler, MinMaxScaler, RobustScaler
