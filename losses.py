@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchmetrics
 
+from filters import CouplingMatrix, MWFilter
+
 
 class CustomLosses(nn.Module):
     def __init__(self, loss_name="mse", **kwargs):
@@ -14,6 +16,36 @@ class CustomLosses(nn.Module):
     def forward(self, y_pred, y_true):
         if self.loss_name == "mse":
             return F.mse_loss(y_pred, y_true)
+        elif self.loss_name == "reg_with_s_parameters":
+            orig_fil = self.params["orig_fil"]
+            scaler_in = self.params["dm"].scaler_in
+            scaler_out = self.params["dm"].scaler_out
+            fast_calc = self.params["fast_calc"]
+            if scaler_out is not None:
+                m_pred = CouplingMatrix.from_factors(scaler_out.inverse(y_pred), orig_fil.coupling_matrix.links,
+                                                     orig_fil.coupling_matrix.matrix_order)
+                m_true = CouplingMatrix.from_factors(scaler_out.inverse(y_true), orig_fil.coupling_matrix.links,
+                                                     orig_fil.coupling_matrix.matrix_order)
+            else:
+                m_pred = CouplingMatrix.from_factors(y_pred, orig_fil.coupling_matrix.links,
+                                                     orig_fil.coupling_matrix.matrix_order)
+                m_true = CouplingMatrix.from_factors(y_true, orig_fil.coupling_matrix.links,
+                                                     orig_fil.coupling_matrix.matrix_order)
+            _, s11_pred, s21_pred = fast_calc.BatchedRespM2(m_pred)
+            _, s11_true, s21_true = fast_calc.BatchedRespM2(m_true)
+            loss = F.mse_loss(y_pred, y_true) + F.l1_loss(y_pred, y_true) + self.params["weight_decay"]*(F.l1_loss(s11_true.real, s11_pred.real) + F.l1_loss(s11_true.imag, s11_pred.imag)
+                                                                             + F.l1_loss(s21_true.real, s21_pred.real) + F.l1_loss(s21_true.imag, s21_pred.imag))
+            return loss
+        elif self.loss_name == "mse_with_l1":
+            if self.params.get("weights") is None:
+                weights = 1
+            else:
+                weights = self.params.get("weights").to("cuda")
+            y_true = weights*y_true
+            y_pred = weights*y_pred
+            return F.mse_loss(y_pred, y_true) + self.params.get("weight_decay", 1)*F.l1_loss(y_pred, y_true)
+        elif self.loss_name == "l1_with_mse":
+            return self.params["weight_decay"] * F.mse_loss(y_pred, y_true) + F.l1_loss(y_pred, y_true)
         elif self.loss_name == "log_mse":
             return torch.log10(F.mse_loss(y_pred, y_true))
         elif self.loss_name == "pow_mse":

@@ -2,6 +2,8 @@ import copy
 import os
 import numpy as np
 import torch
+from torch import dtype
+
 from mwlab import TouchstoneData, TouchstoneDataset
 from ..filter import MWFilter, CouplingMatrix
 from ..utils import Sampler, SamplerTypes
@@ -35,6 +37,8 @@ class CMShifts:
     self_coupling: float
     mainline_coupling: float
     cross_coupling: float
+    parasitic_coupling: float
+    absolute: bool = True
 
 
 @dataclass
@@ -100,21 +104,48 @@ class CMTheoreticalDatasetGeneratorSamplers:
     def create_min_max_matrices(origin_matrix: CouplingMatrix, deltas: CMShifts):
         Mmin = origin_matrix.matrix
         Mmax = origin_matrix.matrix
+        N = origin_matrix.matrix_order
+        antidiagonal = [(i, N - 1 - i) for i in range(N)]
 
-        for (i, j) in origin_matrix.links:
-            if i == j:
-                Mmin[i][j] -= deltas.self_coupling
-                Mmax[i][j] += deltas.self_coupling
-            elif j == (i + 1):
-                Mmin[i][j] -= deltas.mainline_coupling
-                Mmin[j][i] -= deltas.mainline_coupling
-                Mmax[i][j] += deltas.mainline_coupling
-                Mmax[j][i] += deltas.mainline_coupling
-            else:
-                Mmin[i][j] -= deltas.cross_coupling
-                Mmin[j][i] -= deltas.cross_coupling
-                Mmax[i][j] += deltas.cross_coupling
-                Mmax[j][i] += deltas.cross_coupling
+        if not deltas.absolute:
+            for (i, j) in origin_matrix.links:
+                if i == j:
+                    shift = deltas.self_coupling
+                elif j == (i + 1):
+                    shift = deltas.mainline_coupling
+                elif (i, j) in antidiagonal:
+                    shift = deltas.cross_coupling
+                else:
+                    shift = deltas.parasitic_coupling
+                m_min_ = (1-shift)*Mmin[i][j]
+                m_max_ = (1+shift)*Mmax[i][j]
+                m_min = min(m_min_, m_max_)
+                m_max = max(m_min_, m_max_)
+                Mmin[i][j] = m_min
+                Mmin[j][i] = m_min
+                Mmax[i][j] = m_max
+                Mmax[j][i] = m_max
+        else:
+            for (i, j) in origin_matrix.links:
+                if i == j:
+                    Mmin[i][j] -= deltas.self_coupling
+                    Mmax[i][j] += deltas.self_coupling
+                elif j == (i + 1):
+                    Mmin[i][j] -= deltas.mainline_coupling
+                    Mmin[j][i] -= deltas.mainline_coupling
+                    Mmax[i][j] += deltas.mainline_coupling
+                    Mmax[j][i] += deltas.mainline_coupling
+                elif (i, j) in antidiagonal:
+                    Mmin[i][j] -= deltas.cross_coupling
+                    Mmin[j][i] -= deltas.cross_coupling
+                    Mmax[i][j] += deltas.cross_coupling
+                    Mmax[j][i] += deltas.cross_coupling
+                else:
+                    Mmin[i][j] -= deltas.parasitic_coupling
+                    Mmin[j][i] -= deltas.parasitic_coupling
+                    Mmax[i][j] += deltas.parasitic_coupling
+                    Mmax[j][i] += deltas.parasitic_coupling
+
         return Mmin, Mmax
 
     @staticmethod
@@ -136,24 +167,26 @@ class CMTheoreticalDatasetGenerator:
                  filename: str,
                  orig_filter: MWFilter,
                  backend_type: str = 'ram',
-                 backend_kwargs: dict = {}
+                 backend_kwargs: dict = {},
+                 rewrite: bool = False
                  ):
         self._path_to_save_dataset = path_to_save_dataset
         self._backend_type = backend_type
         self._filename = filename + self._FILENAME_SUFFIX[self._backend_type]
-        self._backend = self.create_backend(backend_type, backend_kwargs)
+        self._backend = self.create_backend(backend_type, backend_kwargs, rewrite)
         self._origin_filter = orig_filter
 
     def _full_dataset_path(self):
         return os.path.join(self._path_to_save_dataset, self._filename)
 
-    def _check_dataset(self) -> bool:
+    def _check_dataset(self, rewrite) -> bool:
+        if rewrite: return True
         return not os.path.exists(self._full_dataset_path())
 
-    def create_backend(self, backend_type: str, backend_kwargs: dict) -> StorageBackend:
+    def create_backend(self, backend_type: str, backend_kwargs: dict, rewrite) -> StorageBackend:
         if not backend_type in AVAILABLE_BACKEND_TYPES:
             raise ValueError(f"Unsupported backed: {backend_type}")
-        self._enable_generate = self._check_dataset()
+        self._enable_generate = self._check_dataset(rewrite)
         if not self._enable_generate:
             print(f"Directory already have dataset files. Load backend from existing")
             if backend_type == 's2p':
@@ -202,6 +235,8 @@ class CMTheoreticalDatasetGenerator:
             cm_factors = samplers.cms[idx]
             new_matrix = CouplingMatrix.from_factors(factors=torch.tensor(cm_factors, dtype=torch.float32), links=self.origin_filter.coupling_matrix.links,
                                         matrix_order=self.origin_filter.coupling_matrix.matrix_order)
+            if torch.isnan(new_matrix).any() or torch.isinf(new_matrix).any():
+                raise ValueError("⚠️ Input to model contains NaN or Inf")
             ps_shifts = samplers.pss[idx]
             s_params = MWFilter.response_from_coupling_matrix(M=new_matrix, f0=self._origin_filter.f0,
                                                        FBW=self._origin_filter.fbw, Q=self._origin_filter.Q,
@@ -210,6 +245,9 @@ class CMTheoreticalDatasetGenerator:
             new_filter = MWFilter(f0=self._origin_filter.f0, order=self._origin_filter.order, bw=self._origin_filter.bw,
                                   Q=self._origin_filter.Q, matrix=new_matrix, frequency=self._origin_filter.f, s=s_params, z0=50)
             ts = new_filter.to_touchstone_data()
+            params = torch.tensor(list(ts.params.values()), dtype=torch.float32)
+            if torch.isnan(params).any() or torch.isinf(params).any():
+                raise ValueError("⚠️ Params contains NaN or Inf")
             self._backend.append(ts)
         if self._backend_type == 'ram':
             self._backend.dump_pickle(self._full_dataset_path())

@@ -17,18 +17,18 @@ def create_bounds(origin_matrix: CouplingMatrix):
 
     for (i, j) in origin_matrix.links:
         if i == j:
-            Mmin[i][j] -= 1.5*Mmin[i][j]
-            Mmax[i][j] += 1.5*Mmax[i][j]
+            Mmin[i][j] -= 2*Mmin[i][j]
+            Mmax[i][j] += 2*Mmax[i][j]
         elif j == (i + 1):
-            Mmin[i][j] -= 0.01*Mmin[i][j]
-            Mmin[j][i] -= 0.01*Mmin[j][i]
-            Mmax[i][j] += 0.01*Mmax[i][j]
-            Mmax[j][i] += 0.01*Mmax[j][i]
+            Mmin[i][j] -= 0.5*Mmin[i][j]
+            Mmin[j][i] -= 0.5*Mmin[j][i]
+            Mmax[i][j] += 0.5*Mmax[i][j]
+            Mmax[j][i] += 0.5*Mmax[j][i]
         else:
-            Mmin[i][j] -= 1.1*Mmin[i][j]
-            Mmin[j][i] -= 1.1*Mmin[j][i]
-            Mmax[i][j] += 1.1*Mmax[i][j]
-            Mmax[j][i] += 1.1*Mmax[j][i]
+            Mmin[i][j] -= 2*Mmin[i][j]
+            Mmin[j][i] -= 2*Mmin[j][i]
+            Mmax[i][j] += 2*Mmax[i][j]
+            Mmax[j][i] += 2*Mmax[j][i]
     return CouplingMatrix(torch.tensor(Mmin, dtype=torch.float32)), CouplingMatrix(torch.tensor(Mmax, dtype=torch.float32))
 
 
@@ -42,12 +42,31 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
         M = CouplingMatrix.from_factors(x, links, matrix_order)
         _, s11_pred, s21_pred = fast_calc.RespM2(M)
 
+        def normalize(tensor: torch.Tensor):
+            mean = tensor.mean()
+            std = tensor.std()
+            return (tensor - mean) / (std + 1e-8)  # добавим epsilon, чтобы избежать деления на 0
+            # return tensor
+            # min = tensor.min()
+            # max = tensor.max()
+            # return (tensor - min) / (max - min)
+
+        s11_pred_db = normalize(MWFilter.to_db(s11_pred))
+        s21_pred_db = normalize(MWFilter.to_db(s21_pred))
+        s11_origin_db = normalize(s11_origin_db)
+        s21_origin_db = normalize(s21_origin_db)
+
+        # Loss
         loss = (
-                torch.nn.MSELoss()(MWFilter.to_db(s11_pred), s11_origin_db) +
-                torch.nn.MSELoss()(MWFilter.to_db(s21_pred), s21_origin_db)
-                )
+                1.0*torch.nn.L1Loss()(s11_pred_db, s11_origin_db) +
+                1.0*torch.nn.L1Loss()(s21_pred_db, s21_origin_db) +
+                1.0*torch.nn.MSELoss()(s11_pred_db, s11_origin_db) +
+                1.0*torch.nn.MSELoss()(s21_pred_db, s21_origin_db)
+        )
+        reg = 0.01 * torch.norm(x, p=2)  # L2-регуляризация
+        loss += reg
+
         loss.backward()
-        # print(f"{loss.item()}")
         return loss.item(), x.grad.detach().numpy()
 
     print("Start optimize (L-BFGS-B)")

@@ -1,9 +1,14 @@
 import copy
+import math
 
 import torch
 from torch import nn
 import torch.nn.functional as F
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import r2_score
 
+import filters.mwfilter_lightning
 from filters import MWFilter, CouplingMatrix
 from filters.mwfilter_optim.base import FastMN2toSParamCalculation
 
@@ -788,10 +793,13 @@ class Simple_Opt_3(nn.Module):
         self.seq_fc = nn.Sequential(
             # --------------------------  fc-слои ---------------------------
             nn.Linear(64 * 26, 2048),
+            # nn.LayerNorm(2048),
             nn.ReLU(),
             nn.Linear(2048, 1024),
+            # nn.LayerNorm(1024),
             nn.ReLU(),
             nn.Linear(1024, 512),
+            # nn.LayerNorm(512),
             nn.ReLU(),
             nn.Linear(512, out_channels),  # N - количество ненулевых элементов матрицы связи
             nn.Tanh()
@@ -971,55 +979,67 @@ class ResNetRNN(nn.Module):
         return out
 
 
-class MLPMixerBlock1D(nn.Module):
-    def __init__(self, num_tokens, num_channels, token_dim, channel_dim):
+class MixerBlock1D(nn.Module):
+    def __init__(self, num_tokens, num_channels, token_mlp_dim, channel_mlp_dim):
         super().__init__()
-        # Token-mixing MLP
-        self.token_mixing = nn.Sequential(
-            nn.LayerNorm(num_tokens),
-            nn.Linear(num_tokens, token_dim),
-            nn.GELU(),
-            nn.Linear(token_dim, num_tokens),
-        )
-        # Channel-mixing MLP
-        self.channel_mixing = nn.Sequential(
-            nn.LayerNorm(num_channels),
-            nn.Linear(num_channels, channel_dim),
-            nn.GELU(),
-            nn.Linear(channel_dim, num_channels),
-        )
+        self.token_norm = nn.LayerNorm(num_channels)  # по каналам
+        self.token_fc1 = nn.Linear(num_tokens, token_mlp_dim)
+        self.token_act = nn.GELU()
+        self.token_fc2 = nn.Linear(token_mlp_dim, num_tokens)
+
+        self.channel_norm = nn.LayerNorm(num_channels)
+        self.channel_fc1 = nn.Linear(num_channels, channel_mlp_dim)
+        self.channel_act = nn.GELU()
+        self.channel_fc2 = nn.Linear(channel_mlp_dim, num_channels)
 
     def forward(self, x):
-        # x: (B, C, T)
-        y = x.transpose(1, 2)  # (B, T, C)
-        y = y + self.token_mixing(y)
+        # x: (B, T, C)
+        y = self.token_norm(x)  # LayerNorm по каналам (последняя ось C)
+
+        # Для token mixing хотим применить линейный слой по токенам (T)
+        # Линейный слой ожидает признаки на последней оси,
+        # поэтому меняем местами T и C:
         y = y.transpose(1, 2)  # (B, C, T)
-        y = y + self.channel_mixing(y)
-        return y
+
+        y = self.token_fc1(y)
+        y = self.token_act(y)
+        y = self.token_fc2(y)
+
+        y = y.transpose(1, 2)  # обратно в (B, T, C)
+        x = x + y
+
+        # channel mixing:
+        z = self.channel_norm(x)
+        z = self.channel_fc1(z)
+        z = self.channel_act(z)
+        z = self.channel_fc2(z)
+
+        return x + z
+
 
 class MLPMixer1D(nn.Module):
-    def __init__(self, input_channels, input_length, num_blocks=4,
-                 token_dim=64, channel_dim=128, hidden_dim=256, output_dim=1):
+    def __init__(self,
+                 num_tokens=301,
+                 num_channels=8,
+                 token_mlp_dim=256,
+                 channel_mlp_dim=512,
+                 num_blocks=4,
+                 out_dim=30):
         super().__init__()
-        # "Patch embedding": в 1D это conv1d
-        self.patch_embed = nn.Conv1d(input_channels, hidden_dim, kernel_size=3, padding=1)
-        # Mixer blocks
-        self.mixer_blocks = nn.Sequential(
-            *[MLPMixerBlock1D(input_length, hidden_dim, token_dim, channel_dim)
-              for _ in range(num_blocks)]
-        )
-        # Final head
-        self.pool = nn.AdaptiveAvgPool1d(1)
-        self.fc = nn.Linear(hidden_dim, output_dim)
+        self.mixer_blocks = nn.Sequential(*[
+            MixerBlock1D(num_tokens, num_channels, token_mlp_dim, channel_mlp_dim)
+            for _ in range(num_blocks)
+        ])
+        self.norm = nn.LayerNorm(num_channels)
+        self.head = nn.Linear(num_channels, out_dim)
 
     def forward(self, x):
-        # x: (B, C, T)
-        x = self.patch_embed(x)  # (B, hidden_dim, T)
-        x = self.mixer_blocks(x)  # (B, hidden_dim, T)
-        x = self.pool(x).squeeze(-1)  # (B, hidden_dim)
-        x = self.fc(x)  # (B, output_dim)
-        return x
-
+        # x: (B, C, T) -> (B, T, C)
+        x = x.permute(0, 2, 1)
+        x = self.mixer_blocks(x)
+        x = self.norm(x)  # нормируем по каналам
+        x = x.mean(dim=1)  # усреднение по токенам
+        return self.head(x)
 
 class ResNetRNNSequence(nn.Module):
     def __init__(self,
@@ -1165,3 +1185,572 @@ class MultiChannel1Dto2D(nn.Module):
             return out
 
         return x
+class Swish(nn.Module):
+    """Активация Swish (Silu)"""
+    def forward(self, x):
+        return x * torch.sigmoid(x)
+
+class MBConv1DBlock(nn.Module):
+    """MBConv-блок для 1D данных (аналог MobileNetV2 + SE-блок)"""
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int,
+        expand_ratio: int,
+        se_ratio: float = 0.25,
+        dropout_rate: float = 0.0,
+    ):
+        super().__init__()
+        expanded_channels = in_channels * expand_ratio
+        self.use_residual = (in_channels == out_channels) and (stride == 1)
+
+        # Expansion phase (если expand_ratio != 1)
+        self.expand = None
+        if expand_ratio != 1:
+            self.expand = nn.Sequential(
+                nn.Conv1d(in_channels, expanded_channels, 1, bias=False),
+                nn.BatchNorm1d(expanded_channels),
+                Swish(),
+            )
+
+        # Depthwise-свертка
+        self.depthwise = nn.Sequential(
+            nn.Conv1d(
+                expanded_channels,
+                expanded_channels,
+                kernel_size,
+                stride=stride,
+                padding=kernel_size // 2,
+                groups=expanded_channels,
+                bias=False,
+            ),
+            nn.BatchNorm1d(expanded_channels),
+            Swish(),
+        )
+
+        # Squeeze-and-Excitation (SE-блок)
+        squeezed_channels = max(1, int(in_channels * se_ratio))
+        self.se = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Conv1d(expanded_channels, squeezed_channels, 1),
+            Swish(),
+            nn.Conv1d(squeezed_channels, expanded_channels, 1),
+            nn.Sigmoid(),
+        )
+
+        # Pointwise-свертка
+        self.project = nn.Sequential(
+            nn.Conv1d(expanded_channels, out_channels, 1, bias=False),
+            nn.BatchNorm1d(out_channels),
+        )
+
+        self.dropout = nn.Dropout(dropout_rate) if dropout_rate > 0 else nn.Identity()
+
+    def forward(self, x):
+        residual = x
+        if self.expand:
+            x = self.expand(x)
+        x = self.depthwise(x)
+        x = self.se(x) * x  # SE-блок
+        x = self.project(x)
+        if self.use_residual:
+            x = self.dropout(x)
+            x = x + residual
+        return x
+
+
+
+class EfficientNet1D(nn.Module):
+    """1D-версия EfficientNet с настраиваемыми гиперпараметрами"""
+    def __init__(
+        self,
+        in_channels: int = 1,
+        num_classes: int = 1,  # Для регрессии
+        width_coeff: float = 1.0,
+        depth_coeff: float = 1.0,
+        dropout_rate: float = 0.2,
+        se_ratio: float = 0.25,
+        stochastic_depth: bool = False,
+    ):
+        super().__init__()
+        # Базовые параметры блоков (аналоги EfficientNet-B0)
+        base_channels = [32, 16, 24, 40, 80, 112, 192, 320]
+        base_depths = [1, 2, 2, 3, 3, 4, 1]
+        kernel_sizes = [3, 3, 5, 3, 5, 5, 3]
+        strides = [1, 2, 2, 2, 1, 2, 1]
+        expand_ratios = [1, 6, 6, 6, 6, 6, 6]
+
+        # Масштабирование ширины и глубины
+        channels = [math.ceil(c * width_coeff) for c in base_channels]
+        depths = [math.ceil(d * depth_coeff) for d in base_depths]
+
+        # Первая свертка
+        self.stem = nn.Sequential(
+            nn.Conv1d(in_channels, channels[0], 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm1d(channels[0]),
+            Swish(),
+        )
+
+        # MBConv-блоки
+        blocks = []
+        for i in range(7):
+            for j in range(depths[i]):
+                stride = strides[i] if j == 0 else 1
+                blocks.append(
+                    MBConv1DBlock(
+                        in_channels=channels[i] if j == 0 else channels[i + 1],
+                        out_channels=channels[i + 1],
+                        kernel_size=kernel_sizes[i],
+                        stride=stride,
+                        expand_ratio=expand_ratios[i],
+                        se_ratio=se_ratio,
+                        dropout_rate=dropout_rate,
+                    )
+                )
+        self.blocks = nn.Sequential(*blocks)
+
+        # Финальные слои
+        self.head = nn.Sequential(
+            nn.Conv1d(channels[-1], channels[-1], 1, bias=False),
+            nn.BatchNorm1d(channels[-1]),
+            Swish(),
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(channels[-1], num_classes),
+        )
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.blocks(x)
+        x = self.head(x)
+        return x
+
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+#   BasicBlock2D (аналог обычного блока ResNet, но в 2‑D)
+# ────────────────────────────────────────────────────────────────────────────────
+class BasicBlock2D(nn.Module):
+    expansion = 1
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        stride: tuple[int, int] = 1,
+        activation: str = "relu",
+        use_se: bool = False,
+        se_reduction: int = 16,
+    ):
+        super().__init__()
+
+        self.conv1 = nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
+        )
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.act = get_activation(activation)
+
+        self.conv2 = nn.Conv2d(
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
+        self.bn2 = nn.BatchNorm2d(out_channels)
+
+        # сокращённый SE‑блок (по желанию)
+        self.use_se = use_se
+        if use_se:
+            self.se = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Conv2d(out_channels, out_channels // se_reduction, kernel_size=1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(out_channels // se_reduction, out_channels, kernel_size=1),
+                nn.Sigmoid(),
+            )
+
+        # если размерность или stride изменились — делаем shortcut‑проекцию
+        self.shortcut = (
+            nn.Identity()
+            if (in_channels == out_channels and stride == 1)
+            else nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels),
+            )
+        )
+
+    def forward(self, x):
+        identity = self.shortcut(x)
+
+        out = self.act(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+
+        if self.use_se:
+            scale = self.se(out)
+            out = out * scale
+
+        out += identity
+        out = self.act(out)
+        return out
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+#   ResNet‑Flexible 2‑D
+# ────────────────────────────────────────────────────────────────────────────────
+class ResNet2DFlexible(nn.Module):
+    """
+    Вход (без частот):  (B, C_in, N)
+    После добавления f: (B, 1, C_in+1, N)  → Conv2d
+    Выход: (B, out_channels)
+    """
+
+    def __init__(
+        self,
+        freq_vector: torch.Tensor,          # ← 1‑D тензор нормированных частот
+        in_channels: int = 8,               # число исходных S‑каналов
+        out_channels: int = 30,             # размер выходного вектора
+        first_conv_channels: int = 64,
+        first_conv_kernel: int = 7,
+        first_maxpool_kernel: int = 3,
+        layer_channels: list[int] = [64, 128, 256, 512],
+        # layer_channels: list[int] = [128, 256, 256],
+        # num_blocks: list[int] = [2, 1, 3],
+        num_blocks: list[int] = [2, 2, 2, 2],
+        activation_in: str = "relu",
+        activation_block: str = "relu",
+        use_se: bool = True,
+        se_reduction: int = 16,
+    ):
+        super().__init__()
+
+        self.activation = get_activation(activation_in)
+
+        # ----------  Сохраняем / регистрируем вектор частот  -------------------
+        # freq_vector должен иметь shape (N,)
+        self.register_buffer("freq_vector", freq_vector.float().unsqueeze(0))  # (1, N)
+
+        # ----------  Первый 2‑D conv  -----------------------------------------
+        #   in_channels_2d = 1 (мы подадим 1 "карту", где высота = C_in+1)
+        self.conv1 = nn.Conv2d(
+            1,
+            first_conv_channels,
+            kernel_size=(3, first_conv_kernel),
+            stride=2,
+            padding=first_conv_kernel // 2,
+            bias=False,
+        )
+        self.bn1 = nn.BatchNorm2d(first_conv_channels)
+        self.maxpool = nn.MaxPool2d(
+            kernel_size=first_maxpool_kernel,
+            stride=2,
+            padding=first_maxpool_kernel // 2,
+        )
+
+        # ----------  ResNet‑stack  --------------------------------------------
+        self.layers = nn.ModuleList()
+        in_ch = first_conv_channels
+        for out_ch, n_blocks in zip(layer_channels, num_blocks):
+            stride = 2 if in_ch != out_ch else 1
+            self.layers.append(
+                self.make_layer(
+                    in_ch,
+                    out_ch,
+                    n_blocks,
+                    stride=stride,
+                    activation=activation_block,
+                    use_se=use_se,
+                    se_reduction=se_reduction,
+                )
+            )
+            in_ch = out_ch
+
+        # ----------  Голова  ---------------------------------------------------
+        self.avgpool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Linear(in_ch, out_channels)
+
+        # ----------  Shortcut‑ветвь для исходного 1‑D сигнала ------------------
+        self.shortcut = nn.Sequential(
+            nn.BatchNorm1d(in_channels),
+            nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=1, bias=False),
+            nn.AdaptiveAvgPool1d(1),
+        )
+
+    # ────────────────────────────────────────────────────────────────────────
+    @staticmethod
+    def make_layer(in_channels, out_channels, num_blocks, stride,
+                   activation, use_se, se_reduction):
+        layers = [
+            BasicBlock2D(in_channels, out_channels, stride,
+                         activation, use_se, se_reduction)
+        ]
+        for _ in range(1, num_blocks):
+            layers.append(
+                BasicBlock2D(out_channels, out_channels, (1, 1),
+                             activation, use_se, se_reduction)
+            )
+        return nn.Sequential(*layers)
+
+    # ────────────────────────────────────────────────────────────────────────
+    def forward(self, x):
+        """
+        x: (B, C_in, N)
+        """
+        B, C, N = x.shape
+
+        # -- 1. shortcut‑ветка (1‑D) для резидуального сложения на выходе
+        identity = self.shortcut(x)          # (B, out_channels, 1)
+        identity = identity.view(B, -1)      # (B, out_channels)
+
+        # -- 2. добавляем строку частот
+        #    freq_vector : (1, N) → (B, 1, N)
+        f = self.freq_vector.repeat(B, 1)        # (B, N)
+        f = f.unsqueeze(1)                       # (B, 1, N)
+        x = torch.cat([x, f], dim=1)             # (B, C_in+1, N)
+
+        # -- 3. превращаем в 2‑D: добавляем channel‑axis =1 → (B,1,H,W)
+        x = x.unsqueeze(1)                       # (B, 1, H=C+1, W=N)
+
+        x = self.activation(self.bn1(self.conv1(x)))
+        x = self.maxpool(x)
+
+        for layer in self.layers:
+            x = layer(x)
+
+        x = self.avgpool(x)      # (B, in_ch, 1, 1)
+        x = x.view(B, -1)        # (B, in_ch)
+        x = self.fc(x)           # (B, out_channels)
+
+        # -- 4. добавляем shortcut‑ветку
+        x += identity
+        return x
+
+
+import copy
+import torch
+import torch.nn as nn
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import r2_score
+from lightning.pytorch.callbacks import Callback
+
+# --- Base Analyzer ---
+class BlockImportanceAnalyzer:
+    def __init__(self, model: nn.Module, device: torch.device = None):
+        self.device = device or torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model = copy.deepcopy(model).to(self.device)
+        # collect blocks as (layer_idx, block_idx)
+        # if type(model) == ModelWithCorrection:
+        #     self.blocks = [(li, bi)
+        #                    for li, layer in enumerate(self.model.main.layers)
+        #                    for bi, _ in enumerate(layer)]
+        # else:
+        self.blocks = [(li, bi)
+                       for li, layer in enumerate(self.model.model._main_model.layers)
+                       for bi, _ in enumerate(layer)]
+
+    def compute_r2(self, dataloader):
+        self.model.eval()
+        preds, targets = [], []
+        with torch.no_grad():
+            for x, y in dataloader:
+                x, y = x.to(self.device), y.to(self.device)
+                out = self.model(x)
+                preds.append(out.cpu().numpy())
+                targets.append(y.cpu().numpy())
+        return r2_score(np.concatenate(targets), np.concatenate(preds))
+
+    def get_block(self, model, li, bi):
+        if type(model) == filters.mwfilter_lightning.MWFilterBaseLMWithMetrics:
+            return model.model._main_model.layers[li][bi]
+        else:
+            return model._main_model.layers[li][bi]
+
+# --- Callbacks ---
+class AblationCallback(Callback):
+    """Ablation: drop in R2 when bypassing each block"""
+    def __init__(self, val_dataloader):
+        self.val_dataloader = val_dataloader
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        analyzer = BlockImportanceAnalyzer(pl_module)
+        baseline = analyzer.compute_r2(self.val_dataloader)
+        drops = {}
+        orig = analyzer.model
+        for li, bi in analyzer.blocks:
+            m_copy = copy.deepcopy(orig)
+            blk = analyzer.get_block(m_copy, li, bi)
+            # bypass via shortcut
+            blk.forward = lambda x, sc=blk.shortcut: sc(x)
+            r2 = BlockImportanceAnalyzer(m_copy).compute_r2(self.val_dataloader)
+            drops[f"{li}-{bi}"] = baseline - r2
+        # plot
+        labels, values = zip(*drops.items())
+        plt.figure()
+        plt.bar(labels, values)
+        plt.xticks(rotation=90)
+        plt.title(f"Ablation importance (drop R2), baseline={baseline:.3f}")
+        plt.tight_layout()
+        # plt.show()
+
+class WeightNormCallback(Callback):
+    """Compute L1-norm of weights for each block"""
+    def on_validation_epoch_end(self, trainer, pl_module):
+        analyzer = BlockImportanceAnalyzer(pl_module)
+        norms = {}
+        for li, bi in analyzer.blocks:
+            blk = analyzer.get_block(analyzer.model, li, bi)
+            norms[f"{li}-{bi}"] = sum(p.abs().sum().item() for p in blk.parameters())
+        labels, values = zip(*norms.items())
+        plt.figure()
+        plt.bar(labels, values)
+        plt.xticks(rotation=90)
+        plt.title("Weight L1-norm per block")
+        plt.tight_layout()
+        # plt.show()
+
+class GradNormCallback(Callback):
+    """Compute gradient norm per block on one batch"""
+    def __init__(self, sample_batch):
+        self.sample_batch = sample_batch
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        analyzer = BlockImportanceAnalyzer(pl_module)
+        x, y = self.sample_batch
+        x, y = x.to(pl_module.device), y.to(pl_module.device)
+        # enable grad for validation
+        with torch.enable_grad():
+            pl_module.model.train()
+            pl_module.model.zero_grad()
+            out = pl_module.model(x)
+            loss = nn.MSELoss()(out, y)
+            loss.backward()
+        grads = {}
+        for li, bi in analyzer.blocks:
+            blk = analyzer.get_block(pl_module.model, li, bi)
+            grads[f"{li}-{bi}"] = sum(
+                p.grad.norm().item() for p in blk.parameters() if p.grad is not None
+            )
+        # reset model state
+        pl_module.model.zero_grad()
+        pl_module.model.eval()
+        # plot
+        labels, values = zip(*grads.items())
+        plt.figure()
+        plt.bar(labels, values)
+        plt.xticks(rotation=90)
+        plt.title("Gradient norm per block")
+        plt.tight_layout()
+        # plt.show()
+
+class ActivationCallback(Callback):
+    """Compute mean activation per block on one batch"""
+    def __init__(self, sample_batch):
+        self.sample_batch = sample_batch
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        analyzer = BlockImportanceAnalyzer(pl_module)
+        x, _ = self.sample_batch
+        x = x.to(pl_module.device)
+        acts = {}
+        handles = []
+        for li, bi in analyzer.blocks:
+            blk = analyzer.get_block(pl_module.model, li, bi)
+            handles.append(blk.register_forward_hook(
+                lambda m, i, o, key=f"{li}-{bi}": acts.setdefault(key, o.abs().mean().item())
+            ))
+        with torch.no_grad():
+            pl_module.model(x)
+        for h in handles: h.remove()
+        labels, values = zip(*acts.items())
+        plt.figure()
+        plt.bar(labels, values)
+        plt.xticks(rotation=90)
+        plt.title("Mean activation per block")
+        plt.tight_layout()
+        # plt.show()
+
+class TorchvisionModels(nn.Module):
+    def __init__(self,
+                 freq_vector: torch.Tensor,  # ← 1‑D тензор нормированных частот
+                 model: nn.Module
+                 ):
+        super().__init__()
+        self.register_buffer("freq_vector", freq_vector.float())  # (N)
+        self.model = model
+
+    def forward(self, x):
+        x = self.expand_to_2d(x, self.freq_vector)
+        x = self.model(x)
+        return x
+
+    import torch
+
+    def expand_to_2d(self, x_1d: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+        # x_2d = torch.einsum('bcn,f->bcnf', x_1d, freqs)
+        """
+        Преобразует тензор (B, 8, 301) + вектор частот (301,) → (B, 1, 9, 301)
+        """
+        B, C, N = x_1d.shape  # B=64, C=8, N=301
+        freq_vector = self.freq_vector.unsqueeze(0)
+        f = freq_vector.repeat(B, 1)        # (B, N)
+        f = f.unsqueeze(1)                       # (B, 1, N)
+        x_2d = torch.cat([x_1d, f], dim=1)
+        x_2d = x_2d.unsqueeze(1)  # (B, 1, H=C+1, W=N)
+        """
+        # Преобразует тензор (B, 8, 301) + вектор частот (301,) → (B, 8, 301, 301)
+        # """
+        # assert freqs.shape[0] == N, "Число отсчётов должно совпадать"
+        #
+        # # x_1d: (B, 8, 301) → (B, 8, 301, 1), потом expand до (B, 8, 301, 301)
+        # x_expanded = x_1d.unsqueeze(-1).expand(-1, -1, -1, N)
+        #
+        # # freqs: (301,) → (1, 1, 1, 301), потом expand до (B, 8, 301, 301)
+        # freqs_expanded = freqs.view(1, 1, 1, N).expand(B, C, N, N)
+        #
+        # # Объединяем данные: можно сложить, умножить или склеить как отдельный канал
+        # # Пример: просто добавим частоты к данным
+        # x_2d = x_expanded + freqs_expanded
+
+        return x_2d
+
+
+class TemporalTransformer(nn.Module):
+    def __init__(self, input_channels=8, seq_len=301, num_classes=37):
+        super().__init__()
+        self.patch_size = 16
+        self.num_patches = (seq_len + self.patch_size - 1) // self.patch_size
+        self.patch_embed = nn.Conv1d(input_channels, 128, kernel_size=self.patch_size, stride=self.patch_size)
+
+        self.transformer = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(
+                d_model=128,
+                nhead=8,
+                dim_feedforward=512
+            ),
+            num_layers=4
+        )
+
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(128),
+            nn.Linear(128, num_classes)
+        )
+
+    def forward(self, x):
+        # x: [B, C, T]
+        x = self.patch_embed(x)  # [B, 128, num_patches]
+        x = x.permute(2, 0, 1)  # [num_patches, B, 128]
+        x = self.transformer(x)
+        x = x.mean(dim=0)  # Усреднение по патчам
+        return self.classifier(x)
+
+
