@@ -39,8 +39,7 @@ class MWFilter(rf.Network):
         for i in range(M.shape[0]):
             for j in range(i, M.shape[1]):
                 val = M[i, j]
-                if abs(val) > 1e-12:
-                    params.update({f"m_{i}_{j}": val})
+                params.update({f"m_{i}_{j}": val})
 
         td = mwlab.TouchstoneData(network=self, params=params, path=path)
         return td
@@ -98,8 +97,7 @@ class MWFilter(rf.Network):
         for i in range(M.shape[0]):
             for j in range(i, M.shape[1]):
                 val = M[i, j]
-                if abs(val) > 1e-12:
-                    param_parts.append(f"m_{i}_{j}={val:.6f}")
+                param_parts.append(f"m_{i}_{j}={val:.6f}")
 
         param_comment = " Parameters = {" + "; ".join(param_parts) + "}\n"
         self.comments = param_comment if self.comments is None else self.comments + param_comment

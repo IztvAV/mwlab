@@ -40,28 +40,47 @@ class CouplingMatrix:
         return cls(sym_matrix)
 
     @staticmethod
-    def from_factors(factors, links, matrix_order, device='cpu'):
+    def from_factors(factors: torch.Tensor, links: list[tuple[int, int]], matrix_order: int) -> torch.Tensor:
         """
-        Creates a coupling matrix from factors and links.
+        Создает симметричные матрицы связи из факторов.
 
-        Parameters:
-        factors (torch.Tensor): Tensor of coupling factors
-        links (list): List of tuples representing matrix links
-        matrix_order (int): Size of the square matrix
-        device (str): Device to store the tensor on
+        Поддерживает как батч, так и одиночный пример.
 
-        Returns:
-        torch.Tensor: Symmetric coupling matrix
+        Параметры:
+        ----------
+        factors : Tensor
+            - (L,) или (B, L) — где L = число связей, B = размер батча
+        links : list of (int, int)
+            - список пар индексов (i, j) — положения ненулевых элементов
+        matrix_order : int
+            - размер квадратной матрицы (N x N)
+
+        Возвращает:
+        -----------
+        Tensor of shape (B, N, N) — если factors был батчем
+        или (N, N) — если factors был одномерным
         """
-        indices = torch.tensor(links, device=device).T  # (2, num_links)
-        values = factors.to(device)
+        # Преобразуем вход в батч, если нужно
+        batched = factors.dim() == 2
+        if not batched:
+            factors = factors.unsqueeze(0)  # (1, L)
 
-        M = torch.zeros((matrix_order, matrix_order),
-                       dtype=torch.float32,
-                       device=device)
-        M = M.index_put((indices[0], indices[1]), values)
-        M = M.index_put((indices[1], indices[0]), values)  # symmetric part
-        return M
+        B, L = factors.shape
+        device = factors.device
+        dtype = factors.dtype
+
+        # Индексы связей
+        indices = torch.tensor(links, device=device, dtype=torch.long)  # (L, 2)
+        i_idx, j_idx = indices[:, 0], indices[:, 1]
+
+        # Создаем пустую матрицу (B, N, N)
+        M = torch.zeros((B, matrix_order, matrix_order), device=device, dtype=dtype)
+
+        # Вставляем значения по индексам
+        M[:, i_idx, j_idx] = factors
+        M[:, j_idx, i_idx] = factors  # симметрично
+
+        return M[0] if not batched else M
 
     @staticmethod
     def get_links_from_matrix(matrix):
