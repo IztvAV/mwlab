@@ -209,6 +209,13 @@ class MinMaxScaler(_Base):
         y_std = (y - self.min_val) / scale
         return y_std * self.data_range + self.data_min
 
+    # def inverse(self, y: torch.Tensor) -> torch.Tensor:
+    #     scale = max(self.max_val - self.min_val, self.eps)
+    #     y_std = (y - self.min_val) / scale
+    #     data_range = self.data_range.clone().detach()  # по желанию
+    #     data_min = self.data_min.clone().detach()
+    #     return y_std * data_range + data_min
+
     def extra_repr(self) -> str:
         return f"dim={self.default_dim}, range=({self.min_val}, {self.max_val}), eps={self.eps}"
 

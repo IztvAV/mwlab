@@ -1,4 +1,6 @@
 import torch.nn
+import torchmetrics
+
 from mwlab import BaseLModule, TouchstoneLDataModule, BaseLMWithMetrics
 from filters import MWFilter, CouplingMatrix
 import matplotlib.pyplot as plt
@@ -124,4 +126,3 @@ class MWFilterBaseLMWithMetricsCAE(MWFilterBaseLMWithMetrics):
         x, y, _ = self._split_batch(batch)
         preds = self(x)
         return preds
-

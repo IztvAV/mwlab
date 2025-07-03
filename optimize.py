@@ -5,6 +5,7 @@ import common
 import models
 from configs import FILTER_NAME, BATCH_SIZE
 from common import create_origin_filter
+from losses import CustomLosses
 from mwlab.io.backends import RAMBackend
 from filters.mwfilter_lightning import MWFilterBaseLModule, MWFilterBaseLMWithMetrics
 from filters.datasets import CMTheoreticalDatasetGenerator, CMTheoreticalDatasetGeneratorSamplers
@@ -19,11 +20,11 @@ import lightning as L
 import pickle
 
 
-DATASET_SIZE = 50_000
+DATASET_SIZE = 100_000
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "optimize_data")
 ENV_STUDY_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "study_results")
-TRIAL_NUM = 80
+TRIAL_NUM = 100
 
 ds_gen = None
 codec = None
@@ -34,6 +35,9 @@ def print_best_callback(study, trial):
     print(f"\n--- Trial #{trial.number} завершился ---")
     print(f"Best value so far: {study.best_value}")
     print(f"Best params so far: {study.best_params}\n")
+    # Сохраняем на случай вылета программы
+    save_study_pickle(study, path=os.path.join(ENV_STUDY_PATH,
+                                               f"study_dataset-dataset={DATASET_SIZE}-trials={TRIAL_NUM}.pkl"))
 
 
 def save_study_pickle(study, path):
@@ -74,7 +78,7 @@ def base_objective(model: nn.Module, optimizer_cfg: dict, scheduler_cfg: dict, m
         codec=codec,  # Кодек для преобразования данных
         optimizer_cfg=optimizer_cfg,  # Конфигурация оптимизатора
         scheduler_cfg=scheduler_cfg,
-        loss_fn=nn.MSELoss()
+        loss_fn=CustomLosses("mse_with_l1")
     )
 
     stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min", min_delta=0.00001)
@@ -90,7 +94,7 @@ def base_objective(model: nn.Module, optimizer_cfg: dict, scheduler_cfg: dict, m
     # Обучение модели с помощью PyTorch Lightning
     trainer = L.Trainer(
         deterministic=True,
-        max_epochs=500,  # Максимальное количество эпох обучения
+        max_epochs=100,  # Максимальное количество эпох обучения
         accelerator="auto",  # Автоматический выбор устройства (CPU/GPU)
         log_every_n_steps=100,  # Частота логирования в процессе обучения
         callbacks=[
@@ -105,14 +109,122 @@ def base_objective(model: nn.Module, optimizer_cfg: dict, scheduler_cfg: dict, m
     return score
 
 
+def optimize_lr(metric="val_r2", direction="maximize"):
+    # 2. Определяем целевую функцию для Optuna
+    def objective(trial):
+        # 1. Определяем пространство поиска параметров
+        params = {
+            'lr': trial.suggest_float('lr', 0.00001, 0.001, step=0.00001),
+            'gamma': trial.suggest_float('gamma', 0.05, 1.0, step=0.05),
+            'step_size': trial.suggest_int('step_size', 1, 30),
+        }
+
+        orig_filter = create_origin_filter(ENV_ORIGIN_DATA_PATH)
+        # 2. Создаем модель
+        main = models.ResNet1DFlexible(
+            in_channels=len(codec.y_channels),
+            out_channels=len(codec.x_keys),
+            num_blocks=[1, 4, 3, 5],
+            layer_channels=[64, 64, 128, 256],
+            first_conv_kernel=8,
+            first_conv_channels=64,
+            first_maxpool_kernel=3,
+            activation_in='sigmoid',
+            activation_block='swish',
+            use_se=False,
+            se_reduction=1
+        )
+        mlp = models.CorrectionMLP(
+            input_dim=len(codec.x_keys),
+            output_dim=len(codec.x_keys),
+            hidden_dims=[32, 16, 1024],
+            activation_fun='soft_sign'
+        )
+
+        model = models.ModelWithCorrection(
+            main_model=main,
+            correction_model=mlp,
+        )
+        # model = models.main = models.ResNet2DFlexible(
+        #     freq_vector=orig_filter.f_norm,
+        #     in_channels=len(codec.y_channels),
+        #     out_channels=len(codec.x_keys),
+        #     use_se=False,
+        #     se_reduction=1
+        # )
+        optimizer_cfg = {"name": "Adam", "lr": params['lr']}
+        scheduler_cfg = {"name": "StepLR", "step_size": params['step_size'], "gamma": params['gamma']}
+        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric=metric)
+        return score
+
+    # 3. Создаем study и запускаем оптимизацию
+    study = load_study_pickle(os.path.join(ENV_STUDY_PATH,
+                                               f"study_dataset-dataset={DATASET_SIZE}-trials={TRIAL_NUM}.pkl"))
+    # study = optuna.create_study(direction=direction)  # Мы хотим максимизировать accuracy
+    study.enqueue_trial(
+        {
+         'lr': 0.0005995097360712593,
+         'step_size': 20,
+         'gamma': 0.05
+         }
+    )
+    study.optimize(objective, n_trials=TRIAL_NUM, callbacks=[print_best_callback])  # Количество итераций оптимизации
+    return study
+
+
+def optimize_efficient_net(metric="val_r2", direction="maximize"):
+    # 2. Определяем целевую функцию для Optuna
+    def objective(trial):
+        # 1. Определяем пространство поиска параметров
+        params = {
+            'se_ratio': trial.suggest_float('se_ratio', 0.05, 3.0, step=0.1),
+            'dropout_rate': trial.suggest_float('dropout_rate', 0.0, 0.5, step=0.05),
+            'depth_coeff': trial.suggest_float('depth_coeff', 0.1, 3.0, step=0.1),
+            'width_coeff': trial.suggest_float('width_coeff', 0.1, 3.0, step=0.1),
+            # 'batch_size': trial.suggest_categorical('batch_size', [32, 64, 128]),
+            'lr': trial.suggest_float('lr', 1e-6, 1e-1, log=True),
+            'gamma': trial.suggest_float('gamma', 0.05, 1.0, step=0.05),
+            'step_size': trial.suggest_int('step_size', 1, 20),
+        }
+
+        # 2. Создаем модель
+        model = models.EfficientNet1D(
+            in_channels=len(codec.y_channels),  # По вашему исходному коду,
+            num_classes=len(codec.x_keys),  # По вашему исходному коду
+            width_coeff=params['width_coeff'],
+            depth_coeff=params['depth_coeff'],
+            dropout_rate=params['dropout_rate'],
+            se_ratio=params['se_ratio'],
+        )
+        optimizer_cfg = {"name": "Adam", "lr": params['lr']}
+        scheduler_cfg = {"name": "StepLR", "step_size": params['step_size'], "gamma": params['gamma']}
+        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric=metric)
+        return score
+
+    # 3. Создаем study и запускаем оптимизацию
+    study = optuna.create_study(direction=direction)  # Мы хотим максимизировать accuracy
+    study.enqueue_trial(
+        {'width_coeff': 2.4,
+         'depth_coeff': 0.4,
+         'dropout_rate': 0.05,
+         'se_ratio': 2.15,
+         'lr': 0.0031623006844162787,
+         'step_size': 9,
+         'gamma': 0.35
+         }
+    )
+    study.optimize(objective, n_trials=TRIAL_NUM, callbacks=[print_best_callback])  # Количество итераций оптимизации
+    return study
+
+
 def optimize_resnet(metric="val_r2", direction="maximize"):
     # 2. Определяем целевую функцию для Optuna
     def objective(trial):
         # 1. Определяем пространство поиска параметров
         params = {
-            'first_conv_channels': trial.suggest_categorical('first_conv_channels', [16, 32, 64, 128]),
-            'first_conv_kernel': trial.suggest_int('first_conv_kernel', 3, 11, step=1),  # Нечетные размеры ядра
-            'first_maxpool_kernel': trial.suggest_int('first_maxpool_kernel', 2, 11, step=1),
+            'first_conv_channels': trial.suggest_categorical('first_conv_channels', [16, 32, 64, 128, 256, 512, 1024]),
+            'first_conv_kernel': 8,  # Нечетные размеры ядра
+            'first_maxpool_kernel': 2,
             'layer_channels': [
                 trial.suggest_categorical('layer1_channels', [16, 32, 64, 128, 256, 512, 1024]),
                 trial.suggest_categorical('layer2_channels', [16, 32, 64, 128, 256, 512, 1024]),
@@ -126,9 +238,9 @@ def optimize_resnet(metric="val_r2", direction="maximize"):
                 trial.suggest_int('layer4_blocks', 1, 6),
             ],
             # 'batch_size': trial.suggest_categorical('batch_size', [32, 64, 128]),
-            'lr': trial.suggest_float('lr', 1e-6, 1e-1, log=True),
-            'gamma': trial.suggest_float('gamma', 0.1, 1.0, step=0.1),
-            'step_size': trial.suggest_int('step_size', 1, 20),
+            'lr': trial.suggest_float('lr', 1e-6, 1e-3, log=True),
+            'gamma': trial.suggest_float('gamma', 0.01, 1.0, step=0.01),
+            'step_size': trial.suggest_int('step_size', 5, 25),
             'activation_in': trial.suggest_categorical('activation_in', models.get_available_activations()),
             'activation_block': trial.suggest_categorical('activation_block', models.get_available_activations())
         }
@@ -168,7 +280,7 @@ def optimize_resnet(metric="val_r2", direction="maximize"):
          'activation_in': 'sigmoid',
          'activation_block': 'swish'}
     )
-    study.optimize(objective, n_trials=TRIAL_NUM)  # Количество итераций оптимизации
+    study.optimize(objective, n_trials=TRIAL_NUM, callbacks=[print_best_callback])  # Количество итераций оптимизации
     return study
 
 
@@ -211,7 +323,7 @@ def optimize_resnet_with_mlp_correction(metric: str="val_mse", direction: str="m
             main_model=main,
             correction_model=correction
         )
-        optimizer_cfg = {"name": "Adam", "lr": params['lr']}
+        optimizer_cfg = {"name": "AdamW", "lr": params['lr'], "weight_decay": 1e-5}
         scheduler_cfg = {"name": "StepLR", "step_size": params['step_size'], "gamma": params['gamma']}
         score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric=metric)
         return score
@@ -237,7 +349,7 @@ def main():
     print("Создаем фильтр")
     orig_filter = create_origin_filter(ENV_ORIGIN_DATA_PATH)
     print("Создаем сэмплеры")
-    samplers = common.create_sampler(orig_filter, SamplerTypes.SAMPLER_SOBOL)
+    samplers = common.create_sampler(orig_filter, SamplerTypes.SAMPLER_SOBOL, dataset_size=DATASET_SIZE)
     global ds_gen
     ds_gen = CMTheoreticalDatasetGenerator(
         path_to_save_dataset=os.path.join(ENV_DATASET_PATH, samplers.cms.type.name, f"{len(samplers.cms)}"),
@@ -258,7 +370,7 @@ def main():
     print("Каналы:", codec.y_channels)
     print("Количество каналов:", len(codec.y_channels))
 
-    study = optimize_resnet(metric="val_r2", direction="maximize")
+    study = optimize_resnet_with_mlp_correction(metric="val_mae", direction="minimize")
 
     # 4. Выводим результаты
     print(f"Лучшие параметры: {study.best_params}")

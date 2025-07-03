@@ -11,13 +11,47 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from torchmetrics import MetricCollection, MeanSquaredError, MeanAbsoluteError, R2Score
+from torchmetrics import MetricCollection, MeanSquaredError, MeanAbsoluteError, R2Score, Metric
 from typing import Optional, Callable, Any
 
 from mwlab.lightning.base_lm import BaseLModule
 from mwlab.codecs.touchstone_codec import TouchstoneCodec
 
 
+class RelativeAccuracy(Metric):
+    """
+    Метрика accuracy для регрессии:
+    Accuracy = 1 - mean(abs((pred - target) / target))
+    Ограничивается 0 при относительной ошибке > 1.
+    """
+
+    def __init__(self, eps: float = 1e-12, dist_sync_on_step=False):
+        super().__init__(dist_sync_on_step=dist_sync_on_step)
+        self.eps = eps
+        self.add_state("sum_relative_error", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("total", default=torch.tensor(0), dist_reduce_fx="sum")
+
+    def update(self, preds: torch.Tensor, target: torch.Tensor):
+        if preds.shape != target.shape:
+            raise ValueError(
+                f"`preds` и `target` должны иметь одинаковую форму, но получили {preds.shape} и {target.shape}")
+
+        # избегаем деления на ноль
+        rel_error = torch.abs((preds - target) / (target + self.eps))
+        mean_error = rel_error.mean()
+
+        self.sum_relative_error += mean_error
+        self.total += 1
+
+    def compute(self):
+        avg_error = self.sum_relative_error / self.total
+        return 1.0 - avg_error if avg_error < 1 else torch.tensor(0.0)
+
+
+
+def MAE_error(output, target):
+    error = torch.mean(torch.abs(output - target)).item()
+    return 1 - error
 # ─────────────────────────────────────────────────────────────────────────────
 #                             BaseLMWithMetrics
 # ─────────────────────────────────────────────────────────────────────────────
@@ -101,7 +135,8 @@ class BaseLMWithMetrics(BaseLModule):
             metrics = {
                 "mse": MeanSquaredError(),
                 "mae": MeanAbsoluteError(),
-                "r2" : R2Score()
+                "r2" : R2Score(),
+                "acc": RelativeAccuracy()
             }
         if isinstance(metrics, dict):
             metrics = MetricCollection(metrics)
@@ -137,6 +172,8 @@ class BaseLMWithMetrics(BaseLModule):
 
         metric_dict = self.val_metrics(preds_flat, y_flat)
         self.log_dict(metric_dict, on_epoch=True, prog_bar=True, batch_size=x.size(0))
+        acc = MAE_error(preds, y_t)
+        self.log("val_acc", acc, prog_bar=True, on_epoch=True, batch_size=x.size(0))
         return loss
 
     def test_step(self, batch, batch_idx):
