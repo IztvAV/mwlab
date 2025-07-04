@@ -85,8 +85,8 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
     def create_filter_from_prediction(orig_fil: MWFilter, pred_prms: dict, meta: dict) -> MWFilter:
         # orig_fil = MWFilter.from_touchstone_dataset_item(({**meta['params'], **orig_prms}, orig_fil))
         pred_matrix = MWFilter.matrix_from_touchstone_data_parameters({**meta['params'], **pred_prms})
-        s_pred = MWFilter.response_from_coupling_matrix(f0=orig_fil.f0, FBW=orig_fil.fbw, frange=orig_fil.f / 1e6,
-                                                        Q=orig_fil.Q, M=pred_matrix)
+        s_pred = MWFilter.response_from_coupling_matrix(f0=meta['params']['f0'], FBW=meta['params']['bw']/meta['params']['f0'], frange=orig_fil.f / 1e6,
+                                                        Q=meta['params']['Q'], M=pred_matrix)
         pred_fil = MWFilter(order=int(meta['params']['N']), bw=meta['params']['bw'], f0=meta['params']['f0'],
                             Q=meta['params']['Q'],
                             matrix=pred_matrix, frequency=orig_fil.f, s=s_pred, z0=orig_fil.z0)

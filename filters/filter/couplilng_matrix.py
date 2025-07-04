@@ -17,26 +17,46 @@ class CouplingMatrix:
 
         Parameters:
         file_path (str): Path to the coupling matrix file.
-        device (str): Device to store the tensor on ('cpu' or 'cuda')
+        device (str): Device to store the tensor on ('cpu' or 'cuda').
 
         Returns:
         CouplingMatrix: Instance with symmetric square coupling matrix.
         """
         matrix = []
-        with open(file_path, mode='r') as file:
-            lines = file.readlines()
-            for line in lines:
-                row = list(map(float, line.strip().split(',')))
+
+        with open(file_path, 'r') as file:
+            for line_num, line in enumerate(file, start=1):
+                line = line.strip()
+
+                # Пропустить пустые строки и строки-комментарии
+                if not line or line.startswith('#'):
+                    continue
+
+                try:
+                    row = list(map(float, line.split(',')))
+                except ValueError:
+                    raise ValueError(f"Некорректный числовой формат в строке {line_num}: {line}")
+
                 matrix.append(row)
 
-        matrix = torch.tensor(matrix, dtype=torch.float32, device=device)
+        if not matrix:
+            raise ValueError("Файл пустой или содержит только комментарии.")
 
-        # Check if matrix is square
-        if matrix.shape[0] != matrix.shape[1]:
-            raise ValueError("Matrix must be square")
+        row_lengths = [len(row) for row in matrix]
+        if len(set(row_lengths)) != 1:
+            raise ValueError("Матрица имеет строки разной длины.")
 
-        # Make matrix symmetric
-        sym_matrix = (matrix + matrix.T) / 2
+        n_rows = len(matrix)
+        n_cols = row_lengths[0]
+
+        if n_rows != n_cols:
+            raise ValueError(f"Матрица должна быть квадратной, но получена {n_rows}x{n_cols}.")
+
+        matrix_tensor = torch.tensor(matrix, dtype=torch.float32, device=device)
+
+        # Симметризация
+        sym_matrix = (matrix_tensor + matrix_tensor.T) / 2
+
         return cls(sym_matrix)
 
     @staticmethod
