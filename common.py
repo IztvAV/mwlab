@@ -1,6 +1,7 @@
 import os
 
 import torch
+from lightning.pytorch.callbacks import ModelCheckpoint
 from torch import nn
 
 from filters.codecs import MWFilterTouchstoneCodec
@@ -49,7 +50,7 @@ def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_p
     sampler_configs = {
         "pss_origin": PSShift(phi11=0.547, phi21=-1.0, theta11=0.01685, theta21=0.017),
         "pss_shifts_delta": PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
-        "cm_shifts_delta": CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=5e-3, parasitic_coupling=5e-3),
+        "cm_shifts_delta": CMShifts(self_coupling=1.0, mainline_coupling=0.3, cross_coupling=5e-3, parasitic_coupling=5e-3),
         "samplers_size": dataset_size,
     }
     samplers_all_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
@@ -127,20 +128,20 @@ def get_model(name: str="resnet_with_correction", **kwargs):
         main = models.ResNet1DFlexible(
             in_channels=kwargs["in_channels"],
             out_channels=kwargs["out_channels"],
-            num_blocks=[1, 4, 3, 5],
-            layer_channels=[64, 64, 128, 256],
+            num_blocks=[6, 6, 1, 2],
+            layer_channels=[128, 1024, 32, 1024],
             first_conv_kernel=8,
-            first_conv_channels=64,
-            first_maxpool_kernel=3,
-            activation_in='sigmoid',
-            activation_block='swish',
+            first_conv_channels=128,
+            first_maxpool_kernel=2,
+            activation_in='leaky_relu',
+            activation_block='rrelu',
             use_se=False,
             se_reduction=1
         )
         mlp = models.CorrectionMLP(
             input_dim=kwargs["out_channels"],
             output_dim=kwargs["out_channels"],
-            hidden_dims=[128, 256, 512],
+            hidden_dims=[64, 2048, 512],
             activation_fun='swish'
         )
         model = models.ModelWithCorrection(
@@ -179,6 +180,23 @@ def check_metrics(trainer: L.Trainer, model: L.LightningModule, dm: TouchstoneLD
     return {"train": train_metrics, "val": val_metrics, "test": test_metrics}
 
 
+class MySafeCheckpoint(ModelCheckpoint):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def on_validation_end(self, trainer, pl_module):
+        train_loss = trainer.callback_metrics.get("train_loss")
+        val_loss = trainer.callback_metrics.get("val_loss")
+
+        # Только если оба есть
+        if train_loss is not None and val_loss is not None:
+           if train_loss < val_loss:
+                # Не сохраняем модель — early overfitting
+                return
+
+        super().on_validation_end(trainer, pl_module)
+
+
 class WorkModel:
     CHECKPOINT_DIRPATH = "saved_models/" + configs.FILTER_NAME
     BEST_MODEL_FILENAME_SUFFIX = "-batch_size={batch_size}-base_dataset_size={base_dataset_size}-sampler={sampler_type}"
@@ -199,27 +217,29 @@ class WorkModel:
         self.ds = TouchstoneDataset(source=self.ds_gen.backend, in_memory=True)
 
         self.trainer = self._configure_trainer()
-        self.codec = MWFilterTouchstoneCodec.from_dataset(ds=self.ds,
-                                                 keys_for_analysis=[f"m_{r}_{c}" for r, c in self.orig_filter.coupling_matrix.links])
+        # self.codec = MWFilterTouchstoneCodec.from_dataset(ds=self.ds,
+        #                                          keys_for_analysis=[f"m_{r}_{c}" for r, c in self.orig_filter.coupling_matrix.links])
+        self.meta = None
+        self.codec = None
         self.model = None
         self.dm = None
 
     def _configure_trainer(self):
-        stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=31, mode="min", min_delta=0.00001)
-        checkpoint = L.pytorch.callbacks.ModelCheckpoint(monitor="val_loss",
-                                                         dirpath="saved_models/" + configs.FILTER_NAME,
-                                                         filename="best-{epoch}-{train_loss:.5f}-{val_loss:.5f}-{val_r2:.5f}-{val_mse:.5f}-"
+        stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_mae", patience=31, mode="min", min_delta=0.00001)
+        checkpoint = MySafeCheckpoint(monitor="val_mae",
+                                      dirpath="saved_models/" + configs.FILTER_NAME,
+                                      filename="best-{epoch}-{train_loss:.5f}-{val_loss:.5f}-{val_r2:.5f}-{val_mse:.5f}-"
                                                                   "{val_mae:.5f}" + self.BEST_MODEL_FILENAME_SUFFIX.format(
                                                              batch_size=configs.BATCH_SIZE,
                                                              base_dataset_size=configs.BASE_DATASET_SIZE,
                                                              sampler_type=self.samplers.cms.type
                                                          ),
-                                                         mode="min",
-                                                         save_top_k=1,  # Сохраняем только одну лучшую
-                                                         save_weights_only=False,
-                                                         # Сохранять всю модель (включая структуру)
-                                                         verbose=False  # Отключаем логирование сохранения)
-                                                         )
+                                      mode="min",
+                                      save_top_k=1,  # Сохраняем только одну лучшую
+                                      save_weights_only=False,
+                                      # Сохранять всю модель (включая структуру)
+                                      verbose=False  # Отключаем логирование сохранения)
+                                      )
         trainer = L.Trainer(
             deterministic=True,
             max_epochs=150,  # Максимальное количество эпох обучения
@@ -235,6 +255,7 @@ class WorkModel:
         print("Каналы Y:", dm_codec.y_channels)
         print("Каналы X:", dm_codec.x_keys)
         print("Количество каналов:", len(dm_codec.y_channels))
+        self.codec = dm_codec
         self.dm = TouchstoneLDataModule(
             source=self.ds_gen.backend,  # Путь к датасету
             codec=dm_codec,  # Кодек для преобразования TouchstoneData → (x, y)
@@ -257,7 +278,20 @@ class WorkModel:
         print(f"Размер валидационного набора: {len(self.dm.val_ds)}")
         print(f"Размер тестового набора: {len(self.dm.test_ds)}")
 
+        # Возьмем для примера первый touchstone-файл из тестового набора данных
+        test_tds = self.dm.get_dataset(split="test", meta=True)
+        # Поскольку swap_xy=True, то датасет меняет местами пары (y, x)
+        _, _, self.meta = test_tds[0]  # Используем первый файл набора данных]
+
+
     def train(self, optimizer_cfg: dict, scheduler_cfg: dict, loss_fn):
         lit_model = train_model(model=self.model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, dm=self.dm,
                     trainer=self.trainer, loss_fn=loss_fn)
         return lit_model
+
+    def inference(self, path_to_ckpt: str):
+        inference_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
+            checkpoint_path=path_to_ckpt,
+            model=self.model
+        )
+        return inference_model

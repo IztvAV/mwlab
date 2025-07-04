@@ -72,12 +72,12 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
     print("Start optimize (L-BFGS-B)")
     x0 = np.array(pred_filter.coupling_matrix.factors, dtype=np.float64)
 
-    matrix_order = orig_filter.coupling_matrix.matrix_order
-    links = orig_filter.coupling_matrix.links
+    matrix_order = pred_filter.coupling_matrix.matrix_order
+    links = pred_filter.coupling_matrix.links
     fast_calc = FastMN2toSParamCalculation(matrix_order=matrix_order,
-                                           wlist=orig_filter.f_norm,
-                                           Q=orig_filter.Q,
-                                           fbw=orig_filter.fbw)
+                                           wlist=pred_filter.f_norm,
+                                           Q=pred_filter.Q,
+                                           fbw=pred_filter.fbw)
 
     s11_origin = orig_filter.s[:, 0, 0]
     s21_origin = orig_filter.s[:, 1, 0]
