@@ -1,10 +1,12 @@
 import os
+import random
 import time
 from pathlib import Path
 
 from lightning.pytorch.callbacks import ModelCheckpoint
 from sklearn.ensemble import GradientBoostingRegressor, HistGradientBoostingRegressor
 
+from mwlab.io.backends import RAMBackend
 from mwlab.nn.scalers import MinMaxScaler, StdScaler
 from mwlab import TouchstoneDataset, TouchstoneLDataModule, TouchstoneDatasetAnalyzer
 
@@ -32,27 +34,10 @@ import joblib
 from tqdm import tqdm
 from torchvision import models as t_models
 
+from mwlab.transforms import TComposite
+from mwlab.transforms.s_transforms import S_Crop, S_Resample
+
 torch.set_float32_matmul_precision("medium")
-
-
-class MySafeCheckpoint(ModelCheckpoint):
-    def __init__(self, threshold_ratio=0.9, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.threshold_ratio = threshold_ratio
-
-    def on_validation_end(self, trainer, pl_module):
-        train_loss = trainer.callback_metrics.get("train_loss")
-        val_loss = trainer.callback_metrics.get("val_loss")
-
-        # Только если оба есть
-        if train_loss is not None and val_loss is not None:
-            ratio = val_loss / train_loss
-            if ratio < self.threshold_ratio:
-                # Не сохраняем модель — early overfitting
-                return
-
-        super().on_validation_end(trainer, pl_module)
-
 
 # ---------- 2. Сбор предсказаний ----------
 def collect_nn_predictions(model, dataloader):
@@ -237,25 +222,12 @@ def fine_tune_model(inference_model: nn.Module, target_input: MWFilter, meta: di
     return inference_model
 
 
+def create_ram_backend_from_data_directory(path: str):
+    tds = TouchstoneDataset(path)
+
 
 def main():
     work_model = common.WorkModel()
-    # L.seed_everything(0)
-    # print("Создаем фильтр")
-    # orig_filter = common.create_origin_filter(configs.ENV_ORIGIN_DATA_PATH, resample_scale=301)
-    # print("Создаем сэмплеры")
-    # samplers = common.create_sampler(orig_filter, SamplerTypes.SAMPLER_SOBOL)
-    # ds_gen = CMTheoreticalDatasetGenerator(
-    #     path_to_save_dataset=os.path.join(configs.ENV_DATASET_PATH, samplers.cms.type.name, f"{len(samplers.cms)}"),
-    #     backend_type='ram',
-    #     orig_filter=orig_filter,
-    #     filename="Dataset",
-    # )
-    # ds_gen.generate(samplers)
-    #
-    # ds = TouchstoneDataset(source=ds_gen.backend, in_memory=True)
-    # common.plot_distribution(ds, num_params=len(ds_gen.origin_filter.coupling_matrix.links))
-    # plt.show()
 
     codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
                                                  keys_for_analysis=[f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links])
@@ -279,25 +251,6 @@ def main():
                                                                     "m_7_7", "m_8_8", "m_9_9", "m_10_10", "m_11_11",
                                                                     "m_12_12"])
     codec = codec
-
-    # dm = TouchstoneLDataModule(
-    #     source=ds_gen.backend,  # Путь к датасету
-    #     codec=codec,  # Кодек для преобразования TouchstoneData → (x, y)
-    #     batch_size=configs.BATCH_SIZE,  # Размер батча
-    #     val_ratio=0.2,  # Доля валидационного набора
-    #     test_ratio=0.05,  # Доля тестового набора
-    #     cache_size=0,
-    #     scaler_in=MinMaxScaler(dim=(0, 2), feature_range=(0, 1)),  # Скейлер для входных данных
-    #     scaler_out=MinMaxScaler(dim=0, feature_range=(-0.5, 0.5)),  # Скейлер для выходных данных
-    #     swap_xy=True,
-    #     num_workers=0,
-    #     Параметры базового датасета:
-        # base_ds_kwargs={
-        #     "in_memory": True
-        # }
-    # )
-    # model = common.get_model("resnet_with_correction")
-
     work_model.setup(
         model_name="resnet_with_correction",
         model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
@@ -312,77 +265,18 @@ def main():
             weights.append(0.75)
         else:
             weights.append(0.50)
+
     lit_model = work_model.train(
-        optimizer_cfg={"name": "AdamW", "lr": 0.0005370623202982373, "weight_decay": 1e-5},
-        scheduler_cfg={"name": "StepLR", "step_size": 21, "gamma": 0.01},
-        loss_fn=CustomLosses("mse_with_l1", weight_decay=1,
-                             weights=torch.tensor(weights, dtype=torch.float64)
-                             # weights=None
-                             )
+        optimizer_cfg={"name": "AdamW", "lr": 0.0005371, "weight_decay": 1e-5},
+        scheduler_cfg={"name": "StepLR", "step_size": 24, "gamma": 0.01},
+        loss_fn=CustomLosses("mse_with_l1", weight_decay=1, weights=None)
         )
 
-    # lit_model = MWFilterBaseLMWithMetrics(
-    #     model=model,  # Наша нейросетевая модель
-    #     swap_xy=True,
-    #     scaler_in=dm.scaler_in,  # Скейлер для входных данных
-    #     scaler_out=dm.scaler_out,  # Скейлер для выходных данных
-    #     codec=codec,  # Кодек для преобразования данных
-    #     optimizer_cfg={"name": "AdamW", "lr": 0.0005370623202982373, "weight_decay": 1e-5},
-    #     scheduler_cfg={"name": "StepLR", "step_size": 21, "gamma": 0.01},
-        # loss_fn=CustomLosses("reg_with_s_parameters",
-        #                      weight_decay=1, orig_fil=orig_filter, dm=dm, fast_calc=FastMN2toSParamCalculation(
-        #         matrix_order=orig_filter.coupling_matrix.matrix_order,
-        #         device="cuda", wlist=orig_filter.f_norm, Q=orig_filter.Q, fbw=orig_filter.fbw,)),
-        # loss_fn=nn.MSELoss()
-        # loss_fn=CustomLosses("mse_with_l1", weight_decay=1,
-        #                      weights=torch.tensor(weights, dtype=torch.float64)
-        #                      weights=None
-                             # )
-    # )
-
-    # stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=31, mode="min", min_delta=0.00001)
-    # checkpoint = L.pytorch.callbacks.ModelCheckpoint(monitor="val_loss", dirpath="saved_models/" + configs.FILTER_NAME,
-    #                                                  filename="best-{epoch}-{train_loss:.5f}-{val_loss:.5f}-{val_r2:.5f}-{val_mse:.5f}-"
-    #                                                           "{val_mae:.5f}"+f"-batch_size={configs.BATCH_SIZE}-dataset_size={configs.BASE_DATASET_SIZE}-sampler={samplers.cms.type}",
-    #                                                  mode="min",
-    #                                                  save_top_k=1,  # Сохраняем только одну лучшую
-    #                                                  save_weights_only=False,
-    #                                                  Сохранять всю модель (включая структуру)
-                                                     # verbose=False  # Отключаем логирование сохранения)
-                                                     # )
-
-    # Обучение модели с помощью PyTorch Lightning
-    # trainer = L.Trainer(
-    #     deterministic=True,
-    #     max_epochs=600,  # Максимальное количество эпох обучения
-    #     accelerator="auto",  # Автоматический выбор устройства (CPU/GPU)
-    #     log_every_n_steps=100,  # Частота логирования в процессе обучения
-    #     callbacks=[
-    #         stoping,
-    #         checkpoint,
-    #
-    #     ]
-    # )
     # Загружаем лучшую модель
-    # lit_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
-    #     checkpoint_path="saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=49-train_loss=0.03379-val_loss=0.03352-val_r2=0.84208-val_acc=0.25946-val_mae=0.05526-batch_size=32-dataset_size=100000.ckpt",
-    #     model=model
-    # ).to(lit_model.device)
-
-    # Запуск процесса обучения
-    # trainer.fit(lit_model, dm)
-    # print(f"Best model saved into: {checkpoint.best_model_path}")
-
-    # Загружаем лучшую модель
-    inference_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
-        # checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=12-val_loss=0.01266-train_loss=0.01224.ckpt",
-        # checkpoint_path="saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=49-train_loss=0.03379-val_loss=0.03352-val_r2=0.84208-val_acc=0.25946-val_mae=0.05526-batch_size=32-dataset_size=100000.ckpt",
-        checkpoint_path=work_model.trainer.checkpoint_callback.best_model_path,
-        model=lit_model.model
-    ).to(lit_model.device)
-
-
-    # train_corrector(inference_model, datamodule=dm, output_dir="saved_models\\EAMU4-KuIMUXT3-BPFC1\\ml-correctors")
+    # checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=12-val_loss=0.01266-train_loss=0.01224.ckpt",
+    # checkpoint_path="saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=49-train_loss=0.03379-val_loss=0.03352-val_r2=0.84208-val_acc=0.25946-val_mae=0.05526-batch_size=32-dataset_size=100000.ckpt",
+    # "saved_models/ERV-KuIMUXT1-BPFC1/best-epoch=22-train_loss=0.04863-val_loss=0.05762-val_r2=0.82785-val_mse=0.01366-val_mae=0.04395-batch_size=32-base_dataset_size=100000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt"
+    inference_model = work_model.inference(lit_model.trainer.checkpoint_callback.best_model_path)
 
     orig_fil, pred_fil = inference_model.predict(work_model.dm, idx=0)
     inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
@@ -395,6 +289,21 @@ def main():
     error_matrix_pred.plot_matrix(title="Predict de-tuned matrix errors", cmap="YlOrBr")
     pred_fil.coupling_matrix.plot_matrix(title="Predict de-tuned matrix")
     orig_fil.coupling_matrix.plot_matrix(title="Origin de-tuned matrix")
+
+
+    tds = TouchstoneDataset("filters/FilterData/ERV-KuIMUXT1-BPFC1/modeling/detuned",
+                            s_tf=TComposite(
+                                [S_Crop(f_start=work_model.orig_filter.f[0], f_stop=work_model.orig_filter.f[-1]),
+                                 S_Resample(len(work_model.orig_filter.f))]))
+    for _ in range(1):
+        i = random.randint(1, len(tds))
+        orig_fil = tds[_][1]
+        pred_prms = inference_model.predict_x(orig_fil)
+        print(f"Предсказанные параметры: {pred_prms}")
+        pred_fil = inference_model.create_filter_from_prediction(orig_fil, pred_prms, work_model.meta)
+        optim_matrix = optimize_cm(pred_fil, orig_fil)
+        print(f"Оптимизированные параметры: {optim_matrix.factors}")
+        inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
 
     # # Предсказываем эталонный фильтр
     # orig_fil = work_model.ds_gen.origin_filter
