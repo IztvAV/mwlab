@@ -12,10 +12,10 @@ license = { text = "MIT" }
 
 # Основные зависимости
 dependencies = [
-    "numpy >=1.21",
+    "numpy >=2.0",
     "scikit-rf >=0.30",
     "lightning >=2.1",
-    "torch >=1.12",
+    "torch >=1.13",
     "matplotlib >=3.4",
     "seaborn >=0.11",
     "pandas >=1.3",
