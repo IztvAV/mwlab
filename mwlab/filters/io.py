@@ -176,10 +176,3 @@ def _guess_layout(M: np.ndarray) -> MatrixLayout:
     if off_src and off_ld and port2port == 0:
         return MatrixLayout.SL
     return MatrixLayout.TAIL
-
-
-# -----------------------------------------------------------------------------
-__all__ = [
-    "write_matrix",
-    "read_matrix",
-]

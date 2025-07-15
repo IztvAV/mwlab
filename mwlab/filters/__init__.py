@@ -42,9 +42,16 @@ S = flt.sparams(f)                          # shape = (801, 2, 2)
 # ── Topology registry ──────────────────────────────────────────────────
 from .topologies import (
     Topology,
+    TopologyError,
     get_topology,
     list_topologies,
     register_topology,
+)
+
+# ── io layer ───────────────────────────────────────────────────────────
+from .io import (
+    write_matrix,
+    read_matrix,
 )
 
 # ── Coupling-matrix layer ──────────────────────────────────────────────
@@ -64,9 +71,10 @@ from .devices import (
 __all__ = [
     # topologies
     "Topology",
+    "TopologyError",
+    "register_topology",
     "get_topology",
     "list_topologies",
-    "register_topology",
     # coupling matrix
     "cm_sparams",
     "CouplingMatrix",
@@ -74,5 +82,7 @@ __all__ = [
     # devices
     "Device",
     "Filter",
+    #io
+    "write_matrix",
+    "read_matrix",
 ]
-

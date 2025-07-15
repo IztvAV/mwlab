@@ -331,38 +331,3 @@ def transversal(order: int, *, ports: int = 2, name: str | None = None) -> Topol
     return Topology(order, ports, links=links, name=name or "transversal")
 
 
-# -----------------------------------------------------------------------------
-#                               __all__
-# -----------------------------------------------------------------------------
-__all__ = [
-    "Topology",
-    "TopologyError",
-    "register_topology",
-    "get_topology",
-    "list_topologies",
-    # ready‑made templates
-    "folded",
-    "transversal",
-]
-
-# -----------------------------------------------------------------------------
-#                                Demo / self‑test
-# -----------------------------------------------------------------------------
-if __name__ == "__main__":  # быстрый smoke‑test
-    topo = get_topology("folded", order=4, name="folded‑4")
-    print(topo)
-    print("Resonators:", list(topo.res_indices))
-    print("Ports     :", list(topo.port_indices))
-    print("Adjacency :\n", topo.adjacency_matrix().astype(int))
-
-    # неполная матрица (strict=False)
-    m_partial = {"M1_2": 1.0, "M1_4": 0.2}
-    topo.validate_mvals(m_partial, strict=False)  # ok
-
-    # сериализация round‑trip
-    blob = topo.to_dict()
-    restored = Topology.from_dict(json.loads(json.dumps(blob)))
-    assert topo == restored
-    print("Round‑trip OK, hash:", hash(topo))
-
-
