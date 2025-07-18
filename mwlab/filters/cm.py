@@ -739,13 +739,12 @@ class CouplingMatrix:
             # здесь предполагаем ports=2 (самый частый кейс импорта SL)
             order = K - 2
             ports = 2
-            links = [_parse_m_key(k) for k in M_vals]  # верхний тр-к
             links = []
             for k in M_vals:
                 try:
                     i, j = _parse_m_key(k)
                 except ValueError:
-                    # диагональный элемент Mii — не вершина графа, пропускаем
+                    # диагональный элемент Mii — не ребро графа, пропускаем
                     continue
                 if i != j:  # (i==j) уже отфильтровано, но оставим явную защиту
                     links.append((i, j))
