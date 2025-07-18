@@ -73,13 +73,13 @@ def test_factories(cm4, factory, args, kwargs, spec):
         ),
         # BP
         (
-            lambda cm: Filter.bp(cm, 2.0, 0.2, unit="GHz"),
-            lambda f, fb: (fb[0] / fb[1]) * (f / fb[0] - fb[0] / f),
+                lambda cm: Filter.bp(cm, 2.0, 0.2, unit="GHz"),
+                lambda f, fb: (fb[0] / fb[1]) * (f / fb[0] - fb[0] / f),
         ),
         # BR
         (
-            lambda cm: Filter.br(cm, 2.0, 0.2, unit="GHz"),
-            lambda f, fb: (fb[1] / fb[0]) / (f / fb[0] - fb[0] / f),
+                lambda cm: Filter.br(cm, 2.0, 0.2, unit="GHz"),
+                lambda f, fb: (fb[1] / fb[0]) / (f / fb[0] - fb[0] / f),
         ),
     ],
 )
@@ -99,6 +99,7 @@ def test_forward_reverse_mapping(cm4, flt_constructor, omega_formula):
     # обратное Ω → f
     f_back = filt.freq_grid(omega, unit="GHz", as_rf=False)
     assert np.allclose(f_back * 1e9, F_HZ, atol=1e-3)
+
 
 # ────────────────────────── 3. sparams smoke ───────────────────────────────
 def test_sparams_shape_dtype(cm4):
@@ -173,4 +174,50 @@ def test_device_params_content(cm4):
     assert ts.params["device"] == "Filter"
     assert "kind" in ts.params
 
+# ───────────────────────── 8. LP / HP с f_edges ────────────────────────────
+def test_lp_hp_accept_edges(cm4):
+    # LP: указали только верхнюю границу
+    lp = Filter(cm4, kind="LP", f_edges=(2.3e9, None))
+    assert math.isclose(lp.f_edges[0], 2.3e9)
+    # HP: указали только нижнюю границу
+    hp = Filter(cm4, kind="HP", f_edges=(None, 2.3e9))
+    assert math.isclose(hp.f_edges[1], 2.3e9)
 
+# ───────────────────── 9. неизвестная единица частоты ─────────────────────
+def test_unknown_unit_message(cm4):
+    with pytest.raises(ValueError) as exc:
+        Filter.lp(cm4, 2.3, unit="FooBar")
+    msg = str(exc.value).lower()
+    # сообщение должно содержать и введённое слово, и одну из валидных единиц
+    assert "foobar" in msg
+    assert "ghz" in msg or "hz" in msg
+
+# ─────────────────── 10. BP / BR – знаковая двухветвь ────────────────────
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda cm: Filter.bp(cm, 2.0, 0.2, unit="GHz"),
+        lambda cm: Filter.br(cm, 2.0, 0.2, unit="GHz"),
+    ],
+)
+def test_two_sided_sign_encoding(cm4, factory):
+    filt = factory(cm4)
+
+    om = np.array([-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0])
+    f = filt.freq_grid(om, unit="Hz", as_rf=False)
+
+    # 1) длины совпадают
+    assert f.size == om.size
+
+    # 2) средняя точка Ω=0 → f₀
+    assert math.isclose(f[om == 0][0], filt.f0, rel_tol=1e-12)
+
+    # 3) Симметрия: f(−Ω) * f(+Ω) == f₀²
+    pos = om > 0
+    neg = om < 0
+    assert np.allclose(
+        f[pos] * f[neg][::-1],
+        filt.f0 ** 2,
+        rtol=1e-12,
+        atol=1e-12,
+    )

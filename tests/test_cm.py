@@ -13,6 +13,9 @@ import pytest
 import tempfile
 from pathlib import Path
 from typing import Sequence
+import numpy as np
+
+
 
 from mwlab.filters.topologies import get_topology
 from mwlab.filters.cm import (
@@ -20,10 +23,12 @@ from mwlab.filters.cm import (
     _phase_vec,
     _phase_diag,
     CouplingMatrix,
-MatrixLayout,
+    MatrixLayout,
     _get_cached_mats,
 )
 from mwlab.filters import io as cmio  # write_matrix / read_matrix
+from mwlab.filters.io import _guess_layout
+
 # ———————————————————————————————————————————————————————————————
 #                              Fixtures
 # ———————————————————————————————————————————————————————————————
@@ -184,6 +189,11 @@ def test_fix_sign_flag(cm_obj):
     assert np.allclose(S_pos[..., 0, 1], -S_raw[..., 0, 1])
 
 
+def test_default_fix_sign_is_false(cm_obj):
+    S_def = cm_obj.sparams(Ω)                    # ← без параметра
+    S_raw = cm_obj.sparams(Ω, fix_sign=False)
+    np.testing.assert_allclose(S_def, S_raw)     # должны совпадать
+
 # ———————————————————————————————————————————————————————————————
 #                      Cache — одни и те же объекты
 # ———————————————————————————————————————————————————————————————
@@ -225,6 +235,19 @@ def test_serialization_roundtrip(cm_obj):
         cm_obj.sparams(Ω, backend="numpy"),
         cm_back.sparams(Ω, backend="numpy"),
     )
+
+# ────────────────────────────────────────────────────────────────────────
+#         to_matrix должен работать и на Torch‑backend
+# ────────────────────────────────────────────────────────────────────────
+@pytest.mark.skipif(torch_unavailable, reason="torch not installed")
+def test_to_matrix_torch_backend(cm_obj):
+    import torch
+    M_th = cm_obj.to_matrix(backend="torch", device="cpu")
+    assert isinstance(M_th, torch.Tensor)
+    assert M_th.dtype == torch.float32
+    # tail layout: сравниваем с NumPy результатом
+    M_np = cm_obj.to_matrix(backend="numpy")
+    np.testing.assert_allclose(M_np, M_th.numpy(), rtol=0, atol=0)
 
 
 # ———————————————————————————————————————————————————————————————
@@ -364,3 +387,56 @@ def test_custom_permutation(cm_obj):
     np.testing.assert_allclose(
         cm_obj.sparams(Ω), cm_back.sparams(Ω), rtol=1e-6, atol=1e-6
     )
+
+# ────────────────────────────────────────────────────────────────────────
+#           JSON‑экспорт: корректная запись поля "ports"
+# ────────────────────────────────────────────────────────────────────────
+def test_json_exports_correct_ports(cm_obj):
+    import json, tempfile, os
+    from mwlab.filters import io as cmio
+
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "cm.json")
+        cmio.write_matrix(cm_obj, path, fmt="json")
+        blob = json.loads(open(path, "r").read())
+        assert blob["ports"] == cm_obj.topo.ports
+
+
+# ────────────────────────────────────────────────────────────────────────
+#                 test_cm_layout
+# ────────────────────────────────────────────────────────────────────────
+def _mk_tail(order=3, ports=3):
+    """Создаём искусственную TAIL‑матрицу K×K."""
+    K = order + ports
+    M = np.zeros((K, K))
+    # рез‑рез связи в верхнем левом
+    for i in range(order):
+        if i + 1 < order:
+            M[i, i + 1] = M[i + 1, i] = 1.0
+    # рез‑порт связи
+    for p in range(ports):
+        M[order - 1, order + p] = M[order + p, order - 1] = 0.8 + 0.1 * p
+    return M
+
+def _mk_sl(order=3):
+    """SL (2 порта): S(0), L(−1)."""
+    K = order + 2
+    M = np.zeros((K, K))
+    for i in range(order):
+        M[i + 1, i + 2] = M[i + 2, i + 1] = 1.0
+    M[1, 0] = M[0, 1] = 0.9      # S‑R1
+    M[-2, -1] = M[-1, -2] = 0.9  # Rn‑L
+    return M
+
+def test_guess_tail_multiport():
+    M = _mk_tail(order=4, ports=3)
+    assert _guess_layout(M) is MatrixLayout.TAIL
+
+def test_guess_sl_twoport():
+    M = _mk_sl(order=5)
+    assert _guess_layout(M) is MatrixLayout.SL
+
+def test_guess_ambiguous_returns_none():
+    M = np.zeros((4, 4))
+    # все нули → невозможно определить
+    assert _guess_layout(M) is None

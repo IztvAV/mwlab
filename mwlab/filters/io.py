@@ -32,9 +32,9 @@ MWLab · filters · io
 from __future__ import annotations
 
 import json
-from enum import Enum
 from pathlib import Path
 from typing import Sequence, Union
+import warnings
 
 import numpy as np
 
@@ -98,7 +98,7 @@ def write_matrix(
         blob = {
             "layout": layout.name,
             "order": cm.topo.order,
-            "ports": cm.topo.order,
+            "ports": cm.topo.ports,
             "M": M.tolist(),
         }
         path.write_text(json.dumps(blob, indent=2))
@@ -120,8 +120,8 @@ def read_matrix(
 ):
     """Читает файл с матрицей связи и возвращает :class:`CouplingMatrix`.
 
-    *Если* ``layout='auto'`` — попытка угадать (SL/TAIL) для двухпортовых
-    матриц; в неоднозначной ситуации принимается TAIL.
+    *Если* ``layout='auto'`` — «пытается определить SL/TAIL для любого p;
+    если неопределимо, берётся TAIL».
     """
 
     path = Path(path)
@@ -145,7 +145,7 @@ def read_matrix(
 
     # ---------------------------------------------------------------- layout
     if layout == "auto":
-        lay = detected or _guess_layout(M)
+        lay = detected or _guess_layout(M) or MatrixLayout.TAIL
     else:
         lay = MatrixLayout[layout] if isinstance(layout, str) else layout
 
@@ -155,24 +155,39 @@ def read_matrix(
 # ──────────────────────────────────────────────────────────────────────────────
 #                        layout heuristics (2‑port SL vs TAIL)
 # ──────────────────────────────────────────────────────────────────────────────
-
-def _guess_layout(M: np.ndarray) -> MatrixLayout:
-    """Простая эвристика: отличает SL от TAIL для 2‑портовых матриц.
-
-    * Предполагаем, что порты — единственные элементы с индексами 0 и −1.
-    * Проверяем, что связи между портами отсутствуют, а связи с резонаторами
-      присутствуют.
+def _guess_layout(M: np.ndarray) -> MatrixLayout | None:
     """
-
+    Определяет раскладку матрицы связи:
+      - TAIL для многопортовых устройств (последние P индексы — порты);
+      - SL для классического 2-портового Source–Load;
+      - None если не удалось определить однозначно.
+    """
     K = M.shape[0]
     if K < 3:
-        return MatrixLayout.TAIL  # слишком маленькая, принимаем дефолт
+        return None
 
-    # количество ненулевых элементов в строках/столбцах портов (кроме диагонали)
-    off_src = np.count_nonzero(M[0, 1:-1]) + np.count_nonzero(M[1:-1, 0])
-    off_ld  = np.count_nonzero(M[-1, 1:-1]) + np.count_nonzero(M[1:-1, -1])
-    port2port = abs(M[0, -1]) + abs(M[-1, 0])
+    if np.allclose(M, 0.0, atol=1e-12):
+        return None  # вся матрица нулевая → неопределимо
 
-    if off_src and off_ld and port2port == 0:
+    # 1) TAIL: считаем количество подряд идущих строк «в хвосте»,
+    #    у которых все элементы от диагонали вправо нули.
+    P = 0
+    for i in range(K - 1, -1, -1):
+        if np.allclose(M[i, i:], 0.0, atol=1e-12):
+            P += 1
+        else:
+            break
+    if P >= 2:
+        return MatrixLayout.TAIL
+
+    # 2) SL (2-портовый): [S, R1…Rn, L]
+    #    проверяем наличие S–R1 и Rn–L связей без прямой S–L.
+    #    Индексы: S=0, R1=1, Rn=K-2, L=K-1.
+    if (not np.isclose(M[0, 1],   0.0, atol=1e-12)  # S–R1
+        and not np.isclose(M[K-2, K-1], 0.0, atol=1e-12)  # Rn–L
+        and  np.isclose(M[0, K-1], 0.0, atol=1e-12)  # нет S–L
+    ):
         return MatrixLayout.SL
-    return MatrixLayout.TAIL
+
+    # не удалось однозначно распознать
+    return None

@@ -96,10 +96,15 @@ def _as_frequency(
 
 def _to_hz(val: float, unit: str) -> float:
     """Переводит число *val* из unit ('kHz'/'MHz'/'GHz'/…) в Гц."""
+    mdict = rf.frequency.Frequency.multiplier_dict
     try:
-        mult = rf.frequency.Frequency.multiplier_dict[unit.lower()]
+        mult = mdict[unit.lower()]
     except KeyError as err:
-        raise ValueError(f"Неизвестная единица частоты: {unit!r}") from err
+        valid = ", ".join(sorted(mdict.keys()))
+        raise ValueError(
+            f"Неизвестная единица частоты: {unit!r}. "
+            f"Допустимые единицы: {valid}"
+        ) from err
     return float(val) * mult
 
 
@@ -269,9 +274,21 @@ class Filter(Device):
         kind = kind.upper()
         # ---------- LP / HP ------------------------------------------------
         if kind in {"LP", "HP"}:
-            f_cut = f0 or (f_edges and f_edges[0])
+            # ── принимаем либо f0, либо f_edges = (cut,None)/(None,cut) ──
+            if f_edges is not None:
+                if len(f_edges) != 2:
+                    raise ValueError("f_edges должен быть кортежем (low,high)")
+                low, high = f_edges
+                if kind == "LP":
+                    f_cut = low if low is not None else high
+                else:
+                    f_cut = high if high is not None else low
+            else:
+                f_cut = f0
+
             if f_cut is None:
-                raise ValueError("LP/HP: необходимо указать f_cut")
+                raise ValueError("LP/HP: необходимо указать f_cut (f0 или f_edges)")
+
             # (f_l,f_u) : LP → (f_cut,None),  HP → (None,f_cut)
             edges = (f_cut, None) if kind == "LP" else (None, f_cut)
             return "cut", float(f_cut), None, None, edges
@@ -433,6 +450,10 @@ class Filter(Device):
             Единицы результата.
         as_rf : bool, default False
             *True* → вернуть `skrf.Frequency`, иначе `ndarray`.
+
+        Для **BP** и **BR** метод всегда возвращает *двойной* монотонно
+        возрастающий массив частот, объединяя ветви ниже и выше f₀ и
+        убирая возможный дубликат в точке стыка.
         """
         om = np.asarray(omega, dtype=float)
         k = self.kind
@@ -447,10 +468,17 @@ class Filter(Device):
         # ------------------------------------------------------------------ BP / BR
         else:
             bw, f0 = self.bw, self.f0
+            sgn = np.sign(om)  # –1, 0, +1
+            om_abs = np.abs(om) + eps
+
             with np.errstate(divide="ignore", invalid="ignore"):
-                X = (bw / f0) * om if k == "BP" else (bw / f0) / om
-                r = 0.5 * (X + np.sqrt(X ** 2 + 4.0))  # положит. корень
-                f = r * f0
+                X = (bw / f0) * om_abs if k == "BP" else (bw / f0) / om_abs
+                r = 0.5 * (X + np.sqrt(X ** 2 + 4.0))
+
+            f_high = r * f0  # Ω > 0
+            f_low = f0 / r   # Ω < 0
+            f = np.where(sgn > 0, f_high,
+                         np.where(sgn < 0, f_low, f0))  # Ω = 0 → f₀
 
         # ------------------------------------------------------------------ to unit
         mult = rf.frequency.Frequency.multiplier_dict[unit.lower()]

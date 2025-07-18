@@ -283,7 +283,7 @@ def cm_sparams(
     backend: str = "numpy",
     device: str = "cpu",
     method: str = "auto",    # 'auto' | 'inv' | 'solve'
-    fix_sign: bool = True,
+    fix_sign: bool = False,
 ):
     """
     Рассчитывает комплексную S-матрицу размером ``(..., F, P, P)``.
@@ -300,8 +300,9 @@ def cm_sparams(
     method   : ``'inv'`` — прямое обращение,
                ``'solve'`` — решение `AX = I_pp`,
                ``'auto'`` — *solve* при `ports ≤ 4`, иначе *inv*.
-    fix_sign : для 2-портовых фильтров инвертирует знак `S₁₂/S₂₁`
-               (распространённая конвенция печати).
+    fix_sign : bool, default **False**
+               Для 2‑портовых фильтров `True` инвертирует знак S₁₂ / S₂₁
+               IEEE‑конвенция — `False`.
     """
     xp, cplx, kw = _lib(backend, device=device)
 
@@ -467,7 +468,7 @@ class CouplingMatrix:
         backend="numpy",
         device="cpu",
         method="auto",
-        fix_sign=True,
+        fix_sign=False,
     ):
         """Вычислить S-параметры (см. :pyfunc:`cm_sparams`)."""
         return cm_sparams(
@@ -594,7 +595,9 @@ class CouplingMatrix:
         xp, _, kw = _lib(backend, device=device)
         M_can = xp.asarray(self._tensor_M(backend, device=device))
         perm = _make_perm(order, ports, layout, permutation)
-        P = xp.eye(order + ports, dtype=_np.float32, **kw)[perm]
+        # Torch требует свой dtype; для NumPy оставляем прежний
+        dtype_eye = xp.float32 if xp.__name__ == "torch" else _np.float32
+        P = xp.eye(order + ports, dtype=dtype_eye, **kw)[perm]
         return P @ M_can @ P.T
 
     # ------------------------------------------------------------------ from_matrix
@@ -725,7 +728,7 @@ class CouplingMatrix:
         # ────────────────────────── 3. Преобразуем в словарь Mij ───────────
         M_vals: Dict[str, float] = {}
         for i in range(K):
-            for j in range(i + 1, K):
+            for j in range(i, K):
                 if abs(M_can[i, j]) < 1e-12:  # нуль → пропускаем
                     continue
                 M_vals[f"M{i + 1}_{j + 1}"] = float(M_can[i, j])
@@ -737,6 +740,15 @@ class CouplingMatrix:
             order = K - 2
             ports = 2
             links = [_parse_m_key(k) for k in M_vals]  # верхний тр-к
+            links = []
+            for k in M_vals:
+                try:
+                    i, j = _parse_m_key(k)
+                except ValueError:
+                    # диагональный элемент Mii — не вершина графа, пропускаем
+                    continue
+                if i != j:  # (i==j) уже отфильтровано, но оставим явную защиту
+                    links.append((i, j))
             topo = Topology(order, ports, links=links, name="inferred")
 
         # ────────────────────────── 5. Финальный объект ────────────────────
