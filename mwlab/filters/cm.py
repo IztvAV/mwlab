@@ -112,10 +112,11 @@ def _parse_m_key(tag: str) -> tuple[int, int]:
         i_str, j_str = tag[1:].split("_", 1)
         i, j = int(i_str), int(j_str)
     except Exception as exc:
-        raise ValueError(f"неверный ключ матрицы связи: {tag!r}") from exc
-    if i == j:
-        raise ValueError(f"диагональный коэффициент должен называться 'M{i}{i}', "
-                         f"а не {tag!r}")
+        raise ValueError(
+            "неверный ключ матрицы связи: "
+            f"{tag!r}  (ожидалось 'M<i>_<j>')"
+        ) from exc
+
     return (i, j) if i < j else (j, i)     # всегда (low, high)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -729,7 +730,7 @@ class CouplingMatrix:
         M_vals: Dict[str, float] = {}
         for i in range(K):
             for j in range(i, K):
-                if abs(M_can[i, j]) < 1e-12:  # нуль → пропускаем
+                if abs(M_can[i, j]) < atol:
                     continue
                 M_vals[f"M{i + 1}_{j + 1}"] = float(M_can[i, j])
 
