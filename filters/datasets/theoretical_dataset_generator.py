@@ -128,24 +128,23 @@ class CMTheoreticalDatasetGeneratorSamplers:
         else:
             for (i, j) in origin_matrix.links:
                 if i == j:
-                    Mmin[i][j] -= deltas.self_coupling
-                    Mmax[i][j] += deltas.self_coupling
+                    m_max_ = Mmax[i][j] + deltas.self_coupling
+                    m_min_ = Mmin[i][j] - deltas.self_coupling
                 elif j == (i + 1):
-                    Mmin[i][j] -= deltas.mainline_coupling
-                    Mmin[j][i] -= deltas.mainline_coupling
-                    Mmax[i][j] += deltas.mainline_coupling
-                    Mmax[j][i] += deltas.mainline_coupling
+                    m_max_ = Mmax[i][j] + deltas.mainline_coupling
+                    m_min_ = Mmin[i][j] - deltas.mainline_coupling
                 elif (i, j) in antidiagonal:
-                    Mmin[i][j] -= deltas.cross_coupling
-                    Mmin[j][i] -= deltas.cross_coupling
-                    Mmax[i][j] += deltas.cross_coupling
-                    Mmax[j][i] += deltas.cross_coupling
+                    m_max_ = Mmax[i][j] + deltas.cross_coupling
+                    m_min_ = Mmin[i][j] - deltas.cross_coupling
                 else:
-                    Mmin[i][j] -= deltas.parasitic_coupling
-                    Mmin[j][i] -= deltas.parasitic_coupling
-                    Mmax[i][j] += deltas.parasitic_coupling
-                    Mmax[j][i] += deltas.parasitic_coupling
-
+                    m_max_ = Mmax[i][j] + deltas.parasitic_coupling
+                    m_min_ = Mmin[i][j] - deltas.parasitic_coupling
+                m_min = min(m_min_, m_max_)
+                m_max = max(m_min_, m_max_)
+                Mmin[i][j] = m_min
+                Mmin[j][i] = m_min
+                Mmax[i][j] = m_max
+                Mmax[j][i] = m_max
         return Mmin, Mmax
 
     @staticmethod
@@ -233,17 +232,19 @@ class CMTheoreticalDatasetGenerator:
         size = len(samplers.cms)
         for idx in tqdm(range(size), desc=f"Генерация датасета в путь: {self._path_to_save_dataset}"):
             cm_factors = samplers.cms[idx]
-            new_matrix = CouplingMatrix.from_factors(factors=torch.tensor(cm_factors, dtype=torch.float32), links=self.origin_filter.coupling_matrix.links,
-                                        matrix_order=self.origin_filter.coupling_matrix.matrix_order)
+            new_matrix = CouplingMatrix.from_factors(factors=torch.tensor(cm_factors, dtype=torch.float32),
+                                                     links=self.origin_filter.coupling_matrix.links,
+                                                     matrix_order=self.origin_filter.coupling_matrix.matrix_order)
             if torch.isnan(new_matrix).any() or torch.isinf(new_matrix).any():
                 raise ValueError("⚠️ Input to model contains NaN or Inf")
             ps_shifts = samplers.pss[idx]
             s_params = MWFilter.response_from_coupling_matrix(M=new_matrix, f0=self._origin_filter.f0,
-                                                       FBW=self._origin_filter.fbw, Q=self._origin_filter.Q,
-                                                       frange=self._origin_filter.f/1e6, PSs=ps_shifts)
+                                                              FBW=self._origin_filter.fbw, Q=self._origin_filter.Q,
+                                                              frange=self._origin_filter.f / 1e6, PSs=ps_shifts)
 
             new_filter = MWFilter(f0=self._origin_filter.f0, order=self._origin_filter.order, bw=self._origin_filter.bw,
-                                  Q=self._origin_filter.Q, matrix=new_matrix, frequency=self._origin_filter.f, s=s_params, z0=50)
+                                  Q=self._origin_filter.Q, matrix=new_matrix, frequency=self._origin_filter.f,
+                                  s=s_params, z0=50)
             ts = new_filter.to_touchstone_data()
             params = torch.tensor(list(ts.params.values()), dtype=torch.float32)
             if torch.isnan(params).any() or torch.isinf(params).any():
@@ -251,4 +252,3 @@ class CMTheoreticalDatasetGenerator:
             self._backend.append(ts)
         if self._backend_type == 'ram':
             self._backend.dump_pickle(self._full_dataset_path())
-

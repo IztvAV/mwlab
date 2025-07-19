@@ -3,8 +3,10 @@ import random
 import time
 from pathlib import Path
 
+import torchmetrics.clustering
 from lightning.pytorch.callbacks import ModelCheckpoint
 from sklearn.ensemble import GradientBoostingRegressor, HistGradientBoostingRegressor
+from torch.ao.nn.quantized.functional import threshold
 
 from mwlab.io.backends import RAMBackend
 from mwlab.nn.scalers import MinMaxScaler, StdScaler
@@ -228,6 +230,8 @@ def create_ram_backend_from_data_directory(path: str):
 
 def main():
     work_model = common.WorkModel()
+    # common.plot_distribution(work_model.ds, num_params=len(work_model.ds_gen.origin_filter.coupling_matrix.links))
+    # plt.show()
 
     codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
                                                  keys_for_analysis=[f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links])
@@ -245,11 +249,8 @@ def main():
                                                                                   "m_4_9",
                                                                                   "m_5_8"])
     codecs = [codec_main_coupling, codec_self_coupling, codec_cross_coupling]
-    codec_test = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds, keys_for_analysis=["m_0_1", "m_1_2", "m_2_3", "m_3_4", "m_4_5", "m_5_6",
-                                                                    "m_6_7", "m_7_8", "m_8_9", "m_9_10", "m_10_11",
-                                                                    "m_11_12", "m_12_13", "m_1_1", "m_2_2", "m_3_3", "m_4_4", "m_5_5", "m_6_6",
-                                                                    "m_7_7", "m_8_8", "m_9_9", "m_10_10", "m_11_11",
-                                                                    "m_12_12"])
+    codec_test = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds, keys_for_analysis=["m_1_1", "m_2_2", "m_3_3", "m_4_4", "m_5_5", "m_6_6",
+                                                                    "m_7_7", "m_8_8", "m_3_5", "m_2_6", "m_3_7", "m_4_6"])
     codec = codec
     work_model.setup(
         model_name="resnet_with_correction",
@@ -259,12 +260,11 @@ def main():
 
     weights = []
     for i, j in work_model.orig_filter.coupling_matrix.links:
-        if i == j:
+        if j == i+1:
             weights.append(1.25)
-        elif j == i+1:
-            weights.append(0.75)
         else:
-            weights.append(0.50)
+            weights.append(1)
+    weights = torch.tensor(weights, dtype=torch.float32)
 
     lit_model = work_model.train(
         optimizer_cfg={"name": "AdamW", "lr": 0.0005371, "weight_decay": 1e-5},
@@ -276,7 +276,11 @@ def main():
     # checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=12-val_loss=0.01266-train_loss=0.01224.ckpt",
     # checkpoint_path="saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=49-train_loss=0.03379-val_loss=0.03352-val_r2=0.84208-val_acc=0.25946-val_mae=0.05526-batch_size=32-dataset_size=100000.ckpt",
     # "saved_models/ERV-KuIMUXT1-BPFC1/best-epoch=22-train_loss=0.04863-val_loss=0.05762-val_r2=0.82785-val_mse=0.01366-val_mae=0.04395-batch_size=32-base_dataset_size=100000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt"
+    # inference_model = work_model.inference("saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=48-train_loss=0.04278-val_loss=0.04752-val_r2=0.91029-val_mse=0.00714-val_mae=0.04038-batch_size=32-base_dataset_size=1000000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
     inference_model = work_model.inference(lit_model.trainer.checkpoint_callback.best_model_path)
+
+
+
 
     orig_fil, pred_fil = inference_model.predict(work_model.dm, idx=0)
     inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
@@ -290,32 +294,69 @@ def main():
     pred_fil.coupling_matrix.plot_matrix(title="Predict de-tuned matrix")
     orig_fil.coupling_matrix.plot_matrix(title="Origin de-tuned matrix")
 
+    # print("Базовая модель")
+    # inference_model_base = work_model.inference(
+    #     "saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=126-train_loss=0.06403-val_loss=0.06918-val_r2=0.83516-val_mse=0.01313-val_mae=0.05605-batch_size=32-base_dataset_size=600000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
+    # common.check_metrics(work_model.trainer, inference_model_base, work_model.dm)
+    # Предсказываем эталонный фильтр
+    # orig_fil = work_model.ds_gen.origin_filter
+    # pred_prms = inference_model_base.predict_x(orig_fil)
+    # pred_fil = inference_model_base.create_filter_from_prediction(orig_fil, pred_prms, work_model.meta)
+    # inference_model_base.plot_origin_vs_prediction(orig_fil, pred_fil)
 
-    tds = TouchstoneDataset("filters/FilterData/ERV-KuIMUXT1-BPFC1/modeling/detuned",
-                            s_tf=TComposite(
-                                [S_Crop(f_start=work_model.orig_filter.f[0], f_stop=work_model.orig_filter.f[-1]),
-                                 S_Resample(len(work_model.orig_filter.f))]))
-    for _ in range(1):
-        i = random.randint(1, len(tds))
-        orig_fil = tds[_][1]
-        pred_prms = inference_model.predict_x(orig_fil)
-        print(f"Предсказанные параметры: {pred_prms}")
-        pred_fil = inference_model.create_filter_from_prediction(orig_fil, pred_prms, work_model.meta)
-        optim_matrix = optimize_cm(pred_fil, orig_fil)
-        print(f"Оптимизированные параметры: {optim_matrix.factors}")
-        inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
+    # optim_matrix = optimize_cm(pred_fil, orig_fil)
+    # error_matrix_pred = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, pred_fil.coupling_matrix)
+    # error_matrix_optim = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, optim_matrix)
+    # error_matrix_optim.plot_matrix(title="Optimized tuned matrix errors for base model", cmap="YlOrBr")
+    # error_matrix_pred.plot_matrix(title="Predict tuned matrix errors for base model", cmap="YlOrBr")
+    # orig_fil.coupling_matrix.plot_matrix(title="Origin tuned matrix for base model")
+    # pred_fil.coupling_matrix.plot_matrix(title="Predict tuned matrix for base model")
+    # optim_matrix.plot_matrix(title="Optimized tuned matrix for base model")
+    #
+    # print("Модель с инверсией")
+    # inference_model_inverted = work_model.inference("saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=65-train_loss=0.02935-val_loss=0.03302-val_r2=0.94125-val_mse=0.00418-val_mae=0.02884-batch_size=32-base_dataset_size=600000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
+    # common.check_metrics(work_model.trainer, inference_model_inverted, work_model.dm)
+    # Предсказываем эталонный фильтр
+    # orig_fil = work_model.ds_gen.origin_filter
+    # pred_prms = inference_model_inverted.predict_x(orig_fil)
+    # pred_fil = inference_model_inverted.create_filter_from_prediction(orig_fil, pred_prms, work_model.meta)
+    # inference_model_inverted.plot_origin_vs_prediction(orig_fil, pred_fil)
+    #
+    # optim_matrix = optimize_cm(pred_fil, orig_fil)
+    # error_matrix_pred = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, pred_fil.coupling_matrix)
+    # error_matrix_optim = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, optim_matrix)
+    # error_matrix_optim.plot_matrix(title="Optimized tuned matrix errors for inverted model", cmap="YlOrBr")
+    # error_matrix_pred.plot_matrix(title="Predict tuned matrix errors for inverted model", cmap="YlOrBr")
+    # orig_fil.coupling_matrix.plot_matrix(title="Origin tuned matrix for inverted model")
+    # pred_fil.coupling_matrix.plot_matrix(title="Predict tuned matrix for inverted model")
+    # optim_matrix.plot_matrix(title="Optimized tuned matrix for inverted model")
 
-    # # Предсказываем эталонный фильтр
+
+    # tds = TouchstoneDataset("filters/FilterData/ERV-KuIMUXT1-BPFC1/modeling",
+    #                         s_tf=TComposite(
+    #                             [S_Crop(f_start=work_model.orig_filter.f[0], f_stop=work_model.orig_filter.f[-1]),
+    #                              S_Resample(len(work_model.orig_filter.f))]))
+    # for i in range(1):
+        # i = random.randint(1, len(tds))
+        # orig_fil = tds[i+4][1]
+        # pred_prms = inference_model.predict_x(orig_fil)
+        # print(f"Предсказанные параметры: {pred_prms}")
+        # pred_fil = inference_model.create_filter_from_prediction(orig_fil, pred_prms, work_model.meta)
+        # optim_matrix = optimize_cm(pred_fil, orig_fil)
+        # print(f"Оптимизированные параметры: {optim_matrix.factors}")
+        # inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
+
+    # Предсказываем эталонный фильтр
     # orig_fil = work_model.ds_gen.origin_filter
     # pred_prms = inference_model.predict_x(orig_fil)
-    # # corrected = predict_with_corrector(np.array(list(pred_prms.values())).reshape(1, -1), "saved_models\\EAMU4-KuIMUXT3-BPFC1\\ml-correctors")
-    # # corr_prms = dict(zip(pred_prms.keys(), list(corrected.reshape(-1))))
-    # pred_fil = inference_model.create_filter_from_prediction(orig_fil, pred_prms, meta)
+    # corrected = predict_with_corrector(np.array(list(pred_prms.values())).reshape(1, -1), "saved_models\\EAMU4-KuIMUXT3-BPFC1\\ml-correctors")
+    # corr_prms = dict(zip(pred_prms.keys(), list(corrected.reshape(-1))))
+    # pred_fil = inference_model.create_filter_from_prediction(orig_fil, pred_prms, work_model.meta)
     # inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
-    #
+
     # # corrected = predict_with_corrector(np.array(list(pred_prms.values())).reshape(1, -1), "saved_models\\EAMU4-KuIMUXT3-BPFC1\\ml-correctors")
     # # corr_prms = dict(zip(pred_prms.keys(), list(corrected.reshape(-1))))
-    #
+
     # optim_matrix = optimize_cm(pred_fil, orig_fil)
     # error_matrix_pred = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, pred_fil.coupling_matrix)
     # error_matrix_optim = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, optim_matrix)
@@ -480,17 +521,19 @@ def main():
     # pred_fil.coupling_matrix.plot_matrix(title="Predict de-tuned matrix")
     # orig_fil.coupling_matrix.plot_matrix(title="Origin de-tuned matrix")
     #
-    # # Предсказываем эталонный фильтр
-    # orig_fil = ds_gen.origin_filter
-    # pred_prms = inference_model.predict_x(orig_fil)
-    # pred_fil = inference_model.create_filter_from_prediction(orig_fil, pred_prms, meta)
-    # inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
-    # optim_matrix = optimize_cm(pred_fil, orig_fil)
-    # error_matrix_pred = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, pred_fil.coupling_matrix)
-    # error_matrix_optim = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, optim_matrix)
-    # error_matrix_optim.plot_matrix(title="Optimized tuned matrix errors")
-    # error_matrix_pred.plot_matrix(title="Predict tuned matrix errors")
-    # orig_fil.coupling_matrix.plot_matrix(title="Origin tuned matrix")
+    # Предсказываем эталонный фильтр
+    orig_fil = work_model.ds_gen.origin_filter
+    pred_prms = inference_model.predict_x(orig_fil)
+    pred_fil = inference_model.create_filter_from_prediction(orig_fil, pred_prms, work_model.meta)
+    inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
+    optim_matrix = optimize_cm(pred_fil, orig_fil)
+    pred_fil.coupling_matrix.plot_matrix(title="Predict tuned matrix")
+    optim_matrix.plot_matrix(title="Optimized tuned matrix")
+    error_matrix_pred = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, pred_fil.coupling_matrix)
+    error_matrix_optim = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, optim_matrix)
+    error_matrix_optim.plot_matrix(title="Optimized tuned matrix errors")
+    error_matrix_pred.plot_matrix(title="Predict tuned matrix errors")
+    orig_fil.coupling_matrix.plot_matrix(title="Origin tuned matrix")
     plt.show()
 
 

@@ -19,6 +19,16 @@ class MWFilter(rf.Network):
         self._coupling_matrix: CouplingMatrix = CouplingMatrix(matrix)
 
     @staticmethod
+    def freq_to_nfreq(freq, f0, bw):
+        nfreq = (f0/bw) * (freq/f0 - f0/freq)
+        return nfreq
+
+    @staticmethod
+    def nfreq_to_freq(nfreq, f0, bw):
+        freq = (bw*nfreq + np.sqrt(pow(bw * nfreq, 2) + 4 * pow(f0,2))) / 2
+        return freq
+
+    @staticmethod
     def matrix_from_touchstone_data_parameters(params: dict, N=None) -> torch.Tensor:
         if N is None:
             N = int(params.get("N"))
