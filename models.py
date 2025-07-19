@@ -368,12 +368,14 @@ class ResNet1DFlexible(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool1d(1)
         self.fc = nn.Sequential(
             # nn.LayerNorm(in_ch),
+            nn.Flatten(),
             nn.Linear(in_ch, out_channels)
         )
         self.shortcut = nn.Sequential(
             nn.BatchNorm1d(in_channels),
             nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=1),
-            nn.AdaptiveAvgPool1d(1)
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten()
         )
 
     @staticmethod
@@ -387,7 +389,6 @@ class ResNet1DFlexible(nn.Module):
 
     def forward(self, x):
         identity = self.shortcut(x)
-        identity = identity.view(identity.size(0), -1)
         x = self.activation(self.bn1(self.conv1(x)))
         x = self.maxpool(x)
 
@@ -395,8 +396,9 @@ class ResNet1DFlexible(nn.Module):
             x = layer(x)
 
         x = self.avgpool(x)
-        if type(self.fc) != nn.Identity:
-            x = x.view(x.size(0), -1)
+        # if type(self.fc) != nn.Identity:
+            # x = nn.Flatten(x)
+            # x = x.view(x.size(0), -1)
         x = self.fc(x)
         x += identity
         return x

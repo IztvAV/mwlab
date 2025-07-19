@@ -7,7 +7,7 @@ class FastMN2toSParamCalculation:
         if wlist is None:
             self.w = torch.linspace(w_min, w_max, w_num, device=device)
         else:
-            self.w = torch.tensor(wlist, device=device)
+            self.w = torch.tensor(wlist, device=device, dtype=torch.float32)
 
         self.R = torch.zeros(matrix_order, matrix_order, dtype=torch.complex64, device=device)
         self.R[0, 0] = 1j
@@ -32,14 +32,14 @@ class FastMN2toSParamCalculation:
 
         # start_time = time.time_ns()
         # Обратные матрицы
-        # Ainv = torch.linalg.inv(A)  # (B, N, N)
+        Ainv = torch.linalg.inv(A)  # (B, N, N)
         # stop_time = time.time_ns()
         # print(f"Time to calc inverse matrix by torch.linalg.inv(A) = {(stop_time - start_time)/1e3} usec")
 
         # start_time = time.time_ns()
-        b = torch.zeros(A.shape[0], A.shape[1], 1, dtype=torch.complex64)
-        b[:, 0, 0] = 1
-        Ainv = torch.linalg.solve(A, b)
+        # b = torch.zeros(A.shape[0], A.shape[1], 1, dtype=torch.complex64)
+        # b[:, 0, 0] = 1
+        # Ainv = torch.linalg.solve(A, b)
         # stop_time = time.time_ns()
         # print(f"Time to calc inverse matrix by torch.linalg.solve(A, b) = {(stop_time - start_time)/1e3} usec")
 
@@ -68,10 +68,10 @@ class FastMN2toSParamCalculation:
         A = MR + w * I - G  # [64, 301, 8, 8]
 
         # Решение линейной системы
-        b = torch.zeros(A.shape[0], A.shape[1], A.shape[2], 1, dtype=torch.complex64, device=A.device)
-        b[:, :, 0, 0] = 1  # [64, 301, 8, 1]
+        # b = torch.zeros(A.shape[0], A.shape[1], A.shape[2], 1, dtype=torch.complex64, device=A.device)
+        # b[:, :, 0, 0] = 1  # [64, 301, 8, 1]
 
-        Ainv = torch.linalg.solve(A, b)  # [64, 301, 8, 1]
+        Ainv = torch.linalg.inv(A)  # [64, 301, 8, 1]
 
         A00 = Ainv[:, :, 0, 0]
         ANN = Ainv[:, :, -1, -1]

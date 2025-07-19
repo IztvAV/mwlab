@@ -41,9 +41,37 @@ class CustomLosses(nn.Module):
                 weights = 1
             else:
                 weights = self.params.get("weights").to("cuda")
-            y_true = weights*y_true
-            y_pred = weights*y_pred
+            y_true *= weights
+            y_pred *= weights
             return F.mse_loss(y_pred, y_true) + self.params.get("weight_decay", 1)*F.l1_loss(y_pred, y_true)
+        elif self.loss_name == "mse_with_l1_with_threshold":
+            epsilon = self.params.get("abs_error_threshold", 1e-3)  # точность до знака после запятой
+            weight_decay = self.params.get("weight_decay", 1.0)
+
+            error = torch.abs(y_pred - y_true)
+
+            # Маска: считаем только те ошибки, которые превышают порог
+            mask = (error > epsilon).float()
+
+            # Обнуляем ошибку в пределах dead zone
+            clipped_error = error * mask
+
+            # Применяем веса, если заданы
+            if self.params.get("weights") is None:
+                weights = 1.0
+            else:
+                weights = self.params.get("weights").to("cuda")
+
+            final_weights = weights * mask  # Маска и вес вместе
+
+            # Используем обрезанную ошибку в MSE и L1
+            mse = (clipped_error ** 2 * final_weights).sum()
+            l1 = (clipped_error * final_weights).sum()
+
+            denom = final_weights.sum()
+            denom = torch.clamp(denom, min=1.0)
+
+            return (mse + weight_decay * l1) / denom
         elif self.loss_name == "l1_with_mse":
             return self.params["weight_decay"] * F.mse_loss(y_pred, y_true) + F.l1_loss(y_pred, y_true)
         elif self.loss_name == "log_mse":

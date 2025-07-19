@@ -20,7 +20,7 @@ import lightning as L
 import pickle
 
 
-DATASET_SIZE = 100_000
+DATASET_SIZE = 50_000
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "optimize_data")
 ENV_STUDY_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "study_results")
@@ -49,7 +49,7 @@ def load_study_pickle(path):
         return pickle.load(f)
 
 
-def base_objective(model: nn.Module, optimizer_cfg: dict, scheduler_cfg: dict, metric: str="val_mse"):
+def base_objective(model: nn.Module, optimizer_cfg: dict, scheduler_cfg: dict, metric: str="val_mse", max_epoch: int=50):
     # 3. Создаем DataLoader
     dm = TouchstoneLDataModule(
         source=ds_gen.backend,  # Путь к датасету
@@ -94,7 +94,7 @@ def base_objective(model: nn.Module, optimizer_cfg: dict, scheduler_cfg: dict, m
     # Обучение модели с помощью PyTorch Lightning
     trainer = L.Trainer(
         deterministic=True,
-        max_epochs=100,  # Максимальное количество эпох обучения
+        max_epochs=max_epoch,  # Максимальное количество эпох обучения
         accelerator="auto",  # Автоматический выбор устройства (CPU/GPU)
         log_every_n_steps=100,  # Частота логирования в процессе обучения
         callbacks=[
@@ -220,22 +220,21 @@ def optimize_efficient_net(metric="val_r2", direction="maximize"):
 def optimize_resnet(metric="val_r2", direction="maximize"):
     # 2. Определяем целевую функцию для Optuna
     def objective(trial):
-        # 1. Определяем пространство поиска параметров
         params = {
             'first_conv_channels': trial.suggest_categorical('first_conv_channels', [16, 32, 64, 128, 256, 512, 1024]),
-            'first_conv_kernel': 8,  # Нечетные размеры ядра
-            'first_maxpool_kernel': 2,
+            'first_conv_kernel': trial.suggest_int('first_conv_kernel', 2, 10, step=1),  # Нечетные размеры ядра
+            'first_maxpool_kernel': trial.suggest_int('first_maxpool_kernel', 2, 10, step=1),
             'layer_channels': [
                 trial.suggest_categorical('layer1_channels', [16, 32, 64, 128, 256, 512, 1024]),
                 trial.suggest_categorical('layer2_channels', [16, 32, 64, 128, 256, 512, 1024]),
                 trial.suggest_categorical('layer3_channels', [16, 32, 64, 128, 256, 512, 1024]),
-                trial.suggest_categorical('layer4_channels', [16, 32, 64, 128, 256, 512, 1024]),
+                # trial.suggest_categorical('layer4_channels', [16, 32, 64, 128, 256, 512, 1024]),
             ],
             'num_blocks': [
                 trial.suggest_int('layer1_blocks', 1, 6),
                 trial.suggest_int('layer2_blocks', 1, 6),
                 trial.suggest_int('layer3_blocks', 1, 6),
-                trial.suggest_int('layer4_blocks', 1, 6),
+                # trial.suggest_int('layer4_blocks', 1, 6),
             ],
             # 'batch_size': trial.suggest_categorical('batch_size', [32, 64, 128]),
             'lr': trial.suggest_float('lr', 1e-6, 1e-3, log=True),
@@ -244,6 +243,7 @@ def optimize_resnet(metric="val_r2", direction="maximize"):
             'activation_in': trial.suggest_categorical('activation_in', models.get_available_activations()),
             'activation_block': trial.suggest_categorical('activation_block', models.get_available_activations())
         }
+        # 1. Определяем пространство поиска параметров
 
         # 2. Создаем модель
         model = models.ResNet1DFlexible(
@@ -263,23 +263,23 @@ def optimize_resnet(metric="val_r2", direction="maximize"):
 
     # 3. Создаем study и запускаем оптимизацию
     study = optuna.create_study(direction=direction)  # Мы хотим максимизировать accuracy
-    study.enqueue_trial(
-        {'first_conv_channels': 64,
-         'first_conv_kernel': 8,
-         'layer1_channels': 64,
-         'layer2_channels': 64,
-         'layer3_channels': 128,
-         'layer4_channels': 256,
-         'layer1_blocks': 1,
-         'layer2_blocks': 4,
-         'layer3_blocks': 3,
-         'layer4_blocks': 5,
-         'lr': 0.0005587648891507119,
-         'gamma': 0.1,
-         'step_size': 20,
-         'activation_in': 'sigmoid',
-         'activation_block': 'swish'}
-    )
+    # study.enqueue_trial(
+    #     {'first_conv_channels': 64,
+    #      'first_conv_kernel': 8,
+    #      'layer1_channels': 64,
+    #      'layer2_channels': 64,
+    #      'layer3_channels': 128,
+    #      'layer4_channels': 256,
+    #      'layer1_blocks': 1,
+    #      'layer2_blocks': 4,
+    #      'layer3_blocks': 3,
+    #      'layer4_blocks': 5,
+    #      'lr': 0.0005587648891507119,
+    #      'gamma': 0.1,
+    #      'step_size': 20,
+    #      'activation_in': 'sigmoid',
+    #      'activation_block': 'swish'}
+    # )
     study.optimize(objective, n_trials=TRIAL_NUM, callbacks=[print_best_callback])  # Количество итераций оптимизации
     return study
 
@@ -293,9 +293,9 @@ def optimize_resnet_with_mlp_correction(metric: str="val_mse", direction: str="m
                 trial.suggest_categorical('hidden2_features', [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]),
                 trial.suggest_categorical('hidden3_features', [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]),
             ],
-            'lr': trial.suggest_float('lr', 1e-6, 1e-1, log=True),
-            'gamma': trial.suggest_float('gamma', 0.05, 1.0, step=0.05),
-            'step_size': trial.suggest_int('step_size', 1, 20, step=1),
+            # 'lr': trial.suggest_float('lr', 1e-6, 1e-1, log=True),
+            # 'gamma': trial.suggest_float('gamma', 0.05, 1.0, step=0.05),
+            # 'step_size': trial.suggest_int('step_size', 1, 20, step=1),
             'activation_fun': trial.suggest_categorical('activation_fun', models.get_available_activations()),
         }
 
@@ -303,13 +303,15 @@ def optimize_resnet_with_mlp_correction(metric: str="val_mse", direction: str="m
         main = models.ResNet1DFlexible(
             in_channels=len(codec.y_channels),
             out_channels=len(codec.x_keys),
-            num_blocks=[1, 4, 3, 5],
-            layer_channels=[64, 64, 128, 256],
-            first_conv_kernel=8,
-            first_maxpool_kernel=2,
-            first_conv_channels=64,
-            activation_in='sigmoid',
-            activation_block='swish'
+            num_blocks=[4, 6, 4, 4],
+            layer_channels=[128, 256, 64, 128],
+            first_conv_kernel=9,
+            first_conv_channels=128,
+            first_maxpool_kernel=9,
+            activation_in='gelu',
+            activation_block='mish',
+            # use_se=False,
+            # se_reduction=1
         )
 
         correction = models.CorrectionMLP(
@@ -323,9 +325,9 @@ def optimize_resnet_with_mlp_correction(metric: str="val_mse", direction: str="m
             main_model=main,
             correction_model=correction
         )
-        optimizer_cfg = {"name": "AdamW", "lr": params['lr'], "weight_decay": 1e-5}
-        scheduler_cfg = {"name": "StepLR", "step_size": params['step_size'], "gamma": params['gamma']}
-        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric=metric)
+        optimizer_cfg = {"name": "AdamW", "lr": 0.0005371, "weight_decay": 1e-5}
+        scheduler_cfg = {"name": "StepLR", "step_size": 24, "gamma": 0.01}
+        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric=metric, max_epoch=scheduler_cfg['step_size']+5)
         return score
 
     # 3. Создаем study и запускаем оптимизацию
