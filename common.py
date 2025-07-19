@@ -32,9 +32,9 @@ def create_origin_filter(path_orig_filter: str, f_start=None, f_stop=None, f_uni
     f0 = origin_filter.f0
     bw = origin_filter.bw
     if f_start is None:
-        f_start = f0 - 2 * bw
+        f_start = f0 - 3 * bw
     if f_stop is None:
-        f_stop = f0 + 2 * bw
+        f_stop = f0 + 3 * bw
     if f_unit is None:
         f_unit = "MHz"
     y_transform = TComposite([
@@ -50,7 +50,7 @@ def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_p
     sampler_configs = {
         "pss_origin": PSShift(phi11=0.547, phi21=-1.0, theta11=0.01685, theta21=0.017),
         "pss_shifts_delta": PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
-        "cm_shifts_delta": CMShifts(self_coupling=1.0, mainline_coupling=0.3, cross_coupling=5e-3, parasitic_coupling=5e-3),
+        "cm_shifts_delta": CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=5e-3, parasitic_coupling=5e-3),
         "samplers_size": dataset_size,
     }
     samplers_all_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
@@ -63,6 +63,10 @@ def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_p
     samplers_all_params_shuffle_pss_cols = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_all_params.cms,
                                                                                      pss=samplers_all_params.pss.shuffle(
                                                                                          ratio=1, dim=1))
+    samplers_all_params_flip_sign_cms_cols = CMTheoreticalDatasetGeneratorSamplers(
+        cms=samplers_all_params.cms.flip_signs(ratio=1, dim=0),
+        pss=samplers_all_params.pss
+    )
     samplers_all_params_shuffle_all_cols = CMTheoreticalDatasetGeneratorSamplers(
         cms=samplers_all_params.cms.shuffle(ratio=1, dim=1),
         pss=samplers_all_params.pss.shuffle(ratio=1, dim=1)
@@ -80,9 +84,10 @@ def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_p
         total_samplers.cms._type = sampler_type
         total_samplers.pss._type = sampler_type
     else:
-        total_samplers = CMTheoreticalDatasetGeneratorSamplers.concat(
-            (samplers_all_params, samplers_all_params_shuffle_cms_cols)
-        )
+        # total_samplers = CMTheoreticalDatasetGeneratorSamplers.concat(
+        #     (samplers_all_params, samplers_all_params_flip_sign_cms_cols)
+        # )
+        total_samplers = samplers_all_params
         total_samplers.cms._type = sampler_type
         total_samplers.pss._type = sampler_type
     if torch.isnan(total_samplers.cms.space).any() or torch.isinf(total_samplers.cms.space).any():
@@ -107,6 +112,19 @@ def get_model(name: str="resnet_with_correction", **kwargs):
             use_se=False,
             se_reduction=1
         )
+        # resnet = models.ResNet1DFlexible(
+        #     in_channels=kwargs["in_channels"],
+        #     out_channels=kwargs["out_channels"],
+        #     num_blocks=[4, 6, 4, 4],
+        #     layer_channels=[128, 256, 64, 128],
+        #     first_conv_kernel=9,
+        #     first_conv_channels=128,
+        #     first_maxpool_kernel=9,
+        #     activation_in='gelu',
+        #     activation_block='mish',
+        #     # use_se=False,
+        #     # se_reduction=8
+        # )
         return resnet
     elif name == "resnet_2d":
         main = models.ResNet2DFlexible(
@@ -128,21 +146,21 @@ def get_model(name: str="resnet_with_correction", **kwargs):
         main = models.ResNet1DFlexible(
             in_channels=kwargs["in_channels"],
             out_channels=kwargs["out_channels"],
-            num_blocks=[6, 6, 1, 2],
-            layer_channels=[128, 1024, 32, 1024],
-            first_conv_kernel=8,
+            num_blocks=[4, 6, 4, 4],
+            layer_channels=[128, 256, 64, 128],
+            first_conv_kernel=9,
             first_conv_channels=128,
-            first_maxpool_kernel=2,
-            activation_in='leaky_relu',
-            activation_block='rrelu',
-            use_se=False,
-            se_reduction=1
+            first_maxpool_kernel=9,
+            activation_in='gelu',
+            activation_block='mish',
+            # use_se=False,
+            # se_reduction=1
         )
         mlp = models.CorrectionMLP(
             input_dim=kwargs["out_channels"],
             output_dim=kwargs["out_channels"],
-            hidden_dims=[64, 2048, 512],
-            activation_fun='swish'
+            hidden_dims=[2048, 4096, 256],
+            activation_fun='gelu'
         )
         model = models.ModelWithCorrection(
             main_model=main,
@@ -287,6 +305,7 @@ class WorkModel:
     def train(self, optimizer_cfg: dict, scheduler_cfg: dict, loss_fn):
         lit_model = train_model(model=self.model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, dm=self.dm,
                     trainer=self.trainer, loss_fn=loss_fn)
+        print(f"Лучшая модель сохранена в: {self.trainer.checkpoint_callback.best_model_path}")
         return lit_model
 
     def inference(self, path_to_ckpt: str):

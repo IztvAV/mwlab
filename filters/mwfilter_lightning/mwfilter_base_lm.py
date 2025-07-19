@@ -96,8 +96,10 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         plt.figure()
         origin_fil.plot_s_db(m=0, n=0, label='S11 origin')
         origin_fil.plot_s_db(m=1, n=0, label='S21 origin')
+        origin_fil.plot_s_db(m=1, n=1, label='S22 origin')
         pred_fil.plot_s_db(m=0, n=0, label='S11 pred', ls=':')
         pred_fil.plot_s_db(m=1, n=0, label='S21 pred', ls=':')
+        pred_fil.plot_s_db(m=1, n=1, label='S22 pred', ls=':')
 
 
 class MWFilterBaseLMWithMetricsCAE(MWFilterBaseLMWithMetrics):

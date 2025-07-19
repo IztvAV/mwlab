@@ -291,14 +291,57 @@ class Sampler:
             for col in range(n_cols):
                 n_shuffle = int(n_rows * ratio)
                 shuffle_indices = torch.randperm(n_rows, device=space.device)[:n_shuffle]
-                shuffled_values = space[shuffle_indices, col][torch.randperm(n_shuffle, device=space.device)]
-                space[shuffle_indices, col] = shuffled_values
+
+                original_values = space[shuffle_indices, col].clone()
+                shuffled_indices = shuffle_indices[torch.randperm(n_shuffle, device=space.device)]
+
+                space[shuffled_indices, col] = original_values
         else:
             for row in range(n_rows):
                 n_shuffle = int(n_cols * ratio)
                 shuffle_indices = torch.randperm(n_cols, device=space.device)[:n_shuffle]
-                shuffled_values = space[row, shuffle_indices][torch.randperm(n_shuffle, device=space.device)]
-                space[row, shuffle_indices] = shuffled_values
+
+                # Копируем значения
+                original_values = space[row, shuffle_indices].clone()
+
+                # Перемешиваем индексы назначения
+                shuffled_indices = shuffle_indices[torch.randperm(n_shuffle, device=space.device)]
+
+                # Переназначаем значения в новые места
+                space[row, shuffled_indices] = original_values
+
+        return Sampler(type=self.type, space=space)
+
+    def flip_signs(self, ratio=0.3, dim=1, random_state=None):
+        """
+        Меняет знак у части элементов тензора space вдоль заданной размерности.
+
+        Parameters:
+        ratio (float): Доля элементов, знак которых нужно инвертировать.
+        dim (int): Размерность, вдоль которой применяется инверсия (0 — строки, 1 — столбцы).
+        random_state (int or None): Сид генератора случайных чисел для повторяемости.
+
+        Returns:
+        Sampler: Новый экземпляр с модифицированным space.
+        """
+        if random_state is not None:
+            torch.manual_seed(random_state)
+
+        space = self.space.clone()
+        n_rows, n_cols = space.shape
+
+        if dim == 1:
+            # По столбцам
+            for col in range(n_cols):
+                n_flip = int(n_rows * ratio)
+                flip_indices = torch.randperm(n_rows, device=space.device)[:n_flip]
+                space[flip_indices, col] *= -1
+        else:
+            # По строкам
+            for row in range(n_rows):
+                n_flip = int(n_cols * ratio)
+                flip_indices = torch.randperm(n_cols, device=space.device)[:n_flip]
+                space[row, flip_indices] *= -1
 
         return Sampler(type=self.type, space=space)
 
