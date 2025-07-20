@@ -385,11 +385,10 @@ def _make_perm(order: int, ports: int, layout: MatrixLayout,
 
     if layout is MatrixLayout.SL:
         if ports != 2:
-            raise ValueError("layout 'SL' применим только к 2-портовым устройствам")
-        # внешний порядок: S, R1…Rn, L
-        # внутренний      : R1…Rn,  S,     L
-        perm = [*range(1, order + 1), 0, order + 1]
-        return perm
+            raise ValueError("layout 'SL' применим только к 2‑портовым матрицам")
+        # external: S,   R1…Rn,           L
+        # internal: R1…Rn, P1(=S), P2(=L)
+        return [order] + list(range(order)) + [order + 1]
 
     # CUSTOM
     if permutation is None:
@@ -563,10 +562,13 @@ class CouplingMatrix:
             # «order» — это всё, что ≤ наибольшего резонаторного индекса;
             # если order не задан, принимаем минимальное достаточное.
             max_idx = max(indices)
-            order = max(order_in_dict, max(i for i in indices
-                                           if i <= max_idx // 2))
+            #order = max(order_in_dict, max(i for i in indices
+            #                               if i <= max_idx // 2))
             # «ports» берём так, чтобы хватило до max-index
-            ports = max(ports_in_dict, max_idx - order)
+            #ports = max(ports_in_dict, max_idx - order)
+            order = order_in_dict or (max(i for i, j in pairs if i == j == 0)  # диагональ
+                                      or max(i for i, j in pairs if i != j and i < j))
+            ports = ports_in_dict or (max_idx - order)
 
             # формируем links: только верхний треугольник, убираем дубли
             links = sorted(set(pairs))
@@ -708,9 +710,7 @@ class CouplingMatrix:
             if permutation is not None:
                 raise ValueError("Для layout=SL параметр permutation не используется")
             order = K - 2
-            # internal:   0…n-1 (R) , n (P1=S) , n+1 (P2=L)
-            # external:   0=S , 1…n (R) , n+1=L
-            perm = [i + 1 for i in range(order)] + [0, K - 1]
+            perm = _make_perm(order, ports=2, layout=MatrixLayout.SL)
         elif layout is MatrixLayout.CUSTOM:
             if permutation is None:
                 raise ValueError("CUSTOM-layout требует permutation=<seq[int]>")
