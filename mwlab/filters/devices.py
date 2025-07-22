@@ -34,28 +34,35 @@ from mwlab.filters.topologies import get_topology
 from mwlab.filters.cm         import CouplingMatrix
 from mwlab.filters.devices    import Filter
 
-# 1) топология «folded» на 4 резонатора
+# 1) Топология «folded» на 4 резонатора
 topo = get_topology("folded", order=4)
 
+# 2) Матрица связи (без указания потерь)
 cm = CouplingMatrix(
     topo,
     M_vals={
         "M1_2": 1.05, "M2_3": 0.90, "M3_4": 1.05, "M1_4": 0.25,
-        "M1_5": 0.60, "M4_6": 0.80,          # связи порт-резонатор
-    },
-    Q=7_000,
+        "M1_5": 0.60, "M4_6": 0.80,          # связи порт‑резонатор
+    }
 )
 
-# 2) полосовой фильтр: f0 = 2 ГГц, BW = 200 МГц
-flt = Filter.bp(cm, f0=2.0, bw=0.2, unit="GHz", name="Demo-BP")
+# 3) Создаем полосовой фильтр: f0 = 2 ГГц,  BW = 200 МГц  (FBW = 0.1)
+flt = Filter.bp(cm, f0=2.0, bw=0.2, unit="GHz", name="Demo‑BP")
 
-# 3) расчёт S-параметров
-f = np.linspace(1.6e9, 2.4e9, 801)      # Гц
-S = flt.sparams(f)                      # shape = (801, 2, 2)
+# 4) Задаём *физическую* добротность резонаторов
+#    (7 000 → нормированная qu = Q · FBW = 700)
+flt.set_Q(70_000)          # можно скаляр или вектор Q_i
+print("qu  =", flt.cm.qu)  # [700. 700. 700. 700.]
+print("Q   =", flt.Q)      # [7000. 7000. 7000. 7000.]
 
-# 4) сохранение в Touchstone
+# 5) Расчёт S‑параметров
+f = np.linspace(1.6e9, 2.4e9, 801)   # Гц
+S = flt.sparams(f)                   # shape = (801, 2, 2)
+
+# 6) Сохранение в Touchstone
 ts = flt.to_touchstone(f, unit="Hz")
 ts.save("demo_bp.s2p")
+
 ```
 """
 
@@ -69,7 +76,6 @@ import numpy as np
 import skrf as rf
 
 from mwlab.filters.cm import CouplingMatrix
-from mwlab.filters.topologies import Topology
 from mwlab.io.touchstone import TouchstoneData
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -131,9 +137,36 @@ class Device(ABC):
     def ports(self) -> int:  # noqa: D401
         return self.cm.topo.ports
 
-    # ---------------------------------------------------------------- Ω-map
+    @property
+    def Q(self):
+        """Физическая добротность резонаторов (скаляр или вектор)."""
+        if self.cm.qu is None:
+            return None
+        return np.asarray(self.cm.qu) / self._qu_scale()
+
+    # ----------------------------------------------------- abstract methods
     @abstractmethod
     def _omega(self, f_hz: np.ndarray) -> np.ndarray: ...  # noqa: D401
+
+    @abstractmethod
+    def _qu_scale(self) -> float | np.ndarray:
+        """
+        Отношение  qu / Q  для данного устройства.
+        LP/HP  → 1
+        BP/BR  → FBW
+        """
+        ...
+
+    # ---------- установка Q со стороны пользователя ----------
+    def set_Q(self, Q):
+        """
+        Устанавливает *физические* добротности Q резонаторов и
+        автоматически пересчитывает нормированные q_u.
+        """
+        if Q is None:
+            self.cm.qu = None
+        else:
+            self.cm.qu = np.asarray(Q, dtype=float) * self._qu_scale()
 
     # ---------------------------------------------------------------- API – S-параметры
     def sparams(
@@ -405,6 +438,19 @@ class Filter(Device):
             **kw,
         )
 
+    # ------------------------------------------------------- _qu_scale
+    def _qu_scale(self):
+        """
+        Коэффициент масштабирования добротности
+        LP/HP: qu = Q -> scale=1;
+        BP/BR: qu = Q FBW -> scale=FBW.
+        """
+        k = self.kind.upper()
+        if k in {"BP", "BR"}:
+            return self.fbw      # fbw = BW / f0
+        # LP / HP
+        return 1.0
+
     # ------------------------------------------------------- Ω-mapping
     def _omega(self, f_hz: np.ndarray) -> np.ndarray:  # noqa: D401
         """
@@ -603,5 +649,9 @@ class Multiplexer(Device):
         raise NotImplementedError(
             "Полная реализация Multiplexer появится в будущих версиях."
         )
+
+    def _qu_scale(self):
+        """Мультиплексор сейчас использует ту же нормировку, что и LP/HP."""
+        return 1.0
 
 

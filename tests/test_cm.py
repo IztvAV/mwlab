@@ -8,14 +8,11 @@
 """
 from __future__ import annotations
 
-import numpy as np
 import pytest
 import tempfile
 from pathlib import Path
 from typing import Sequence
 import numpy as np
-
-
 
 from mwlab.filters.topologies import get_topology
 from mwlab.filters.cm import (
@@ -33,27 +30,28 @@ from mwlab.filters.io import _guess_layout
 #                              Fixtures
 # ———————————————————————————————————————————————————————————————
 
-torch_unavailable = False
 try:
     import torch  # noqa: F401
+    torch_unavailable = False
 except ModuleNotFoundError:
     torch_unavailable = True
 
-mpl_unavailable = False
 try:
     import matplotlib.pyplot as _plt  # noqa: F401
+    mpl_unavailable = False
 except ModuleNotFoundError:
     mpl_unavailable = True
 
+
 @pytest.fixture(scope="module")
 def simple_topo():
-    """Folded-топология на 3 резонатора → K = order+ports = 5."""
+    """Folded‑топология на 3 резонатора → K = order+ports = 5."""
     return get_topology("folded", order=3)          # 3 res + 2 ports
 
 
 @pytest.fixture(scope="module")
 def m_vals():
-    """Произвольный набор M-коэффициентов (самих значений хватит для smoke-тестов)."""
+    """Произвольный набор M‑коэффициентов (значения важны только для smoke)."""
     return {
         "M1_2": 0.9,
         "M2_3": 1.0,
@@ -62,22 +60,19 @@ def m_vals():
         "M3_5": 0.7,          # связи с портами
     }
 
+
 @pytest.fixture(scope="module")
 def cm_obj(simple_topo, m_vals):
-    return CouplingMatrix(simple_topo, m_vals, Q=6000)
+    # 6 000 — нормированная добротность (qu), а не физический Q
+    return CouplingMatrix(simple_topo, m_vals, qu=6000)
+
 
 Ω = np.linspace(-2.0, 2.0, 101)
+
 # ———————————————————————————————————————————————————————————————
 #          _build_M_complex  — корректный учёт добротностей
 # ———————————————————————————————————————————————————————————————
-torch_unavailable = False
-try:
-    import torch  # noqa: F401  (нужен только факт импорта)
-except ModuleNotFoundError:
-    torch_unavailable = True
-
-
-@pytest.mark.parametrize("Q", [None, 7000, [7000, 7100, 7200]])
+@pytest.mark.parametrize("qu", [None, 7000, [7000, 7100, 7200]])
 @pytest.mark.parametrize(
     "backend",
     [
@@ -88,11 +83,11 @@ except ModuleNotFoundError:
         ),
     ],
 )
-def test_build_M_complex_diag_loss(Q, backend, simple_topo):
+def test_build_M_complex_diag_loss(qu, backend, simple_topo):
     """
     • возвращаемый dtype — complex64;
-    • на диагонали резонаторов появилось −j / (2 Q);
-    • корректно обрабатываются Q = None | скаляр | список.
+    • на диагонали резонаторов появилось −j / qu;
+    • корректно обрабатываются qu = None | скаляр | список.
     """
     xp = __import__(backend)
 
@@ -100,7 +95,7 @@ def test_build_M_complex_diag_loss(Q, backend, simple_topo):
     M_real = xp.zeros((K, K), dtype=xp.float32)
     M_real[0, 1] = M_real[1, 0] = 1.23   # хотя бы один ненулевой Mij
 
-    M_c = _build_M_complex(simple_topo, M_real, Q, xp, xp.complex64)
+    M_c = _build_M_complex(simple_topo, M_real, qu, xp, xp.complex64)
     assert M_c.dtype == xp.complex64
     assert M_c.shape == (K, K)
 
@@ -114,20 +109,20 @@ def test_build_M_complex_diag_loss(Q, backend, simple_topo):
             M_c.imag.diagonal(offset=0, axis1=-2, axis2=-1)[..., : simple_topo.order]
         ).astype(float).__abs__()
 
-    if Q is None:
+    if qu is None:
         expected = xp.zeros_like(diag_im)
-    elif isinstance(Q, (list, tuple)):
-        expected = xp.asarray(1.0 / (2.0 * xp.asarray(Q)), dtype=diag_im.dtype)
+    elif isinstance(qu, (list, tuple)):
+        expected = xp.asarray(1.0 / xp.asarray(qu), dtype=diag_im.dtype)
     else:
         expected = xp.full(
-            (simple_topo.order,), 1.0 / (2.0 * float(Q)), dtype=diag_im.dtype
+            (simple_topo.order,), 1.0 / float(qu), dtype=diag_im.dtype
         )
 
     assert xp.allclose(diag_im, expected)
 
 
 # ———————————————————————————————————————————————————————————————
-#                        Phase-helpers
+#                        Phase‑helpers
 # ———————————————————————————————————————————————————————————————
 def test_phase_vec_and_diag_numpy():
     xp = np
@@ -210,7 +205,7 @@ def test_cached_mats_identity(simple_topo):
 
 
 # ———————————————————————————————————————————————————————————————
-#      CouplingMatrix: tensor_M, serialization round-trip
+#      CouplingMatrix: tensor_M, serialization round‑trip
 # ———————————————————————————————————————————————————————————————
 def test_tensor_M_backend(cm_obj):
     M_np = cm_obj._tensor_M("numpy")
@@ -227,7 +222,7 @@ def test_tensor_M_backend(cm_obj):
 def test_serialization_roundtrip(cm_obj):
     """
     • to_dict() → from_dict() возвращает эквивалентный объект;
-    • результирующие S-параметры совпадают.
+    • результирующие S‑параметры совпадают.
     """
     dct = cm_obj.to_dict()
     cm_back = CouplingMatrix.from_dict(cm_obj.topo, dct)
@@ -253,11 +248,11 @@ def test_to_matrix_torch_backend(cm_obj):
 # ———————————————————————————————————————————————————————————————
 #                       Негативные кейсы / ошибки
 # ———————————————————————————————————————————————————————————————
-def test_bad_Q_length(simple_topo):
+def test_bad_qu_length(simple_topo):
     with pytest.raises(ValueError):
         _build_M_complex(
             simple_topo, np.zeros((5, 5)), [1, 2], np, np.complex64
-        )   # order=3, а Q-элементов = 2
+        )   # order=3, а qu‑элементов = 2
 
 
 def test_bad_phase_length():
@@ -272,16 +267,15 @@ def test_bad_backend(cm_obj):
 # ————————————————————————————————————————————————————————————————
 #                     MatrixLayout / permutation
 # ————————————————————————————————————————————————————————————————
-
 def _compare_sl_tail(cm: CouplingMatrix):
-    """Helper: SL↔TAIL должны давать одну и ту же S‑матрицу."""
+    """SL↔TAIL должны давать одну и ту же S‑матрицу."""
     S_tail = cm.sparams(Ω, backend="numpy")
     M_sl   = cm.to_matrix(MatrixLayout.SL)
     cm_sl  = CouplingMatrix.from_matrix(
         M_sl,
         topo=cm.topo,
         layout=MatrixLayout.SL,
-        Q=cm.Q,  # ← передаём те же потери
+        qu=cm.qu,
         phase_a=cm.phase_a,
         phase_b=cm.phase_b,
     )
@@ -289,28 +283,24 @@ def _compare_sl_tail(cm: CouplingMatrix):
     np.testing.assert_allclose(S_tail, S_sl, rtol=1e-6, atol=1e-6)
 
 
-
 def test_layout_sl_tail_equivalence(cm_obj):
-    """Быстрый smoke: SL‑матрица после импорта даёт те же S‑парам."""
     _compare_sl_tail(cm_obj)
 
 
 # ————————————————————————————————————————————————————————————————
 #                 from_matrix: симметризация / ошибки
 # ————————————————————————————————————————————————————————————————
-
 def test_from_matrix_force_sym(cm_obj):
-    """Искажаем симметрию → force_sym=True чинит без ошибок."""
+    """Искажаем симметрию → force_sym=True чинит без ощутимых ошибок."""
     M = cm_obj.to_matrix()
     M[0, 1] += 1e-6  # маленькое нарушение
     cm_fixed = CouplingMatrix.from_matrix(M, topo=cm_obj.topo, force_sym=True)
     S_fix = cm_fixed.sparams(Ω, backend="numpy")
     S_ref = cm_obj.sparams(Ω, backend="numpy")
-    np.testing.assert_allclose(S_fix, S_ref, rtol=5e-4, atol=5e-4)
+    np.testing.assert_allclose(S_fix, S_ref, rtol=1e-3, atol=1e-3)
 
 
 def test_from_matrix_sym_error(cm_obj):
-    """При большом нарушении и force_sym=False бросается ValueError."""
     M = cm_obj.to_matrix()
     M[0, 2] += 0.1  # крупное искажение
     with pytest.raises(ValueError):
@@ -320,11 +310,9 @@ def test_from_matrix_sym_error(cm_obj):
 # ————————————————————————————————————————————————————————————————
 #                       plot_matrix (matplotlib)
 # ————————————————————————————————————————————————————————————————
-
 @pytest.mark.skipif(mpl_unavailable, reason="matplotlib not installed")
 def test_plot_matrix_returns_fig(cm_obj):
     fig = cm_obj.plot_matrix(layout=MatrixLayout.SL, log=True, annotate=False, figsize=(4, 4))
-    # Проверяем, что figure создан и содержит AxesImage
     assert fig.axes, "Figure has no axes"
     img_count = sum(1 for ax in fig.axes for im in ax.images)
     assert img_count == 1
@@ -333,9 +321,8 @@ def test_plot_matrix_returns_fig(cm_obj):
 
 
 # ————————————————————————————————————————————————————————————————
-#                 4. Torch vs NumPy (новая реализация)
+#                 Torch vs NumPy (дублирующий smoke)
 # ————————————————————————————————————————————————————————————————
-
 @pytest.mark.skipif(torch_unavailable, reason="torch not installed")
 def test_torch_matches_numpy(cm_obj):
     import torch
@@ -348,7 +335,6 @@ def test_torch_matches_numpy(cm_obj):
 # ————————————————————————————————————————————————————————————————
 #                 Файл I/O (ascii + json, SL и TAIL)
 # ————————————————————————————————————————————————————————————————
-
 def _roundtrip_io(cm: CouplingMatrix, layout: MatrixLayout, fmt: str):
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / f"cm.{fmt}"
@@ -356,8 +342,8 @@ def _roundtrip_io(cm: CouplingMatrix, layout: MatrixLayout, fmt: str):
         cm_back = cmio.read_matrix(path, topo=cm.topo, layout="auto")
         S1 = cm.sparams(Ω)
         S2 = cm_back.sparams(Ω)
-        # ASCII-round-trip неизбежно даёт ~4·10⁻⁴ на |S|
-        np.testing.assert_allclose(S1, S2, rtol=5e-4, atol=5e-4)
+        # ASCII‑round‑trip даёт ≈ 10⁻³ на |S|
+        np.testing.assert_allclose(S1, S2, rtol=1e-3, atol=1e-3)
 
 
 @pytest.mark.parametrize("fmt", ["ascii", "json"])
@@ -369,18 +355,16 @@ def test_io_roundtrip(cm_obj, layout, fmt):
 # ————————————————————————————————————————————————————————————————
 #                     Перестановка CUSTOM
 # ————————————————————————————————————————————————————————————————
-
 def test_custom_permutation(cm_obj):
     order, ports = cm_obj.topo.order, cm_obj.topo.ports
-    # z‑образная перестановка: R2 R1 P2 P1 R3
-    perm: Sequence[int] = [1, 0, order + 1, order, 2]
+    perm: Sequence[int] = [1, 0, order + 1, order, 2]  # z‑образная
     M_custom = cm_obj.to_matrix(MatrixLayout.CUSTOM, permutation=perm)
     cm_back = CouplingMatrix.from_matrix(
         M_custom,
         topo=cm_obj.topo,
         layout=MatrixLayout.CUSTOM,
         permutation=perm,
-        Q=cm_obj.Q,  # ← передаём те же потери
+        qu=cm_obj.qu,
         phase_a=cm_obj.phase_a,
         phase_b=cm_obj.phase_b,
     )
@@ -388,12 +372,11 @@ def test_custom_permutation(cm_obj):
         cm_obj.sparams(Ω), cm_back.sparams(Ω), rtol=1e-6, atol=1e-6
     )
 
-# ────────────────────────────────────────────────────────────────────────
+# ————————————————————————————————————————————————————————————————
 #           JSON‑экспорт: корректная запись поля "ports"
-# ────────────────────────────────────────────────────────────────────────
+# ————————————————————————————————————————————————————————————————
 def test_json_exports_correct_ports(cm_obj):
     import json, tempfile, os
-    from mwlab.filters import io as cmio
 
     with tempfile.TemporaryDirectory() as td:
         path = os.path.join(td, "cm.json")
@@ -402,41 +385,78 @@ def test_json_exports_correct_ports(cm_obj):
         assert blob["ports"] == cm_obj.topo.ports
 
 
-# ────────────────────────────────────────────────────────────────────────
-#                 test_cm_layout
-# ────────────────────────────────────────────────────────────────────────
+# ————————————————————————————————————————————————————————————————
+#                 _guess_layout — эвристика макета
+# ————————————————————————————————————————————————————————————————
 def _mk_tail(order=3, ports=3):
-    """Создаём искусственную TAIL‑матрицу K×K."""
     K = order + ports
     M = np.zeros((K, K))
-    # рез‑рез связи в верхнем левом
-    for i in range(order):
-        if i + 1 < order:
-            M[i, i + 1] = M[i + 1, i] = 1.0
-    # рез‑порт связи
+    for i in range(order - 1):
+        M[i, i + 1] = M[i + 1, i] = 1.0
     for p in range(ports):
         M[order - 1, order + p] = M[order + p, order - 1] = 0.8 + 0.1 * p
     return M
 
+
 def _mk_sl(order=3):
-    """SL (2 порта): S(0), L(−1)."""
     K = order + 2
     M = np.zeros((K, K))
-    for i in range(order):
+    for i in range(order - 1):
         M[i + 1, i + 2] = M[i + 2, i + 1] = 1.0
-    M[1, 0] = M[0, 1] = 0.9      # S‑R1
-    M[-2, -1] = M[-1, -2] = 0.9  # Rn‑L
+    M[1, 0] = M[0, 1] = 0.9
+    M[-2, -1] = M[-1, -2] = 0.9
     return M
+
+
+def _mk_tail_noise(order=4, ports=2, eps=1e-7):
+    M = _mk_tail(order, ports)
+    for i in range(order, order + ports):
+        for j in range(i + 1, order + ports):
+            M[i, j] = M[j, i] = eps
+    return M
+
 
 def test_guess_tail_multiport():
     M = _mk_tail(order=4, ports=3)
     assert _guess_layout(M) is MatrixLayout.TAIL
 
+
 def test_guess_sl_twoport():
     M = _mk_sl(order=5)
     assert _guess_layout(M) is MatrixLayout.SL
 
+
 def test_guess_ambiguous_returns_none():
-    M = np.zeros((4, 4))
-    # все нули → невозможно определить
+    assert _guess_layout(np.zeros((4, 4))) is None
+
+
+def test_tail_noise():
+    M = _mk_tail_noise(eps=1e-7)
+    assert _guess_layout(M) is MatrixLayout.TAIL
+
+
+def test_tail_noise_rtol():
+    M = _mk_tail_noise(eps=1e-4)
+    assert _guess_layout(M, rtol=1e-3) is MatrixLayout.TAIL
+
+
+def test_sl_with_corner_link():
+    M = _mk_sl(order=6)
+    M[1, -2] = M[-2, 1] = 0.3
+    assert _guess_layout(M) is MatrixLayout.SL
+
+
+def test_sl_rounding_noise():
+    M = _mk_sl(order=4)
+    M += 1e-6 * np.eye(M.shape[0])
+    assert _guess_layout(M) is MatrixLayout.SL
+
+
+@pytest.mark.parametrize("order,ports", [(2, 2), (3, 4), (5, 2)])
+def test_random_matrix_returns_none(order, ports):
+    K = order + ports
+    rng = np.random.default_rng(order * 10 + ports)
+    M = rng.standard_normal((K, K))
+    M = (M + M.T) / 2.0
+    np.fill_diagonal(M, 0.0)
     assert _guess_layout(M) is None

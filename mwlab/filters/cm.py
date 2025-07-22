@@ -11,12 +11,12 @@ mwlab.filters.cm
 1. **`cm_sparams`** – низкоуровневый расчёт ядра
    • вход: матрица(ы) ``M ∈ ℝ^{…,K,K}``, сетка нормированных частот
      ``ω  (…,F)``;
-   • опции: вектор/скаляр добротностей **Q**, фазовые сдвиги линий
-     *(phase_a, phase_b)*;
+   • опции: вектор/скаляр приведенных (нормированных) добротностей **qu**,
+     фазовые сдвиги линий *(phase_a, phase_b)*;
    • backend: **NumPy** или **PyTorch** (CPU / CUDA);
    • выход: комплексная матрица ``S (…,F,P,P)`` с dtype **complex64**.
 
-2. **`CouplingMatrix`** – контейнер *(Topology + Mᵢⱼ + Q + phase)*
+2. **`CouplingMatrix`** – контейнер *(Topology + Mᵢⱼ + qu + phase)*
    • проверяет согласованность коэффициентов с топологией;
    • строит тензор *M* нужного backend’а;
    • сериализуется в/из dict (`to_dict / from_dict`);
@@ -57,7 +57,7 @@ M_vals = {
     "M1_5": 0.85, "M4_6": 0.95,                              # связи c портами
 }
 
-cm = CouplingMatrix(topo, M_vals, Q=[7000]*4)
+cm = CouplingMatrix(topo, M_vals, qu=[7000]*4)
 
 # 3) Считаем S-параметры (NumPy, CPU)
 ω = np.linspace(-3.0, 3.0, 801, dtype=np.float32)       # нормированная сетка
@@ -78,7 +78,7 @@ plt.show()
 M_sl = cm.to_matrix(layout="SL")  # ndarray (K,K)
 
 # обратный импорт (в том числе из ASCII-файла)
-cm_back = CouplingMatrix.from_matrix(M_sl, topo=topo, layout="SL", Q=cm.Q)
+cm_back = CouplingMatrix.from_matrix(M_sl, topo=topo, layout="SL", qu=cm.qu)
 ```
 """
 from __future__ import annotations
@@ -103,21 +103,32 @@ from mwlab.filters.topologies import Topology
 # ─────────────────────────────────────────────────────────────────────────────
 def _parse_m_key(tag: str) -> tuple[int, int]:
     """
-    Разбирает строку ``"M{i}_{j}"`` → (i,j).  Бросает ValueError, если
-    формат неверен или i==j.
+    Разбирает строку ключа матрицы связи ``"M<i>_<j>"`` и возвращает кортеж
+    1‑based индексов ``(min(i, j), max(i, j))``.
+
+    Поддерживает диагональные элементы ― допускается ``i == j``.
+    Бросает ``ValueError``, если строка не соответствует формату или
+    индексы не являются положительными целыми числами.
     """
+    # базовая валидация префикса
     if not tag.startswith("M"):
         raise ValueError(f"ожидался ключ 'M<i>_<j>', получено {tag!r}")
+
+    # попытка разобрать два целых индекса
     try:
         i_str, j_str = tag[1:].split("_", 1)
         i, j = int(i_str), int(j_str)
-    except Exception as exc:
+    except Exception as exc:  # неправильный формат или непарсится int
         raise ValueError(
-            "неверный ключ матрицы связи: "
-            f"{tag!r}  (ожидалось 'M<i>_<j>')"
+            f"неверный ключ матрицы связи: {tag!r}  (ожидалось 'M<i>_<j>')"
         ) from exc
 
-    return (i, j) if i < j else (j, i)     # всегда (low, high)
+    # индексы должны быть положительными
+    if i <= 0 or j <= 0:
+        raise ValueError(f"индексы в {tag!r} должны быть положительными")
+
+    # гарантируем (low, high) даже при i == j
+    return (i, j) if i <= j else (j, i)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #                               backend resolver
@@ -142,9 +153,9 @@ def _lib(backend: str, *, device="cpu"):
 # ─────────────────────────────────────────────────────────────────────────────
 #                 XP-хелперы: diag / eye (безопасный complex64)
 # ─────────────────────────────────────────────────────────────────────────────
-def _xp_diag(xp, vec):
-    """`diag(vec)` → (K,K) для NumPy и batched `torch.diag_embed`."""
-    return xp.diag(vec) if xp.__name__ == "numpy" else xp.diag_embed(vec)
+#def _xp_diag(xp, vec):
+#    """`diag(vec)` → (K,K) для NumPy и batched `torch.diag_embed`."""
+#    return xp.diag(vec) if xp.__name__ == "numpy" else xp.diag_embed(vec)
 
 
 def _xp_eye(xp, n, *, dtype, **kw):
@@ -230,12 +241,12 @@ def _phase_diag(xp, omega, a_vec, b_vec, dtype):
     return _np.exp(-1j * _np.asarray(theta)).astype(dtype)
 
 # ─────────────────────────────────────────────────────────────────────────────
-#       helper: добавление потерь −j/(2 Q) на диагональ резонаторных узлов
+#       helper: добавление потерь −j/qu на диагональ резонаторных узлов
 # ─────────────────────────────────────────────────────────────────────────────
-def _build_M_complex(topo: Topology, M_real, Q, xp, cplx, **kw):
+def _build_M_complex(topo: Topology, M_real, qu, xp, cplx, **kw):
     """
-    Формирует комплексную матрицу ``M̃ = M_real - j / (2 Q)``.
-    Поддерживает скаляр/вектор `Q`, numpy.ndarray и torch.Tensor.
+    Формирует комплексную матрицу ``M̃ = M_real - j / qu``.
+    Поддерживает скаляр/вектор `qu`, numpy.ndarray и torch.Tensor.
     """
     # базовая матрица
     if xp.__name__ == "torch":
@@ -248,21 +259,21 @@ def _build_M_complex(topo: Topology, M_real, Q, xp, cplx, **kw):
         raise ValueError(
             f"M_real: ожидалась матрица {K}×{K}, получено {M.shape[-2]}×{M.shape[-1]}"
         )
-    if Q is None:
+    if qu is None:
         return M
 
     order = topo.order
     idx = xp.arange(order, **kw)
     dtype_f64 = xp.float64 if xp.__name__ == "torch" else _np.float64
 
-    is_tensor = xp.__name__ == "torch" and xp.is_tensor(Q) and Q.ndim == 1
-    if isinstance(Q, (list, tuple)) or (isinstance(Q, _np.ndarray) and Q.ndim == 1) or is_tensor:
-        Q_arr = xp.as_tensor(Q, dtype=dtype_f64, **kw) if is_tensor else xp.asarray(Q, dtype=dtype_f64, **kw)
-        if Q_arr.shape[-1] != order:
-            raise ValueError("Q: неверная длина")
-        alpha = 1.0 / (2.0 * Q_arr)
+    is_tensor = xp.__name__ == "torch" and xp.is_tensor(qu) and qu.ndim == 1
+    if isinstance(qu, (list, tuple)) or (isinstance(qu, _np.ndarray) and qu.ndim == 1) or is_tensor:
+        qu_arr = xp.as_tensor(qu, dtype=dtype_f64, **kw) if is_tensor else xp.asarray(qu, dtype=dtype_f64, **kw)
+        if qu_arr.shape[-1] != order:
+            raise ValueError("qu: неверная длина")
+        alpha = 1.0 / qu_arr
     else:
-        alpha = xp.full((order,), 1.0 / (2.0 * float(Q)), dtype=dtype_f64, **kw)
+        alpha = xp.full((order,), 1.0 / float(qu), dtype=dtype_f64, **kw)
 
     alpha_j = (alpha * 1j).to(cplx) if xp.__name__ == "torch" else (alpha * 1j).astype(cplx)
     alpha_j = xp.broadcast_to(alpha_j, M.shape[:-2] + (order,))
@@ -278,7 +289,7 @@ def cm_sparams(
     M_real,
     omega,
     *,
-    Q=None,
+    qu=None,
     phase_a=None,
     phase_b=None,
     backend: str = "numpy",
@@ -294,7 +305,7 @@ def cm_sparams(
     topo     : :class:`mwlab.filters.topologies.Topology`
     M_real   : ndarray | torch.Tensor, вещественная матрица связи ``(...,K,K)``
     omega    : ndarray | torch.Tensor, нормированная частота ``(...,F)``
-    Q        : None | скаляр | вектор длиной *order* | torch.Tensor
+    qu        : None | скаляр | вектор длиной *order* | torch.Tensor
     phase_a, phase_b : коэффициенты фазовых линий (см. докстринг `_phase_vec`)
     backend  : ``'numpy'`` | ``'torch'``
     device   : строка устройства для Torch (``'cpu'`` | ``'cuda:0'`` …)
@@ -311,7 +322,7 @@ def cm_sparams(
 
     # входы → backend-типы --------------------------------------------------
     omega = xp.as_tensor(omega, dtype=xp.float32, **kw) if hasattr(xp, "as_tensor") else xp.asarray(omega, dtype=_np.float32, **kw)
-    M     = _build_M_complex(topo, M_real, Q, xp, cplx, **kw)
+    M     = _build_M_complex(topo, M_real, qu, xp, cplx, **kw)
 
     # неизменные U, R, I_p -------------------------------------------------
     U, R, I_ports = _get_cached_mats(order, ports, xp, dtype=cplx, **kw)
@@ -374,11 +385,77 @@ class MatrixLayout(Enum):  # экспортируем в __all__ ниже
 # ----------------------------------------------------------------------------
 #                  helpers: permutation ↔ MatrixLayout
 # ----------------------------------------------------------------------------
+def _make_perm(
+    order: int,
+    ports: int,
+    layout: MatrixLayout,
+    permutation: Sequence[int] | None = None,
+):
+    """
+    Формирует перестановочный вектор **perm** длиной *K = order + ports*,
+    описывающий взаимное расположение строк/столбцов во *внешней* матрице
+    связи относительно **канонического** (TAIL) порядка
+    ``[R1 … Rn,  P1 … Pp]``.
 
-def _make_perm(order: int, ports: int, layout: MatrixLayout,
-               permutation: Sequence[int] | None = None):
-    """Возвращает список индексов *perm* такой, что
-    ``M_canon = P @ M_ext @ P.T``, где ``P = eye()[perm]``.
+    Семантика
+    ---------
+    * **perm[i] = j** означает, что **i‑я строка/столбец внешней матрицы**
+      (той, в которой вы сохраняете/читаeте данные) должна быть взята из
+      **j‑й строки/столбца канонической матрицы**.
+
+    Соответственно, преобразования матриц выполняются так::
+
+        P      = eye(K)[perm]        # матрица‑коммутатор
+        M_ext  = P @ M_can @ P.T     # canonical → external
+        M_can  = P.T @ M_ext @ P     # external  → canonical
+
+    Параметры
+    ---------
+    order : int
+        Количество резонаторов *n*.
+    ports : int
+        Количество портов *p* (сейчас поддерживается только *p = 2* для
+        макета **SL**).
+    layout : MatrixLayout
+        Желаемый макет *внешней* матрицы:
+
+        * **TAIL**   – канонический порядок ``[R1 … Rn  P1 … Pp]``
+          → возвращается ``[0, 1, …, K‑1]``;
+
+        * **SL**     – классический 2‑портовый порядок
+          ``[S,  R1 … Rn,  L]``
+          → возвращается ``[n, 0, 1, …, n‑1, n+1]``;
+
+        * **CUSTOM** – произвольная перестановка, задаётся
+          аргументом *permutation*.
+
+    permutation : Sequence[int] | None
+        Пользовательская перестановка **только** для ``layout=CUSTOM``.
+        Должна быть перестановкой чисел `0 … K‑1` без повторов.
+
+    Возвращает
+    ----------
+    list[int]
+        Перестановка *perm* размера *K*.
+
+    Примеры
+    -------
+    >>> from mwlab.filters.cm import _make_perm, MatrixLayout
+    >>> _make_perm(order=4, ports=2, layout=MatrixLayout.SL)
+    [4, 0, 1, 2, 3, 5]        # 4 резонатора + 2 порта
+
+    >>> _make_perm(3, 2, MatrixLayout.TAIL)
+    [0, 1, 2, 3, 4]
+
+    >>> _make_perm(3, 2, MatrixLayout.CUSTOM,
+    ...            permutation=[3, 0, 1, 4, 2])
+    [3, 0, 1, 4, 2]
+
+    Исключения
+    ----------
+    ValueError
+        * Неподдерживаемый макет или количество портов для **SL**;
+        * `layout == CUSTOM`, но *permutation* не задана или содержит ошибки.
     """
     if layout is MatrixLayout.TAIL:
         return list(range(order + ports))
@@ -403,24 +480,24 @@ def _make_perm(order: int, ports: int, layout: MatrixLayout,
 # ─────────────────────────────────────────────────────────────────────────────
 @dataclass(slots=True)
 class CouplingMatrix:
-    """Контейнер «Topology + Mij + Q + фазовые линии»."""
+    """Контейнер «Topology + Mij + qu + фазовые линии»."""
     topo: Topology
     M_vals: Mapping[str, float]
-    Q: float | Sequence[float] | _np.ndarray | "torch.Tensor" | None = None
+    qu: float | Sequence[float] | _np.ndarray | "torch.Tensor" | None = None
     phase_a: Mapping[int, float] | Sequence[float] | None = None
     phase_b: Mapping[int, float] | Sequence[float] | None = None
 
     # ------------------------------------------------------------------ init
     def __post_init__(self):
         self.topo.validate_mvals(self.M_vals, strict=False)
-        if self.Q is not None and not isinstance(self.Q, (int, float)):
+        if self.qu is not None and not isinstance(self.qu, (int, float)):
             try:
-                qlen = len(self.Q)  # type: ignore
+                qlen = len(self.qu)  # type: ignore
             except TypeError:
                 qlen = None
             if qlen is not None and qlen != self.topo.order:
                 raise ValueError(
-                    f"Q: ожидается {self.topo.order} значений, получено {qlen}"
+                    f"qu: ожидается {self.topo.order} значений, получено {qlen}"
                 )
         for label, vec in (("phase_a", self.phase_a), ("phase_b", self.phase_b)):
             if isinstance(vec, Sequence) and len(vec) != self.topo.ports:
@@ -475,7 +552,7 @@ class CouplingMatrix:
             self.topo,
             self._tensor_M(backend, device=device),
             omega,
-            Q=self.Q,
+            qu=self.qu,
             phase_a=self.phase_a,
             phase_b=self.phase_b,
             backend=backend,
@@ -488,7 +565,7 @@ class CouplingMatrix:
     def to_dict(self) -> Dict[str, float]:
         """
         Сериализация в JSON-дружелюбный словарь:
-        `order`, `ports`, `topology`, все `M…`, `Q…`, `phase_a…`, `phase_b…`.
+        `order`, `ports`, `topology`, все `M…`, `qu…`, `phase_a…`, `phase_b…`.
         """
         out: Dict[str, float] = {
             "order": self.topo.order,
@@ -497,15 +574,15 @@ class CouplingMatrix:
             **{k: float(v) for k, v in self.M_vals.items()},
         }
 
-        # Q
-        if self.Q is not None:
+        # qu
+        if self.qu is not None:
             if isinstance(
-                self.Q, (list, tuple, _np.ndarray)
-            ) or (hasattr(_np, "ndarray") and isinstance(self.Q, _np.ndarray)):
-                for idx, q in enumerate(self.Q, 1):
-                    out[f"Q_{idx}"] = float(q)
+                self.qu, (list, tuple, _np.ndarray)
+            ) or (hasattr(_np, "ndarray") and isinstance(self.qu, _np.ndarray)):
+                for idx, q in enumerate(self.qu, 1):
+                    out[f"qu_{idx}"] = float(q)
             else:
-                out["Q"] = float(self.Q)
+                out["qu"] = float(self.qu)
 
         # phases
         for pref, mapping in (
@@ -536,13 +613,13 @@ class CouplingMatrix:
         if not M_vals:
             raise ValueError("from_dict: нет коэффициентов 'M…'")
 
-        # ------------------------------- 2. Q-параметры -----------------------
-        if "Q" in d:
-            Q = float(d["Q"])
+        # ------------------------------- 2. qu-параметры -----------------------
+        if "qu" in d:
+            qu = float(d["qu"])
         else:
-            q_keys = sorted((k for k in d if k.startswith("Q_")),
+            q_keys = sorted((k for k in d if k.startswith("qu_")),
                             key=lambda s: int(s.split("_")[1]))
-            Q = [float(d[k]) for k in q_keys] if q_keys else None
+            qu = [float(d[k]) for k in q_keys] if q_keys else None
 
         # ------------------------------- 3. Фазовые сдвиги --------------------
         phase_a = {int(k[7:]): float(v) for k, v in d.items()
@@ -580,7 +657,7 @@ class CouplingMatrix:
 
         return cls(topo,
                    M_vals,
-                   Q=Q,
+                   qu=qu,
                    phase_a=phase_a,
                    phase_b=phase_b)
 
@@ -619,7 +696,7 @@ class CouplingMatrix:
             atol: float = 1e-8,
             rtol: float = 1e-5,
             # … и сразу пробрасываем в итоговый объект:
-            Q=None,
+            qu=None,
             phase_a=None,
             phase_b=None,
     ) -> "CouplingMatrix":
@@ -661,8 +738,8 @@ class CouplingMatrix:
         atol, rtol : float
             Допуски для `numpy.allclose` при проверке симметричности.
 
-        Q, phase_a, phase_b
-            Добротности резонаторов и фазовые коэффициенты линий – передаются
+        qu, phase_a, phase_b
+            Приведенные добротности резонаторов и фазовые коэффициенты линий – передаются
             без изменений в конструктор :class:`CouplingMatrix`.
 
         Returns
@@ -755,7 +832,7 @@ class CouplingMatrix:
         return cls(
             topo,
             M_vals,
-            Q=Q,
+            qu=qu,
             phase_a=phase_a,
             phase_b=phase_b,
         )
@@ -846,8 +923,13 @@ class CouplingMatrix:
     # ---------------------------------------------------------------- repr
     def __repr__(self):
         ph_cnt = len(self.phase_a or []) + len(self.phase_b or [])
+        qu_info = "None" if self.qu is None else (
+            f"vec[{len(self.qu)}]" if isinstance(self.qu, (list, tuple, _np.ndarray))
+            else f"{self.qu:g}")
+
         return (
             f"CouplingMatrix(order={self.topo.order}, "
             f"ports={self.topo.ports}, M={len(self.M_vals)}, "
-            f"phases={ph_cnt})"
+            f"phases={ph_cnt}),"
+            f"qu={qu_info}"
         )

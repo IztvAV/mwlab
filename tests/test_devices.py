@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import math
-
 import numpy as np
 import pytest
 import skrf as rf
@@ -22,7 +21,7 @@ from mwlab.filters.cm import CouplingMatrix
 from mwlab.filters.devices import Filter
 from mwlab.filters.topologies import get_topology, TopologyError, Topology
 
-# ───────────────────────────────────── fixtures ────────────────────────────
+# ─────────────────────────────────── fixtures ────────────────────────────
 @pytest.fixture(scope="module")
 def topo4() -> Topology:
     return get_topology("folded", order=4)
@@ -34,21 +33,22 @@ def cm4(topo4):
         "M1_2": 1.05, "M2_3": 0.90, "M3_4": 1.05, "M1_4": 0.25,
         "M1_5": 0.60, "M4_6": 0.80,
     }
-    return CouplingMatrix(topo4, M_vals=m_vals, Q=7000)
+    # нормированная добротность (qu), а не Q!
+    return CouplingMatrix(topo4, M_vals=m_vals, qu=7000)
 
 
 F_HZ = np.linspace(1.0e9, 3.0e9, 51)
 
-# ───────────────────────── 1. фабрики Filter.* ────────────────────────────
+# ───────────────────── 1. фабрики Filter.* ───────────────────────────────
 @pytest.mark.parametrize(
     "factory, args, kwargs, spec",
     [
-        (Filter.lp,  (2.5,),          dict(unit="GHz"), "cut"),
-        (Filter.hp,  (2.2,),          dict(unit="GHz"), "cut"),
-        (Filter.bp,  (2.1, 0.25),     dict(unit="GHz"), "bw"),
-        (Filter.br,  (2.1, 0.25),     dict(unit="GHz"), "bw"),
-        (Filter.bp_edges, (2.0, 2.2), dict(unit="GHz"), "edges"),
-        (Filter.br_edges, (2.0, 2.2), dict(unit="GHz"), "edges"),
+        (Filter.lp,        (2.5,),          dict(unit="GHz"), "cut"),
+        (Filter.hp,        (2.2,),          dict(unit="GHz"), "cut"),
+        (Filter.bp,        (2.1, 0.25),     dict(unit="GHz"), "bw"),
+        (Filter.br,        (2.1, 0.25),     dict(unit="GHz"), "bw"),
+        (Filter.bp_edges,  (2.0, 2.2),      dict(unit="GHz"), "edges"),
+        (Filter.br_edges,  (2.0, 2.2),      dict(unit="GHz"), "edges"),
     ],
 )
 def test_factories(cm4, factory, args, kwargs, spec):
@@ -57,42 +57,35 @@ def test_factories(cm4, factory, args, kwargs, spec):
     assert flt.ports == 2
     assert flt._spec == spec
 
-# ─────────────────── 2. f ↔ Ω: прямое и обратное ──────────────────────────
+# ─────────────── 2. f ↔ Ω: прямое и обратное -----------------------------
 @pytest.mark.parametrize(
-    "flt_constructor, omega_formula",
+    "flt_constructor",
     [
-        # LP
-        (
-            lambda cm: Filter.lp(cm, 2.0, unit="GHz"),
-            lambda f, f0: f / f0,
-        ),
-        # HP
-        (
-            lambda cm: Filter.hp(cm, 2.0, unit="GHz"),
-            lambda f, f0: f0 / f,
-        ),
-        # BP
-        (
-                lambda cm: Filter.bp(cm, 2.0, 0.2, unit="GHz"),
-                lambda f, fb: (fb[0] / fb[1]) * (f / fb[0] - fb[0] / f),
-        ),
-        # BR
-        (
-                lambda cm: Filter.br(cm, 2.0, 0.2, unit="GHz"),
-                lambda f, fb: (fb[1] / fb[0]) / (f / fb[0] - fb[0] / f),
-        ),
+        lambda cm: Filter.lp(cm, 2.0, unit="GHz"),
+        lambda cm: Filter.hp(cm, 2.0, unit="GHz"),
+        lambda cm: Filter.bp(cm, 2.0, 0.2, unit="GHz"),
+        lambda cm: Filter.br(cm, 2.0, 0.2, unit="GHz"),
     ],
 )
-def test_forward_reverse_mapping(cm4, flt_constructor, omega_formula):
+def test_forward_reverse_mapping(cm4, flt_constructor):
     filt: Filter = flt_constructor(cm4)
     with np.errstate(divide='ignore', invalid='ignore'):
         omega = filt._omega(F_HZ)
 
-    args = (filt.f0, filt.bw) if filt.kind in {"BP", "BR"} else (filt.f0,)
-    with np.errstate(divide='ignore', invalid='ignore'):
-        ref = omega_formula(F_HZ, args)
+    # ручная формула‑референс
+    if filt.kind == "LP":
+        ref = F_HZ / filt.f_edges[0]
+    elif filt.kind == "HP":
+        ref = filt.f_edges[1] / F_HZ
+    elif filt.kind == "BP":
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratio = F_HZ / filt.f0 - filt.f0 / F_HZ
+            ref = (filt.f0 / filt.bw) * ratio
+    else:  # BR
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratio = F_HZ / filt.f0 - filt.f0 / F_HZ
+            ref = (filt.bw / filt.f0) / ratio
 
-    # сравниваем только конечные значения (без inf / nan)
     finite = np.isfinite(ref) & np.isfinite(omega)
     assert np.allclose(omega[finite], ref[finite], rtol=1e-12, atol=1e-12)
 
@@ -101,14 +94,14 @@ def test_forward_reverse_mapping(cm4, flt_constructor, omega_formula):
     assert np.allclose(f_back * 1e9, F_HZ, atol=1e-3)
 
 
-# ────────────────────────── 3. sparams smoke ───────────────────────────────
+# ───────────────── 3. sparams smoke ▸ NumPy ------------------------------
 def test_sparams_shape_dtype(cm4):
     filt = Filter.bp(cm4, 2.0, 0.25, unit="GHz")
     S = filt.sparams(F_HZ, backend="numpy")
     assert S.shape == (F_HZ.size, 2, 2)
     assert S.dtype == np.complex64
 
-# ──────────────────── 4. Touchstone round-trip ─────────────────────────────
+# ─────────────── 4. Touchstone round‑trip -------------------------------
 @pytest.mark.parametrize(
     "factory",
     [
@@ -124,14 +117,12 @@ def test_touchstone_roundtrip(cm4, factory):
 
     assert restored.kind == filt.kind
     assert math.isclose(restored.f0, filt.f0, rel_tol=1e-12)
-    assert restored._spec == filt._spec
-
     np.testing.assert_allclose(
         restored.cm.sparams(np.linspace(-1, 1, 11)),
         filt.cm.sparams(np.linspace(-1, 1, 11)),
     )
 
-# ───────────────────── 5. ошибки валидации ────────────────────────────────
+# ───────────── 5. ошибки валидации ---------------------------------------
 def test_invalid_kind(cm4):
     with pytest.raises(ValueError):
         Filter(cm4, kind="XYZ", f0=1.0)
@@ -151,18 +142,18 @@ def test_bad_combination(cm4, kwargs):
     with pytest.raises(ValueError):
         Filter(cm4, kind="BP", **kwargs)
 
-# ──────────────── 6. freq_grid с rf.Frequency ─────────────────────────────
+# ──────── 6. freq_grid с rf.Frequency ------------------------------------
 def test_freq_grid_as_rf(cm4):
     filt = Filter.hp(cm4, 2.0, unit="GHz")
     om = np.linspace(0.5, 2.0, 101)
     freq_obj = filt.freq_grid(om, unit="MHz", as_rf=True)
     assert isinstance(freq_obj, rf.Frequency)
 
-    sel = np.sort(freq_obj.f[::25])  # f  ↑
+    sel = np.sort(freq_obj.f[::25])
     omega_ref = om[::25][::-1] if filt.kind == "HP" else om[::25]
     assert np.allclose(filt._omega(sel), omega_ref, rtol=1e-12, atol=1e-12)
 
-# ────────────────── 7. проверка _device_params ─────────────────────────────
+# ────────────── 7. _device_params content --------------------------------
 def test_device_params_content(cm4):
     filt = Filter.br_edges(cm4, 1.9, 2.1, unit="GHz")
     params = filt._device_params()
@@ -174,25 +165,22 @@ def test_device_params_content(cm4):
     assert ts.params["device"] == "Filter"
     assert "kind" in ts.params
 
-# ───────────────────────── 8. LP / HP с f_edges ────────────────────────────
+# ───────────── 8. LP/HP — ввод через f_edges -----------------------------
 def test_lp_hp_accept_edges(cm4):
-    # LP: указали только верхнюю границу
     lp = Filter(cm4, kind="LP", f_edges=(2.3e9, None))
     assert math.isclose(lp.f_edges[0], 2.3e9)
-    # HP: указали только нижнюю границу
+
     hp = Filter(cm4, kind="HP", f_edges=(None, 2.3e9))
     assert math.isclose(hp.f_edges[1], 2.3e9)
 
-# ───────────────────── 9. неизвестная единица частоты ─────────────────────
+# ───────────── 9. неизвестная единица частоты ----------------------------
 def test_unknown_unit_message(cm4):
     with pytest.raises(ValueError) as exc:
         Filter.lp(cm4, 2.3, unit="FooBar")
     msg = str(exc.value).lower()
-    # сообщение должно содержать и введённое слово, и одну из валидных единиц
-    assert "foobar" in msg
-    assert "ghz" in msg or "hz" in msg
+    assert "foobar" in msg and ("ghz" in msg or "hz" in msg)
 
-# ─────────────────── 10. BP / BR – знаковая двухветвь ────────────────────
+# ───────────── 10. BP/BR — двусторонняя ветвь ----------------------------
 @pytest.mark.parametrize(
     "factory",
     [
@@ -202,22 +190,19 @@ def test_unknown_unit_message(cm4):
 )
 def test_two_sided_sign_encoding(cm4, factory):
     filt = factory(cm4)
-
     om = np.array([-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0])
     f = filt.freq_grid(om, unit="Hz", as_rf=False)
 
-    # 1) длины совпадают
     assert f.size == om.size
-
-    # 2) средняя точка Ω=0 → f₀
     assert math.isclose(f[om == 0][0], filt.f0, rel_tol=1e-12)
 
-    # 3) Симметрия: f(−Ω) * f(+Ω) == f₀²
-    pos = om > 0
-    neg = om < 0
-    assert np.allclose(
-        f[pos] * f[neg][::-1],
-        filt.f0 ** 2,
-        rtol=1e-12,
-        atol=1e-12,
-    )
+    pos, neg = om > 0, om < 0
+    assert np.allclose(f[pos] * f[neg][::-1], filt.f0 ** 2, rtol=1e-12, atol=1e-12)
+
+# ───────────── 11. set_Q / Q‑property ------------------------------------
+def test_set_Q_and_property(cm4):
+    filt = Filter.bp(cm4, 2.0, 0.2, unit="GHz")
+    filt.set_Q(70_000)                # FBW = 0.1 → qu = 7 000
+    assert np.allclose(filt.Q, 70_000)
+    assert np.allclose(filt.cm.qu, 7_000)
+

@@ -33,8 +33,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Sequence, Union
-import warnings
+from typing import Union
 
 import numpy as np
 
@@ -155,39 +154,62 @@ def read_matrix(
 # ──────────────────────────────────────────────────────────────────────────────
 #                        layout heuristics (2‑port SL vs TAIL)
 # ──────────────────────────────────────────────────────────────────────────────
-def _guess_layout(M: np.ndarray) -> MatrixLayout | None:
+def _guess_layout(M: np.ndarray, *, rtol: float = 1e-6) -> MatrixLayout | None:
     """
-    Определяет раскладку матрицы связи:
-      - TAIL для многопортовых устройств (последние P индексы — порты);
-      - SL для классического 2-портового Source–Load;
-      - None если не удалось определить однозначно.
+    Эвристически определяет, соответствует ли симметричная матрица связи
+    одному из двух наиболее распространённых макетов:
+
+    * **TAIL** – резонаторы идут первыми, P портовых строк/столбцов – в хвосте;
+    * **SL**   – 2‑портовая запись «Source – Resonators – Load».
+
+    Возвращает
+    ----------
+    MatrixLayout | None
+        Угаданный макет либо ``None``, если определить надёжно не удалось.
+
+    Ограничения
+    -----------
+    Эвристика рассчитана на «физически корректные» матрицы, в которых:
+    • диагональ портов нулевая;
+    • порт‑порт связь ≈ 0;
+    • хотя бы один коэффициент порт‑резонатор ≠ 0.
     """
+    import numpy as np
+
     K = M.shape[0]
-    if K < 3:
+    if K < 3 or np.allclose(M, 0.0):
         return None
 
-    if np.allclose(M, 0.0, atol=1e-12):
-        return None  # вся матрица нулевая → неопределимо
+    # --- адаптивный порог --------------------------------------------------
+    # берём максимум по модулю и расслабляем до относительного rtol
+    max_mag = np.max(np.abs(M))
+    tol = max_mag * rtol if max_mag > 0 else 1e-12
 
-    # 1) TAIL: считаем количество подряд идущих строк «в хвосте»,
-    #    у которых все элементы от диагонали вправо нули.
-    P = 0
+    # ------------------------------------------------------------------ TAIL
+    # Считаем подряд идущие «портовые» строки снизу:
+    #  • диагональ ≈ 0
+    #  • все элементы правее диагонали ≈ 0
+    tail_ports = 0
     for i in range(K - 1, -1, -1):
-        if np.allclose(M[i, i:], 0.0, atol=1e-12):
-            P += 1
+        if abs(M[i, i]) <= tol and np.all(np.abs(M[i, i:]) <= tol):
+            tail_ports += 1
         else:
             break
-    if P >= 2:
+
+    if tail_ports >= 2:
         return MatrixLayout.TAIL
 
-    # 2) SL (2-портовый): [S, R1…Rn, L]
-    #    проверяем наличие S–R1 и Rn–L связей без прямой S–L.
-    #    Индексы: S=0, R1=1, Rn=K-2, L=K-1.
-    if (not np.isclose(M[0, 1],   0.0, atol=1e-12)  # S–R1
-        and not np.isclose(M[K-2, K-1], 0.0, atol=1e-12)  # Rn–L
-        and  np.isclose(M[0, K-1], 0.0, atol=1e-12)  # нет S–L
-    ):
-        return MatrixLayout.SL
+    # -------------------------------------------------------------------- SL
+    # Проверяем набор признаков:
+    #  • 2 порта: первая и последняя строки имеют диагональ ≈ 0
+    #  • в этих строках нет связи “порт‑порт”
+    #  • обе строки имеют хотя бы одну связь с резонаторами
+    if K >= 4 and abs(M[0, 0]) <= tol and abs(M[K - 1, K - 1]) <= tol:
+        # порт‑порт
+        if abs(M[0, K - 1]) < tol:
+            s_links = np.abs(M[0, 1:K - 1]) > tol
+            l_links = np.abs(M[K - 1, 1:K - 1]) > tol
+            if s_links.any() and l_links.any():
+                return MatrixLayout.SL
 
-    # не удалось однозначно распознать
     return None
