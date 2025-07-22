@@ -278,7 +278,7 @@ def _build_M_complex(topo: Topology, M_real, qu, xp, cplx, **kw):
     alpha_j = (alpha * 1j).to(cplx) if xp.__name__ == "torch" else (alpha * 1j).astype(cplx)
     alpha_j = xp.broadcast_to(alpha_j, M.shape[:-2] + (order,))
 
-    M[..., idx, idx] -= alpha_j
+    M[..., idx, idx] += alpha_j
     return M
 
 # ─────────────────────────────────────────────────────────────────────────────
