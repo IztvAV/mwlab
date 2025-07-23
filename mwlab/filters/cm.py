@@ -918,16 +918,15 @@ class CouplingMatrix:
         cbar = fig.colorbar(im, ax=ax, shrink=0.8, extend='both')
         if log:
             locator = _mticker.SymmetricalLogLocator(base=10, linthresh=linthresh)
-            cbar.locator = locator
-            cbar.formatter = _mticker.LogFormatterMathtext()
+            formatter = _mticker.LogFormatterMathtext()
+            cbar.locator, cbar.formatter = locator, formatter
         else:
-            cbar.locator = _mticker.MaxNLocator(nbins=7, prune=None)
-        cbar.update_ticks()
+            # --- линейная шкала, симметричные деления ---
+            locator = _mticker.MaxNLocator(nbins=7, symmetric=True)
+            cbar.locator = locator
+            # при желании: cbar.formatter = mticker.FormatStrFormatter('%.2f')
 
-        cbar.set_label("Magnitude of M_ij")
-
-        fig.tight_layout()
-        return fig
+        cbar.update_ticks()  # применяем локатор/форматтер
 
 
     # ---------------------------------------------------------------- repr
