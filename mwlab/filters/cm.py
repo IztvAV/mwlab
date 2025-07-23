@@ -930,6 +930,6 @@ class CouplingMatrix:
         return (
             f"CouplingMatrix(order={self.topo.order}, "
             f"ports={self.topo.ports}, M={len(self.M_vals)}, "
-            f"qu={qu_info},"
+            f"qu={qu_info}, "
             f"phases={ph_cnt})"
         )
