@@ -898,8 +898,8 @@ class CouplingMatrix:
         ax.set_yticks(_np.arange(M.shape[0]))
         ax.set_xticklabels(labels)
         ax.set_yticklabels(labels)
-        #ax.set_xlabel("узлы j")
-        #ax.set_ylabel("узлы i")
+        ax.set_xlabel("узлы j")
+        ax.set_ylabel("узлы i")
 
         # аннотации чисел (линейные!)
         if annotate and M.shape[0] <= 15:
@@ -915,7 +915,7 @@ class CouplingMatrix:
                     ax.text(j, i, text, ha="center", va="center", fontsize=8, color="black")
 
         # цветовая шкала
-        cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+        cbar = fig.colorbar(im, ax=ax, shrink=0.8, extend='both')
         if log:
             locator = _mticker.SymmetricalLogLocator(base=10, linthresh=linthresh)
             cbar.locator = locator
@@ -924,7 +924,7 @@ class CouplingMatrix:
             cbar.locator = _mticker.MaxNLocator(nbins=7, prune=None)
         cbar.update_ticks()
 
-        #cbar.set_label("Magnitude of M_ij")
+        cbar.set_label("Magnitude of M_ij")
 
         fig.tight_layout()
         return fig
