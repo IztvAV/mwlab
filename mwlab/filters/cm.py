@@ -90,6 +90,7 @@ from enum import Enum, auto
 try:                                        # matplotlib не обязателен для core
     import matplotlib.pyplot as _plt
     import matplotlib.colors as _mcolors
+    import matplotlib.ticker as _mticker
     _HAS_MPL = True
 except ModuleNotFoundError:                 # pragma: no cover
     _HAS_MPL = False
@@ -914,13 +915,16 @@ class CouplingMatrix:
                     ax.text(j, i, text, ha="center", va="center", fontsize=8, color="black")
 
         # цветовая шкала
-        #cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+        cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+        if log:
+            locator = _mticker.SymmetricalLogLocator(base=10, linthresh=linthresh)
+            cbar.locator = locator
+            cbar.formatter = _mticker.LogFormatterMathtext()
+        else:
+            cbar.locator = _mticker.MaxNLocator(nbins=7, prune=None)
+        cbar.update_ticks()
+
         #cbar.set_label("Magnitude of M_ij")
-        cbar = fig.colorbar(im, ax=ax, shrink=0.8, extend='both')
-        if isinstance(norm, _mcolors.SymLogNorm):
-            import matplotlib.ticker as mt
-            # симметричный лог‑локатор (отрицательные + положительные)
-            cbar.ax.yaxis.set_major_locator(mt.SymmetricalLogLocator(base=10))
 
         fig.tight_layout()
         return fig
