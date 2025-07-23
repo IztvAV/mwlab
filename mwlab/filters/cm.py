@@ -927,6 +927,7 @@ class CouplingMatrix:
             # при желании: cbar.formatter = mticker.FormatStrFormatter('%.2f')
 
         cbar.update_ticks()  # применяем локатор/форматтер
+        return fig
 
 
     # ---------------------------------------------------------------- repr
