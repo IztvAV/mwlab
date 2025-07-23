@@ -846,7 +846,7 @@ class CouplingMatrix:
         cmap: str = "coolwarm",
         annotate: bool = True,
         hide_zero: bool = True,
-        figsize: Tuple[int, int] = (5, 5),
+        figsize: Tuple[int, int] = (8, 6),
         backend: str = "numpy",
         device: str = "cpu",
     ) -> "matplotlib.figure.Figure":
@@ -895,10 +895,8 @@ class CouplingMatrix:
         # подписи осей
         ax.set_xticks(_np.arange(M.shape[0]))
         ax.set_yticks(_np.arange(M.shape[0]))
-        ax.set_xticklabels(labels, rotation=90)
+        ax.set_xticklabels(labels)
         ax.set_yticklabels(labels)
-        ax.set_xlabel("узлы j")
-        ax.set_ylabel("узлы i")
 
         # аннотации чисел (линейные!)
         if annotate and M.shape[0] <= 15:
@@ -915,7 +913,6 @@ class CouplingMatrix:
 
         # цветовая шкала
         cbar = fig.colorbar(im, ax=ax, shrink=0.8)
-        cbar.set_label("Magnitude of M_ij")
         fig.tight_layout()
         return fig
 
