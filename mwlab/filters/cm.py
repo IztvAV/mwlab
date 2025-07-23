@@ -897,6 +897,8 @@ class CouplingMatrix:
         ax.set_yticks(_np.arange(M.shape[0]))
         ax.set_xticklabels(labels)
         ax.set_yticklabels(labels)
+        #ax.set_xlabel("узлы j")
+        #ax.set_ylabel("узлы i")
 
         # аннотации чисел (линейные!)
         if annotate and M.shape[0] <= 15:
@@ -912,7 +914,14 @@ class CouplingMatrix:
                     ax.text(j, i, text, ha="center", va="center", fontsize=8, color="black")
 
         # цветовая шкала
-        cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+        #cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+        #cbar.set_label("Magnitude of M_ij")
+        cbar = fig.colorbar(im, ax=ax, shrink=0.8, extend='both')
+        if isinstance(norm, _mcolors.SymLogNorm):
+            import matplotlib.ticker as mt
+            # симметричный лог‑локатор (отрицательные + положительные)
+            cbar.ax.yaxis.set_major_locator(mt.SymmetricalLogLocator(base=10))
+
         fig.tight_layout()
         return fig
 
