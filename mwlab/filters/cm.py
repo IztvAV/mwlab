@@ -523,15 +523,31 @@ def cm_forward(
     # -------- кеш U, R, I_ports -------------------------------------------
     U, R, I_ports = _get_cached_mats(order, ports, xp, dtype=cplx, **kw)
 
-    # растягиваем U/R до batch-формы, если нужно (добавляем оси спереди)
+    # Добавляем batch-оси к U/R, если надо (только batch, без F пока)
     while U.ndim < M_c.ndim:
         U, R = (t[None, ...] for t in (U, R))
+
+    # Добавляем ось частоты (F) ко всем матрицам размера K×K
+    # M_c : (..., K, K) → (..., 1, K, K)
+    M_c = M_c[..., None, :, :]
+    U = U[..., None, :, :]  # (..., 1, K, K)
+    R = R[..., None, :, :]  # (..., 1, K, K)
 
     j = xp.asarray(1j, dtype=cplx, **kw)
     w = omega[..., None, None]  # (..., F, 1, 1)
 
+    # Теперь все с одинаковым набором осей: (..., F, K, K)
+    A = R + j * w * U - j * M_c
+
+    ## растягиваем U/R до batch-формы, если нужно (добавляем оси спереди)
+    #while U.ndim < M_c.ndim:
+    #    U, R = (t[None, ...] for t in (U, R))
+
+    #j = xp.asarray(1j, dtype=cplx, **kw)
+    #w = omega[..., None, None]  # (..., F, 1, 1)
+
     # A = R + j*ω*U - j*M̃
-    A = R + j * w * U - j * M_c  # (..., F, K, K)
+    #A = R + j * w * U - j * M_c  # (..., F, K, K)
 
     # -------- решаем систему ----------------------------------------------
     use_solve = (method == "solve") or (method == "auto" and ports <= 4)
