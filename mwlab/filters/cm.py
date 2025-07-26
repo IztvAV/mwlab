@@ -154,11 +154,6 @@ def _lib(backend: str, *, device="cpu"):
 # ─────────────────────────────────────────────────────────────────────────────
 #                 XP-хелперы: diag / eye (безопасный complex64)
 # ─────────────────────────────────────────────────────────────────────────────
-#def _xp_diag(xp, vec):
-#    """`diag(vec)` → (K,K) для NumPy и batched `torch.diag_embed`."""
-#    return xp.diag(vec) if xp.__name__ == "numpy" else xp.diag_embed(vec)
-
-
 def _xp_eye(xp, n, *, dtype, **kw):
     """
     Создаёт единичную матрицу с dtype `complex64`.
@@ -201,90 +196,386 @@ def _get_cached_mats(order: int, ports: int, xp, *, dtype, **kw):
     return _CACHE_MATS[key]
 
 # ─────────────────────────────────────────────────────────────────────────────
-#                         helpers: фазовые коэффициенты
+#                            helpers
 # ─────────────────────────────────────────────────────────────────────────────
-def _phase_vec(val, ports: int, xp, *, dtype, **kw):
+def _broadcast_to_xp(xp, arr, target_shape):
     """
-    Приводит вход `val` к вектору длиной `ports`.
+    Безопасный broadcast для NumPy и Torch.
 
-    * `None` → нуль-вектор;
-    * `dict {порт: значение}` (1-base);
-    * последовательность / тензор длиной `ports`.
+    Parameters
+    ----------
+    xp : модуль numpy или torch
+    arr : ndarray/Tensor
+    target_shape : tuple[int]
+
+    Returns
+    -------
+    ndarray/Tensor с формой target_shape, разделяющий память (torch.expand)
+    или создающий view (numpy.broadcast_to).
     """
-    out = xp.zeros(ports, dtype=dtype, **kw)
-    if val is None:
-        return out
+    if xp.__name__ == "torch":
+        # Torch: expand умеет broadcast без копии (как numpy.broadcast_to)
+        return arr.expand(target_shape)
+    return xp.broadcast_to(arr, target_shape)
 
-    if isinstance(val, Mapping):               # словарь {p: value}
-        for p, v in val.items():
-            if not 1 <= p <= ports:
-                raise ValueError(f"phase-coef: порт {p} вне диапазона 1…{ports}")
-            out[p - 1] = float(v)
-        return out
 
-    if xp.__name__ == "torch" and xp.is_tensor(val):  # тензор (GPU/CPU)
-        arr = val.to(dtype).reshape(-1)
-    elif hasattr(xp, "as_tensor"):
-        arr = xp.as_tensor(val, dtype=dtype, **kw).reshape(-1)
-    else:
-        arr = xp.asarray(val, dtype=dtype, **kw).reshape(-1)
+def _as_xp_array(xp, obj, dtype, **kw):
+    """
+    Приводит объект (list/ndarray/Tensor/скаляр) к массиву/тензору backend-а xp.
 
-    if arr.shape[0] != ports:
-        raise ValueError("длина phase-вектора ≠ ports")
+    * Если obj уже в нужном backend-е, просто меняем dtype/device при необходимости.
+    * Torch: используем xp.as_tensor(obj, dtype=..., device=...).
+    * NumPy: xp.asarray(obj, dtype=...).
+
+    Возвращает массив/тензор с минимум 1 измерением (скаляр → shape (1,)).
+    """
+    if xp.__name__ == "torch":
+        arr = xp.as_tensor(obj, dtype=dtype, **kw)
+        if arr.ndim == 0:
+            arr = arr.reshape(1)
+        return arr
+    # NumPy
+    arr = xp.asarray(obj, dtype=dtype, **kw)
+    if arr.ndim == 0:
+        arr = arr.reshape(1)
     return arr
 
 
-def _phase_diag(xp, omega, a_vec, b_vec, dtype):
-    """Диагональная матрица фаз: ``D = diag{e^{-j (a·ω + b)}}``."""
-    theta = omega[..., None] * a_vec + b_vec       # → (..., F, P)
-    if xp.__name__ == "torch":
-        return xp.exp(-1j * theta).to(dtype)
-    return _np.exp(-1j * _np.asarray(theta)).astype(dtype)
+def _infer_batch_shape(*specs):
+    """
+    Вычисляет общую batch-форму для входов.
 
-# ─────────────────────────────────────────────────────────────────────────────
-#       helper: добавление потерь −j/qu на диагональ резонаторных узлов
-# ─────────────────────────────────────────────────────────────────────────────
-def _build_M_complex(topo: Topology, M_real, qu, xp, cplx, **kw):
+    specs — последовательность кортежей вида (shape, tail_dims),
+    где:
+        shape: полная форма массива
+        tail_dims: сколько последних осей НЕ относятся к batch (их нужно отбросить
+                   перед broadсast; например K,K или order, ports, F).
+    Возвращает tuple[int] — общую batch-форму.
+
+    Пример:
+        shape=(32, 128, 6, 6), tail_dims=2  → batch part = (32,128)
+        shape=(1, 128), tail_dims=1         → batch part = (1,)
     """
-    Формирует комплексную матрицу ``M̃ = M_real - j / qu``.
-    Поддерживает скаляр/вектор `qu`, numpy.ndarray и torch.Tensor.
+    bshape = ()
+    for shape, tail in specs:
+        if shape is None:
+            continue
+        if tail == 0:
+            b_part = shape
+        else:
+            b_part = shape[:-tail] if tail <= len(shape) else ()
+        # используем numpy для вычисления объединения форм
+        bshape = _np.broadcast_shapes(bshape, b_part)
+    return bshape
+
+
+def _match_and_broadcast_inputs(
+    topo,
+    M_real,
+    omega,
+    qu,
+    phase_a,
+    phase_b,
+    xp,
+    cplx,
+    **kw,
+):
     """
-    # базовая матрица
+        Приводит все входы к согласованным формам (batch‑broadcast).
+
+        Возвращает
+        ----------
+        M_real : (..., K, K) float32
+        omega  : (..., F)    float32
+        qu     : (..., order) float64 | None
+        phase_a: (..., ports) float32 | None
+        phase_b: (..., ports) float32 | None
+        B_shape: tuple[int]
+            Общая batch-форма.
+        F : int
+            Длина частотной сетки.
+        K : int
+            order + ports.
+        order : int
+        ports : int
+        """
+
+    order, ports, K = topo.order, topo.ports, topo.size
+
+    # -------------------- шаг 1. Приводим к backend-типам -------------------
+    f32 = xp.float32 if xp.__name__ == "torch" else _np.float32
+    f64 = xp.float64 if xp.__name__ == "torch" else _np.float64
+
+    M_real = _as_xp_array(xp, M_real, dtype=f32, **kw)
+    omega  = _as_xp_array(xp, omega,  dtype=f32, **kw)
+
+    # qu: допускаем None/скаляр/вектор(order)/батч
+    if qu is not None:
+        if _np.isscalar(qu):
+            qu = _as_xp_array(xp, [float(qu)] * order, dtype=f64, **kw)
+        else:
+            qu = _as_xp_array(xp, qu, dtype=f64, **kw)
+
+    # phase_a/b: допускаем None/скаляр/вектор(ports)/батч
+    def _prep_phase(ph):
+        if ph is None:
+            return None
+        if _np.isscalar(ph):
+            return _as_xp_array(xp, [float(ph)] * ports, dtype=f32, **kw)
+        return _as_xp_array(xp, ph, dtype=f32, **kw)
+
+    phase_a = _prep_phase(phase_a)
+    phase_b = _prep_phase(phase_b)
+
+    # -------------------- шаг 2. Проверки последних размерностей -----------
+    if M_real.shape[-2:] != (K, K):
+        raise ValueError(f"M_real: ожидалась форма (...,{K},{K}), получено {M_real.shape}")
+
+    if omega.shape[-1] <= 0:
+        raise ValueError("omega: пустая частотная сетка")
+    F = omega.shape[-1]
+
+    if qu is not None and qu.shape[-1] != order:
+        raise ValueError(f"qu: последняя ось должна быть длиной {order}, получено {qu.shape}")
+
+    if phase_a is not None and phase_a.shape[-1] != ports:
+        raise ValueError(f"phase_a: последняя ось должна быть длиной {ports}, получено {phase_a.shape}")
+
+    if phase_b is not None and phase_b.shape[-1] != ports:
+        raise ValueError(f"phase_b: последняя ось должна быть длиной {ports}, получено {phase_b.shape}")
+
+    # -------------------- шаг 3. Вычисляем общую batch-форму ---------------
+    B_shape = _infer_batch_shape(
+        (M_real.shape, 2),
+        (omega.shape, 1),
+        ((qu.shape if qu is not None else None), 1),
+        ((phase_a.shape if phase_a is not None else None), 1),
+        ((phase_b.shape if phase_b is not None else None), 1),
+    )
+
+    # -------------------- шаг 4. Broadcast всех входов к B_shape -----------
+    # helper для вычисления final shape: B_shape + tail_dims
+    def _bs(tail):
+        return B_shape + tail
+
+    M_real = _broadcast_to_xp(xp, M_real, _bs((K, K)))
+    omega  = _broadcast_to_xp(xp, omega,  _bs((F,)))
+
+    if qu is not None:
+        qu = _broadcast_to_xp(xp, qu, _bs((order,)))
+    if phase_a is not None:
+        phase_a = _broadcast_to_xp(xp, phase_a, _bs((ports,)))
+    if phase_b is not None:
+        phase_b = _broadcast_to_xp(xp, phase_b, _bs((ports,)))
+
+    return M_real, omega, qu, phase_a, phase_b, B_shape, F, K, order, ports
+
+
+def _apply_phases(xp, S, omega, phase_a, phase_b, cplx):
+    """
+    Умножает матрицу S на диагональные фазовые матрицы, если заданы phase_a/b.
+
+    Формула:  S' = D(ω) · S · D(ω)^T  (эквивалентно D[..., :, None] * S * D[..., None, :])
+
+    omega: shape B...×F
+    phase_a, phase_b: shape B...×P или None
+    Возвращает S комплексного типа.
+    """
+    if phase_a is None and phase_b is None:
+        return S
+
+    # обеспечиваем, что phase_a/b не None
+    B_shape = S.shape[:-3]  # (...), затем F,P,P
+    F = S.shape[-3]
+    P = S.shape[-1]
+
+    f32 = xp.float32 if xp.__name__ == "torch" else _np.float32
+
+    zero = xp.zeros(B_shape + (P,), dtype=f32, device=getattr(S, "device", None)) \
+        if xp.__name__ == "torch" \
+        else xp.zeros(B_shape + (P,), dtype=f32)
+
+    a_vec = phase_a if phase_a is not None else zero
+    b_vec = phase_b if phase_b is not None else zero
+
+    # theta: B...×F×P
+    theta = omega[..., None] * a_vec[..., None, :] + b_vec[..., None, :]
+
     if xp.__name__ == "torch":
-        M = xp.as_tensor(M_real, dtype=cplx, **kw)
+        D = xp.exp(-1j * theta).to(cplx)
     else:
-        M = xp.asarray(M_real, dtype=cplx, **kw)
+        D = _np.exp(-1j * _np.asarray(theta)).astype(cplx)
 
-    K = topo.size
-    if M.shape[-2:] != (K, K):
-        raise ValueError(
-            f"M_real: ожидалась матрица {K}×{K}, получено {M.shape[-2]}×{M.shape[-1]}"
-        )
+    # умножаем: D[..., :, None] * S * D[..., None, :]
+    S = D[..., :, None] * S * D[..., None, :]
+    return S
+
+def _build_M_complex_batched(topo, M_real, qu, xp, cplx, **kw):
+    """
+    Формирует комплексную матрицу M̃ = M_real - j/qu на диагонали резонаторов.
+    Предполагается, что M_real уже имеет форму (..., K, K).
+    qu может быть None | скаляр | (..., order).
+    """
+    # --- базовая матрица ---
+    M = xp.as_tensor(M_real, dtype=cplx, **kw) if xp.__name__ == "torch" \
+        else xp.asarray(M_real, dtype=cplx, **kw)
+
     if qu is None:
         return M
 
     order = topo.order
-    idx = xp.arange(order, **kw)
-    dtype_f64 = xp.float64 if xp.__name__ == "torch" else _np.float64
 
-    is_tensor = xp.__name__ == "torch" and xp.is_tensor(qu) and qu.ndim == 1
-    if isinstance(qu, (list, tuple)) or (isinstance(qu, _np.ndarray) and qu.ndim == 1) or is_tensor:
-        qu_arr = xp.as_tensor(qu, dtype=dtype_f64, **kw) if is_tensor else xp.asarray(qu, dtype=dtype_f64, **kw)
-        if qu_arr.shape[-1] != order:
-            raise ValueError("qu: неверная длина")
-        alpha = 1.0 / qu_arr
+    # Приводим qu к массиву нужного backend-а и длины 'order'
+    if _np.isscalar(qu):
+        qu_arr = xp.full((order,), float(qu), dtype=xp.float64 if xp.__name__ == "torch" else _np.float64, **kw)
     else:
-        alpha = xp.full((order,), 1.0 / float(qu), dtype=dtype_f64, **kw)
+        qu_arr = xp.as_tensor(qu, dtype=xp.float64, **kw) if xp.__name__ == "torch" \
+            else xp.asarray(qu, dtype=_np.float64, **kw)
+    if qu_arr.shape[-1] != order:
+        raise ValueError(f"qu: последняя ось должна быть длиной {order}, получено {qu_arr.shape}")
 
-    alpha_j = (alpha * 1j).to(cplx) if xp.__name__ == "torch" else (alpha * 1j).astype(cplx)
-    alpha_j = xp.broadcast_to(alpha_j, M.shape[:-2] + (order,))
+    # j / qu
+    alpha_j = (1.0 / qu_arr) * (1j)
+    alpha_j = alpha_j.to(cplx) if xp.__name__ == "torch" else alpha_j.astype(cplx)
 
-    M[..., idx, idx] += alpha_j
+    # Добавляем к диагонали резонаторной части
+    sub = M[..., :order, :order]
+    if xp.__name__ == "torch":
+        d = xp.diagonal(sub, dim1=-2, dim2=-1)
+        d += alpha_j
+    else:
+        idx = _np.arange(order)
+        # M[..., idx, idx] возвращает копию, поэтому пишем через явное присваивание
+        M[..., idx, idx] = M[..., idx, idx] + alpha_j
+
     return M
 
 # ─────────────────────────────────────────────────────────────────────────────
 #                              LOW-LEVEL API
 # ─────────────────────────────────────────────────────────────────────────────
+def cm_forward(
+    topo: Topology,
+    params: Mapping[str, object],
+    omega,
+    *,
+    backend: str = "numpy",
+    device: str = "cpu",
+    method: str = "auto",    # 'auto' | 'inv' | 'solve'
+    fix_sign: bool = False,
+):
+    """
+    Батч‑расчёт S-параметров для фильтров/устройств, описываемых расширенной
+    вещественной матрицей связи.
+
+    Parameters
+    ----------
+    topo : Topology
+        Объект топологии (order, ports, links).
+    params : Mapping[str, Any]
+        Словарь входных параметров. Обязателен ключ "M_real".
+        Поддерживаемые ключи:
+            * "M_real"  : (..., K, K)  вещественная матрица связи
+            * "qu"      : None | скаляр | (..., order)
+            * "phase_a" : None | скаляр | (..., ports)
+            * "phase_b" : None | скаляр | (..., ports)
+        Все тензоры/массивы могут иметь batch-оси, которые будут
+        автоматически согласованы (broadcast) между собой и с omega.
+    omega : array-like / torch.Tensor
+        Нормированная частота: (..., F)
+    backend : {"numpy", "torch"}
+        Где считать: NumPy (CPU) или Torch (CPU/GPU).
+    device : str
+        Устройство для Torch (e.g., "cpu", "cuda:0"). Для NumPy игнорируется.
+    method : {"auto", "inv", "solve"}
+        Алгоритм обращения:
+          * 'solve' – решаем A X = I_pp (быстрее при малом P),
+          * 'inv'   – берём обратную A^{-1},
+          * 'auto'  – по умолчанию 'solve' при ports ≤ 4.
+    fix_sign : bool, default False
+        Для 2‑портовых фильтров True инвертирует знак S12/S21 (опциональная
+        IEEE-конвенция).
+
+    Returns
+    -------
+    S : xp.ndarray / torch.Tensor
+        Комплексная матрица S формы (..., F, P, P), dtype complex64.
+    """
+    xp, cplx, kw = _lib(backend, device=device)
+
+    # -------- извлекаем параметры -----------------------------------------
+    if "M_real" not in params:
+        raise ValueError("params['M_real'] отсутствует (обязательный аргумент).")
+
+    M_real  = params["M_real"]
+    qu      = params.get("qu", None)
+    phase_a = params.get("phase_a", None)
+    phase_b = params.get("phase_b", None)
+
+    # -------- согласуем формы, типы, выполняем broadcast -------------------
+    M_real, omega, qu, phase_a, phase_b, B_shape, F, K, order, ports = \
+        _match_and_broadcast_inputs(topo, M_real, omega, qu, phase_a, phase_b, xp, cplx, **kw)
+
+    order, ports = topo.order, topo.ports
+
+    # -------- строим комплексную матрицу M̃ --------------------------------
+    M_c = _build_M_complex_batched(topo, M_real, qu, xp, cplx, **kw)
+
+    # -------- кеш U, R, I_ports -------------------------------------------
+    U, R, I_ports = _get_cached_mats(order, ports, xp, dtype=cplx, **kw)
+
+    # растягиваем U/R до batch-формы, если нужно (добавляем оси спереди)
+    while U.ndim < M_c.ndim:
+        U, R = (t[None, ...] for t in (U, R))
+
+    j = xp.asarray(1j, dtype=cplx, **kw)
+    w = omega[..., None, None]  # (..., F, 1, 1)
+
+    # A = R + j*ω*U - j*M̃
+    A = R + j * w * U - j * M_c  # (..., F, K, K)
+
+    # -------- решаем систему ----------------------------------------------
+    use_solve = (method == "solve") or (method == "auto" and ports <= 4)
+
+    if use_solve:
+        # I_cols: (K,P)
+        I_cols = _xp_eye(xp, K, dtype=cplx, **kw)[..., -ports:]  # (K,P)
+
+        # батч: (B_total*F, K, K) × (B_total*F, K, P)
+        A2 = A.reshape((-1, K, K))
+        B2 = _broadcast_to_xp(xp, I_cols, A2.shape[:-2] + I_cols.shape)
+        # NumPy: copy(), Torch: clone() — чтобы не переписать кэш
+        if xp.__name__ == "torch":
+            B2 = B2.clone()
+        else:
+            B2 = B2.copy()
+
+        X = xp.linalg.solve(A2, B2).reshape(A.shape[:-2] + (K, ports))
+        A_pp = X[..., -ports:, :]  # (..., F, P, P)
+    else:
+        A_inv = xp.linalg.inv(A)
+        A_pp = A_inv[..., -ports:, -ports:]  # (..., F, P, P)
+
+    # -------- базовая S ----------------------------------------------------
+    I_p_reshaped = I_ports.reshape((1,) * (A_pp.ndim - 2) + I_ports.shape)
+    S = I_p_reshaped - 2.0 * A_pp
+
+    if fix_sign and ports == 2:
+        if xp.__name__ == "torch":
+            S = S.clone()
+        else:
+            S = S.copy()
+        S[..., 0, 1] *= -1.0
+        S[..., 1, 0] *= -1.0
+
+    # -------- фазовые диагонали -------------------------------------------
+    S = _apply_phases(xp, S, omega, phase_a, phase_b, cplx)
+
+    return S
+
+# ─────────────────────────────────────────────────────────────────────────────
+#                   cm_sparams (тонкая обертка над cm_forward)
+# ─────────────────────────────────────────────────────────────────────────────
+
 def cm_sparams(
     topo: Topology,
     M_real,
@@ -295,77 +586,63 @@ def cm_sparams(
     phase_b=None,
     backend: str = "numpy",
     device: str = "cpu",
-    method: str = "auto",    # 'auto' | 'inv' | 'solve'
+    method: str = "auto",
     fix_sign: bool = False,
 ):
     """
-    Рассчитывает комплексную S-матрицу размером ``(..., F, P, P)``.
+    Рассчитывает комплексную S-матрицу. Является тонкой оберткой над `cm_forward`.
 
     Параметры
-    ---------
-    topo     : :class:`mwlab.filters.topologies.Topology`
-    M_real   : ndarray | torch.Tensor, вещественная матрица связи ``(...,K,K)``
-    omega    : ndarray | torch.Tensor, нормированная частота ``(...,F)``
-    qu        : None | скаляр | вектор длиной *order* | torch.Tensor
-    phase_a, phase_b : коэффициенты фазовых линий (см. докстринг `_phase_vec`)
-    backend  : ``'numpy'`` | ``'torch'``
-    device   : строка устройства для Torch (``'cpu'`` | ``'cuda:0'`` …)
-    method   : ``'inv'`` — прямое обращение,
-               ``'solve'`` — решение `AX = I_pp`,
-               ``'auto'`` — *solve* при `ports ≤ 4`, иначе *inv*.
-    fix_sign : bool, default **False**
-               Для 2‑портовых фильтров `True` инвертирует знак S₁₂ / S₂₁
-               IEEE‑конвенция — `False`.
+    ----------
+    topo : Topology
+        Топология устройства.
+    M_real : array-like | torch.Tensor
+        Вещественная расширенная матрица связи формы (..., K, K),
+        где K = order + ports.
+    omega : array-like | torch.Tensor
+        Нормированная частотная сетка формы (..., F).
+    qu : None | scalar | array-like
+        Приведённые добротности:
+            - None → без потерь,
+            - скаляр → один Q_u для всех резонаторов,
+            - (..., order) → индивидуальные Q_u.
+    phase_a, phase_b : None | scalar | array-like
+        Коэффициенты фазовых линий для портов:
+            - None       → нет фазовых сдвигов,
+            - скаляр     → одинаково для всех портов,
+            - (..., P)   → индивидуально для каждого порта.
+    backend : {"numpy", "torch"}
+        Где считать (NumPy CPU или Torch CPU/GPU).
+    device : str
+        Устройство для Torch (например "cuda:0"); для NumPy игнорируется.
+    method : {"auto", "inv", "solve"}
+        Алгоритм обращения матрицы A:
+            * 'solve' – решаем AX = I (быстрее при малом числе портов),
+            * 'inv'   – invert (надёжно при большом P),
+            * 'auto'  – 'solve' если ports ≤ 4, иначе 'inv'.
+    fix_sign : bool, default False
+        (Опционально) инвертирует знак S12/S21 для 2‑портовой матрицы.
+
+    Returns
+    -------
+    S : ndarray | torch.Tensor
+        Комплексная матрица S (..., F, P, P) c dtype complex64.
     """
-    xp, cplx, kw = _lib(backend, device=device)
-
-    order, ports, K = topo.order, topo.ports, topo.size
-
-    # входы → backend-типы --------------------------------------------------
-    omega = xp.as_tensor(omega, dtype=xp.float32, **kw) if hasattr(xp, "as_tensor") else xp.asarray(omega, dtype=_np.float32, **kw)
-    M     = _build_M_complex(topo, M_real, qu, xp, cplx, **kw)
-
-    # неизменные U, R, I_p -------------------------------------------------
-    U, R, I_ports = _get_cached_mats(order, ports, xp, dtype=cplx, **kw)
-    while U.ndim < M.ndim:                        # добавляем batch-оси
-        U, R = (t[None, ...] for t in (U, R))
-
-    j = xp.asarray(1j, dtype=cplx, **kw)
-    w = omega[..., None, None]                    # (...,F,1,1)
-    A = R + j * w * U - j * M                    # (...,F,K,K)
-
-    # выбор алгоритма solve / inv -----------------------------------------
-    use_solve = (
-        method == "solve"
-        or (method == "auto" and ports <= 4)
+    params = {
+        "M_real": M_real,
+        "qu": qu,
+        "phase_a": phase_a,
+        "phase_b": phase_b,
+    }
+    return cm_forward(
+        topo,
+        params,
+        omega,
+        backend=backend,
+        device=device,
+        method=method,
+        fix_sign=fix_sign,
     )
-
-    if use_solve:
-        I_cols = _xp_eye(xp, K, dtype=cplx, **kw)[..., -ports:]        # (K,P)
-        A2 = A.reshape((-1, K, K))
-        B2 = xp.broadcast_to(I_cols, A2.shape[:-2] + I_cols.shape)
-        B2 = B2.clone() if xp.__name__ == "torch" else B2.copy()
-        X  = xp.linalg.solve(A2, B2).reshape(A.shape[:-2] + (K, ports))
-        A_pp = X[..., -ports:, :]
-    else:
-        A_pp = xp.linalg.inv(A)[..., -ports:, -ports:]
-
-    # базовая S ------------------------------------------------------------
-    S = I_ports.reshape((1,) * (A_pp.ndim - 2) + I_ports.shape) - 2.0 * A_pp
-    if fix_sign and ports == 2:
-        S = S.clone() if xp.__name__ == "torch" else S.copy()
-        S[..., 0, 1] *= -1.0
-        S[..., 1, 0] *= -1.0
-
-    # фазовые линии --------------------------------------------------------
-    if phase_a is not None or phase_b is not None:
-        a_vec = _phase_vec(phase_a, ports, xp, dtype=xp.float32, **kw)
-        b_vec = _phase_vec(phase_b, ports, xp, dtype=xp.float32, **kw)
-        D = _phase_diag(xp, omega, a_vec, b_vec, cplx)
-        S = D[..., :, None] * S * D[..., None, :]
-
-    return S.astype(cplx) if hasattr(S, "astype") else S.to(cplx)
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 #                               MatrixLayout
@@ -898,8 +1175,6 @@ class CouplingMatrix:
         ax.set_yticks(_np.arange(M.shape[0]))
         ax.set_xticklabels(labels)
         ax.set_yticklabels(labels)
-        ax.set_xlabel("узлы j")
-        ax.set_ylabel("узлы i")
 
         # аннотации чисел (линейные!)
         if annotate and M.shape[0] <= 15:
@@ -915,18 +1190,8 @@ class CouplingMatrix:
                     ax.text(j, i, text, ha="center", va="center", fontsize=8, color="black")
 
         # цветовая шкала
-        cbar = fig.colorbar(im, ax=ax, shrink=0.8, extend='both')
-        if log:
-            locator = _mticker.SymmetricalLogLocator(base=10, linthresh=linthresh)
-            formatter = _mticker.LogFormatterMathtext()
-            cbar.locator, cbar.formatter = locator, formatter
-        else:
-            # --- линейная шкала, симметричные деления ---
-            locator = _mticker.MaxNLocator(nbins=7, symmetric=True)
-            cbar.locator = locator
-            # при желании: cbar.formatter = mticker.FormatStrFormatter('%.2f')
+        fig.colorbar(im, ax=ax, shrink=0.8)
 
-        cbar.update_ticks()  # применяем локатор/форматтер
         return fig
 
 
