@@ -395,43 +395,69 @@ class CouplingMatrix:
         return cls(topo, mvals, qu=qu, phase_a=phase_a, phase_b=phase_b)
 
     # ------------------------------------------------------------------ dict I/O
-    def to_dict(self) -> Dict[str, float | int | str]:
-        """Сериализация в плоский словарь (JSON‑дружелюбный).
+    # mwlab/filters/cm.py
 
-        Поля: order, ports, topology, все M… и параметры qu/phase…
+    def to_dict(self) -> Dict[str, float]:
         """
-        out: Dict[str, float | int | str] = {
+        Сериализация в JSON‑дружелюбный словарь:
+        order, ports, topology, все M… , qu… , phase_a… , phase_b…
+        Поддерживает как списки/ndarray, так и torch.Tensor.
+        """
+        out: Dict[str, float | str] = {
             "order": self.topo.order,
             "ports": self.topo.ports,
             "topology": self.topo.name or "",
+            **{k: float(v) for k, v in self.mvals.items()},
         }
-        out.update({k: float(v) for k, v in self.mvals.items()})
 
-        # qu
+        # ------- helper’ы -------
+        import numpy as _np
+        import torch
+
+        def _is_scalar_like(x):
+            if x is None:
+                return False
+            if isinstance(x, (int, float)):
+                return True
+            if torch.is_tensor(x):
+                return x.numel() == 1
+            if isinstance(x, _np.ndarray):
+                return x.size == 1
+            return False
+
+        def _to_numpy_flat(x):
+            """Вернуть np.ndarray 1D из list/np/tensor."""
+            if torch.is_tensor(x):
+                return x.detach().cpu().numpy().ravel()
+            return _np.asarray(x, dtype=float).ravel()
+
+        # ------- qu -------
         if self.qu is not None:
-            if isinstance(self.qu, (list, tuple)):
-                for idx, q in enumerate(self.qu, 1):
-                    out[f"qu_{idx}"] = float(q)
+            if _is_scalar_like(self.qu):
+                out["qu"] = float(
+                    self.qu.item() if hasattr(self.qu, "item") else self.qu
+                )
             else:
-                out["qu"] = float(self.qu)
+                q_arr = _to_numpy_flat(self.qu)
+                for idx, q in enumerate(q_arr, 1):
+                    out[f"qu_{idx}"] = float(q)
 
-        # phases
-        def dump_phase(prefix: str, ph):
-            if ph is None:
-                return
-            if isinstance(ph, Mapping):
-                for p, v in ph.items():
-                    out[f"{prefix}{int(p)}"] = float(v)
-            elif isinstance(ph, (list, tuple)):
-                for idx, v in enumerate(ph, 1):
-                    out[f"{prefix}{idx}"] = float(v)
-            else:  # scalar
-                out[prefix] = float(ph)
+        # ------- phases (phase_a, phase_b) -------
+        for pref, vec in (("phase_a", self.phase_a), ("phase_b", self.phase_b)):
+            if vec is None:
+                continue
+            # словарь порт->значение
+            if isinstance(vec, Mapping):
+                for p, v in vec.items():
+                    out[f"{pref}{int(p)}"] = float(v)
+            else:
+                # sequence / tensor / np
+                arr = _to_numpy_flat(vec)
+                for idx, v in enumerate(arr, 1):
+                    out[f"{pref}{idx}"] = float(v)
 
-        dump_phase("phase_a", self.phase_a)
-        dump_phase("phase_b", self.phase_b)
-
-        return out
+        # приведение типов Dict[str, float]
+        return {k: float(v) if isinstance(v, (int, float)) else v for k, v in out.items()}
 
     @classmethod
     def from_dict(cls, topo: Optional[Topology], d: Mapping[str, float | int | str]) -> "CouplingMatrix":
