@@ -37,7 +37,7 @@ from .cm import (
 )
 
 from .cm_core import (
-    solve_sparams as sparams_core,
+    solve_sparams,
     CoreSpec,
     CMError,
     DEFAULT_DEVICE,
@@ -67,7 +67,7 @@ __all__ = [
     "make_perm",
     "parse_m_key",
     # core
-    "sparams_core",
+    "solve_sparams",
     "CoreSpec",
     "CMError",
     "DEFAULT_DEVICE",

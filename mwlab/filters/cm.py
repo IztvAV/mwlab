@@ -31,6 +31,7 @@ from enum import Enum, auto
 from typing import Dict, Mapping, Sequence, Tuple, List, Optional
 
 import torch
+import numpy as np
 
 from .topologies import Topology, TopologyError
 from .cm_core import (
@@ -479,6 +480,108 @@ class CouplingMatrix:
             topo = Topology(order, ports, links=links, name="inferred")
 
         return cls(topo, mvals, qu=qu, phase_a=phase_a, phase_b=phase_b)
+
+
+    # ------------------------------------------------------------------ plot_matrix
+    def plot_matrix(
+            self,
+            *,
+            layout: MatrixLayout = MatrixLayout.TAIL,
+            log: bool | float = False,
+            cmap: str = "coolwarm",
+            annotate: bool = True,
+            hide_zero: bool = True,
+            figsize: Tuple[int, int] = (8, 6),
+    ):
+        """
+        Быстрая визуализация коэффициентов матрицы связи.
+
+        Параметры
+        ---------
+        layout : MatrixLayout
+            В каком макете рисовать матрицу (TAIL/SL/CUSTOM).
+        log : bool | float
+            True  → SymLogNorm(linthresh=0.02);
+            число → linthresh = это число;
+            False → линейная TwoSlopeNorm с центром в 0.
+        annotate : bool
+            Подписывать ли значения в ячейках (для небольших матриц).
+        hide_zero : bool
+            Красить «нулевые» элементы (неиспользуемые по топологии) в серый.
+        figsize : tuple
+            Размер фигуры Matplotlib.
+
+        Возвращает
+        ----------
+        matplotlib.figure.Figure
+        """
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib.colors as mcolors
+        except ModuleNotFoundError as err:
+            raise ImportError("plot_matrix требует установленный matplotlib") from err
+
+        import numpy as np
+        import torch
+
+        # --- получаем матрицу и приводим к NumPy ---
+        M = self.to_matrix(layout=layout)
+        if isinstance(M, torch.Tensor):
+            M = M.detach().cpu().numpy()
+        else:
+            M = np.asarray(M, dtype=float)
+
+        order, ports = self.topo.order, self.topo.ports
+
+        # --- маска незначимых элементов ---
+        mask = np.zeros_like(M, dtype=bool)
+        if hide_zero:
+            tol = 1e-12
+            mask |= np.abs(M) < tol
+
+        # --- нормировка цвета ---
+        vmin, vmax = float(np.nanmin(M)), float(np.nanmax(M))
+
+        if log:
+            linthresh = 0.02 if log is True else float(log)
+            norm = mcolors.SymLogNorm(linthresh=linthresh, vmin=vmin, vmax=vmax)
+        else:
+            # Если диапазон не пересекает ноль, используем обычную Normalize
+            if not (vmin < 0.0 < vmax):
+                norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+            else:
+                norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+
+        # --- подписи осей ---
+        if layout is MatrixLayout.SL and ports == 2:
+            labels = ["S", *map(str, range(1, order + 1)), "L"]
+        else:
+            labels = [*map(str, range(1, order + 1)), *[f"P{i}" for i in range(1, ports + 1)]]
+
+        # --- рисуем ---
+        fig, ax = plt.subplots(figsize=figsize)
+        im = ax.imshow(M, cmap=cmap, norm=norm)
+
+        if hide_zero and mask.any():
+            im.set_array(np.ma.masked_where(mask, M))
+
+        ax.set_xticks(np.arange(M.shape[0]))
+        ax.set_yticks(np.arange(M.shape[0]))
+        ax.set_xticklabels(labels)
+        ax.set_yticklabels(labels)
+
+        if annotate and M.shape[0] <= 15:
+            for i in range(M.shape[0]):
+                for j in range(M.shape[1]):
+                    if hide_zero and mask[i, j]:
+                        continue
+                    val = M[i, j]
+                    text = f"{val:.2e}" if abs(val) < 1e-3 else f"{val:.2f}"
+                    ax.text(j, i, text, ha="center", va="center", fontsize=8, color="black")
+
+        fig.colorbar(im, ax=ax, shrink=0.8)
+        fig.tight_layout()
+        return fig
 
     # ---------------------------------------------------------------- repr
     def __repr__(self) -> str:
