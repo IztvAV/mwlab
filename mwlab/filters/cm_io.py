@@ -297,6 +297,7 @@ def read_matrix(
         if detected is not None:
             lay = detected
         else:
+            # передаём numpy-массив напрямую
             lay = _guess_layout(M) or MatrixLayout.TAIL
     else:
         lay = MatrixLayout[layout] if isinstance(layout, str) else layout
@@ -316,14 +317,7 @@ def read_matrix(
 # -----------------------------------------------------------------------------
 #                     Простая эвристика определения макета
 # -----------------------------------------------------------------------------
-
-def _guess_layout(
-    M: torch.Tensor,
-    *,
-    order_hint: int = 0,
-    ports_hint: int = 0,
-    rtol: float = 1e-6,
-) -> Optional[MatrixLayout]:
+def _guess_layout(M, *, rtol: float = 1e-6):
     """Пытается отличить **TAIL** от **SL** (только p=2) по структуре матрицы.
 
     Предположения:
@@ -332,36 +326,44 @@ def _guess_layout(
     - есть хотя бы одна порт-резонаторная связь.
     Если определённо сказать нельзя — возвращаем None.
     """
-    K = M.shape[0]
-    if K < 3:
+    # --- привести к единым операциям ---
+    is_torch = torch.is_tensor(M)
+    if not is_torch:
+        M_np = np.asarray(M, dtype=float)
+        K = M_np.shape[0]
+        absM = np.abs(M_np)
+        max_mag = absM.max() if M_np.size else 0.0
+        def get(i, j): return M_np[i, j]
+    else:
+        K = M.shape[0]
+        absM = torch.abs(M)
+        max_mag = absM.max().item() if M.numel() else 0.0
+        def get(i, j): return M[i, j].item()
+
+    if K < 3 or max_mag == 0.0:
         return None
 
-    # адаптивный порог
-    max_mag = torch.max(torch.abs(M)).item() if M.numel() else 0.0
     tol = max_mag * rtol if max_mag > 0 else 1e-12
 
-    # --- попытка TAIL: подряд идущие портовые строки снизу
+    # ---------- признак TAIL ----------
+    # нижние строки (конец матрицы) – «портовые»: диагональ≈0 и правее диагонали≈0
     tail_ports = 0
     for i in range(K - 1, -1, -1):
-        diag_ok = abs(M[i, i].item()) <= tol
-        right_zero = torch.all(torch.abs(M[i, i:]) <= tol).item()
-        if diag_ok and right_zero:
+        if abs(get(i, i)) <= tol and all(abs(get(i, j)) <= tol for j in range(i, K)):
             tail_ports += 1
         else:
             break
     if tail_ports >= 2:
         return MatrixLayout.TAIL
 
-    # --- попытка SL (только 2 порта)
-    if K >= 4:
-        d0 = abs(M[0, 0].item()) <= tol
-        dN = abs(M[K - 1, K - 1].item()) <= tol
-        if d0 and dN:
-            if abs(M[0, K - 1].item()) <= tol:  # порт-порт связь ≈ 0
-                s_links = torch.abs(M[0, 1:K - 1]) > tol
-                l_links = torch.abs(M[K - 1, 1:K - 1]) > tol
-                if s_links.any() and l_links.any():
-                    return MatrixLayout.SL
+    # ---------- признак SL (2-порт) ----------
+    if K >= 4 and abs(get(0, 0)) <= tol and abs(get(K - 1, K - 1)) <= tol:
+        if abs(get(0, K - 1)) <= tol:  # нет порт-порт связи
+            # связи порт-резонатор
+            s_links = any(abs(get(0, j)) > tol for j in range(1, K - 1))
+            l_links = any(abs(get(K - 1, j)) > tol for j in range(1, K - 1))
+            if s_links and l_links:
+                return MatrixLayout.SL
 
     return None
 
