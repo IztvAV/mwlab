@@ -101,7 +101,7 @@ def write_matrix(
         if np.isscalar(ph):
             return {prefix: float(ph)}
         arr = np.asarray(ph, dtype=float).ravel()
-        return {f"{prefix}_{i}": float(v) for i, v in enumerate(arr, 1)}
+        return {f"{prefix}{i}": float(v) for i, v in enumerate(arr, 1)}
 
     if fmt == "ascii":
         meta = {
@@ -263,7 +263,7 @@ def read_matrix(
             phase_a = float(m_pa.group(1))
         else:
             pa_matches = re.findall(
-                r"phase_a_(\d+)\s*=\s*([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)",
+                r"phase_a(\d+)\s*=\s*([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)",
                 header,
             )
             if pa_matches:
@@ -279,7 +279,7 @@ def read_matrix(
             phase_b = float(m_pb.group(1))
         else:
             pb_matches = re.findall(
-                r"phase_b_(\d+)\s*=\s*([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)",
+                r"phase_b(\d+)\s*=\s*([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)",
                 header,
             )
             if pb_matches:

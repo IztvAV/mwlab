@@ -372,17 +372,13 @@ class CouplingMatrix:
 
         # Топология (если не задана)
         if topo is None:
-            if layout is MatrixLayout.SL:
-                # предположим 2 порта
-                order = K - 2
-                ports = 2
-            else:
-                # минималистичная эвристика: портовые индексы идут после резонаторов
-                # Попробуем взять ports=2 по умолчанию
-                ports = 2
-                order = K - ports
-                if order <= 0:
-                    raise ValueError("Не удалось определить order/ports, задайте topo явно")
+            if topo is None:
+                if layout is MatrixLayout.SL:
+                    order = K - 2
+                    ports = 2
+                else:
+                    raise ValueError("Передайте topo или используйте layout=SL (2-портовый случай).")
+
 
             # links = все ненулевые элементы верхнего треугольника без диагонали
             links = []

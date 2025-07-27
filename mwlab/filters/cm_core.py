@@ -247,8 +247,7 @@ def prepare_inputs(
         raise CMError(f"phase_b: expected last dim {ports}, got {tuple(phase_b_t.shape)}")
 
     # --- 3) общая batch-форма ---------------------------------------------
-    batch_shape = _broadcast_shapes(
-_batch_part(M_real_t.shape, 2),
+    batch_shape = _broadcast_shapes(_batch_part(M_real_t.shape, 2),
         _batch_part(omega_t.shape, 1),
         _batch_part(qu_t.shape, 1) if qu_t is not None else (),
         _batch_part(phase_a_t.shape, 1) if phase_a_t is not None else (),
@@ -348,19 +347,14 @@ def _cached_mats(order: int, ports: int, device_key: str):
 # -----------------------------------------------------------------------------
 #                            Фазовые множители
 # -----------------------------------------------------------------------------
-
-def _apply_phases(S: torch.Tensor, omega: torch.Tensor,
+def _apply_phases(S: torch.Tensor,
+                  omega: torch.Tensor,
                   phase_a: Optional[torch.Tensor],
                   phase_b: Optional[torch.Tensor]) -> torch.Tensor:
-    """Применяет диагональные фазовые матрицы, если заданы phase_a / phase_b.
+    """Применяет диагональные фазовые множители: S' = D * S * D^T.
 
-    Формула:  S' = D * S * D^T,  где D = exp(-j (ω * a + b)).
-
-    Параметры
-    ---------
-    S : (..., F, P, P) complex64
-    omega : (..., F) float32
-    phase_a, phase_b : (..., P) float32 | None
+    D = exp(-j * (ω * a + b)), где a,b заданы покомпонентно для портов.
+    Все тензоры совместимы по batch-осям.
     """
     if phase_a is None and phase_b is None:
         return S
@@ -369,17 +363,35 @@ def _apply_phases(S: torch.Tensor, omega: torch.Tensor,
     F = S.shape[-3]
     P = S.shape[-1]
 
-    zero = torch.zeros(B_shape + (P,), dtype=DT_R, device=S.device)
-    a = phase_a if phase_a is not None else zero
-    b = phase_b if phase_b is not None else zero
+    zero = None  # лениво не создаём zero-тензор
+
+    a = phase_a
+    b = phase_b
 
     # theta: (..., F, P)
-    theta = omega[..., None] * a[..., None, :] + b[..., None, :]
+    # избегаем лишних аллокаций: считаем по частям
+    if a is not None:
+        theta = omega[..., None] * a[..., None, :]
+        if b is not None:
+            theta = theta + b[..., None, :]
+    else:
+        # a = 0
+        theta = b[..., None, :] if b is not None else None
+
+    if theta is None:  # обе фазы = 0
+        return S
+
     D = torch.exp(-1j * theta).to(dtype=DT_C)
 
-    # D[..., :, None] * S * D[..., None, :]
-    S = D[..., :, None] * S * D[..., None, :]
+    # In-place умножения, чтобы не плодить большие временные массивы
+    # S = D[..., :, None] * S * D[..., None, :]
+    # Левая диагональ (строки)
+    S.mul_(D.unsqueeze(-1))
+    # Правая диагональ (столбцы)
+    S.mul_(D.unsqueeze(-2))
+
     return S
+
 
 
 # -----------------------------------------------------------------------------
