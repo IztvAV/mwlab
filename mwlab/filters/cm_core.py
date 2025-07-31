@@ -280,12 +280,60 @@ def prepare_inputs(
         ports=ports,
     )
 
+# -----------------------------------------------------------------------------
+#                Сборка реальной матрицы связи из вектора значений M
+# -----------------------------------------------------------------------------
+def build_M(
+    rows: torch.Tensor,
+    cols: torch.Tensor,
+    m_vals: torch.Tensor,
+    K: int,
+    *,
+    out: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """
+    Быстро формирует плотную симметричную матрицу M_real из вектора значений верхнего
+    треугольника (включая диагональ резонаторов).
 
+    Параметры
+    ---------
+    rows, cols : torch.LongTensor, shape (L,)
+        0-based индексы строк и столбцов для верхнего треугольника.
+    m_vals : torch.Tensor, shape (..., L)
+        Значения M_{ij} в порядке (rows, cols). Допускаются batch-оси слева.
+    K : int
+        Полный размер матрицы (order + ports).
+    out : torch.Tensor | None
+        Опционально — заранее созданный тензор под результат (экономия аллокаций).
+
+    Возвращает
+    ----------
+    torch.Tensor
+        Плотная симметричная матрица (..., K, K) типа float32.
+    """
+    if rows.ndim != 1 or cols.ndim != 1 or rows.shape != cols.shape:
+        raise ValueError("rows/cols должны быть 1D и одинаковой длины")
+    if m_vals.shape[-1] != rows.numel():
+        raise ValueError("m_vals.shape[-1] должно совпадать с длиной rows/cols")
+
+    target_shape = m_vals.shape[:-1] + (K, K)
+    if out is None:
+        M = torch.zeros(target_shape, dtype=m_vals.dtype, device=m_vals.device)
+    else:
+        if out.shape != torch.Size(target_shape):
+            raise ValueError("out имеет неверную форму")
+        out.zero_()
+        M = out
+
+    # Заполняем верхний треугольник
+    M[..., rows, cols] = m_vals
+    # Отражаем
+    M[..., cols, rows] = m_vals
+    return M
 
 # -----------------------------------------------------------------------------
 #                        Формирование комплексной матрицы M̃
 # -----------------------------------------------------------------------------
-
 def build_cmatrix(M_real: torch.Tensor, qu: Optional[torch.Tensor], order: int) -> torch.Tensor:
     """Строит комплексную матрицу M̃ = M_real + j*(1/qu) на диагонали резонаторов.
 
@@ -343,6 +391,26 @@ def _cached_mats(order: int, ports: int, device_key: str):
         I_p.requires_grad_(False)
     return U, R, I_p
 
+@lru_cache(maxsize=128)
+def _cached_Icols(K: int, P: int, device_key: str) -> torch.Tensor:
+    """
+    Возвращает последние P столбцов единичной матрицы размера K (float → complex).
+    Кэшируется по (K, P, device).
+    """
+    device = torch.device(device_key)
+    eye = torch.eye(K, dtype=DT_C, device=device)
+    cols = eye[..., -P:]  # (K,P)
+    cols.requires_grad_(False)
+    return cols
+
+def clear_core_cache() -> None:
+    """Сбрасывает кэш неизменяемых матриц (U, R, I_p)."""
+    _cached_mats.cache_clear()
+    _cached_Icols.cache_clear()
+
+def core_cache_info():
+    """Возвращает информацию о кэше (_cached_mats.cache_info())."""
+    return _cached_mats.cache_info()
 
 # -----------------------------------------------------------------------------
 #                            Фазовые множители
@@ -460,9 +528,7 @@ def solve_sparams(
     M_b = M_c.unsqueeze(-3)  # (..., 1, K, K)
 
     w = prep.omega.unsqueeze(-1).unsqueeze(-1)  # (..., F, 1, 1)
-    j = torch.tensor(1j, dtype=DT_C, device=device)
-
-    A = R_b + j * w * U_b - j * M_b  # (..., F, K, K)
+    A = R_b + (1j) * w * U_b - (1j) * M_b  # (..., F, K, K)
 
     # 5) Решение
     use_solve = (spec.method == "solve") or (spec.method == "auto" and ports <= 4)
@@ -470,10 +536,10 @@ def solve_sparams(
     P = ports
 
     if use_solve:
-        I_cols = torch.eye(K, dtype=DT_C, device=device)[..., -P:]  # (K,P)
+        I_cols = _cached_Icols(K, P, str(device))
         B = I_cols.expand(A.shape[:-2] + I_cols.shape)  # (..., F, K, P)
-        X = torch.linalg.solve(A, B)  # (..., F, K, P)
-        A_pp = X[..., -P:, :]  # (..., F, P, P)
+        X = torch.linalg.solve(A, B)                    # (..., F, K, P)
+        A_pp = X[..., -P:, :]                           # (..., F, P, P)
     else:
         A_inv = torch.linalg.inv(A)
         A_pp = A_inv[..., -P:, -P:]  # (..., F, P, P)
@@ -506,6 +572,9 @@ __all__ = [
     "Prepared",
     "prepare_inputs",
     "build_cmatrix",
+    "build_M",
     "solve_sparams",
     "sparams_core",
+    "clear_core_cache",
+    "core_cache_info",
 ]

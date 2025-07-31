@@ -1,32 +1,72 @@
+# mwlab/filters/__init__.py
+# -*- coding: utf-8 -*-
 """
 mwlab.filters
 =============
 
-Подпакет для расчёта S‑параметров СВЧ‑фильтров и мультиплексеров по
-расширенной матрице связи (coupling matrix).
+Подпакет для работы с **S‑параметрами СВЧ‑фильтров и мультиплексеров**
+на основе расширенной матрицы связи (*coupling matrix*).
 
-Структура
----------
-- topologies.py  — графы связей (Topology) и реестр шаблонов.
-- cm_core.py     — вычислительное ядро (Torch‑only) расчёта S(Ω).
-- cm.py          — контейнер CouplingMatrix + преобразования макетов/сериализация.
-- cm_io.py       — импорт/экспорт полных матриц (ASCII/JSON).
-- devices.py     — высокоуровневые классы устройств (Filter, Device, …).
+Содержимое
+----------
+
+* **topologies.py**
+    Неизменяемые графы связей (:class:`Topology`) + реестр шаблонов.
+
+* **cm_core.py**
+    Torch‑ядро прямого расчёта S(Ω) (:func:`solve_sparams`).
+
+* **cm_schema.py**
+    :class:`ParamSchema` — описание вектора параметров (M, qu, фазы)
+    и утилиты pack / unpack / assemble.
+
+* **cm.py**
+    :class:`CouplingMatrix` — контейнер значений матрицы связи,
+    импорты/экспорты, визуализация.
+
+* **cm_io.py**
+    ASCII / JSON‑файлы полной матрицы связи.
+
+* **devices.py**
+    Высокоуровневые классы :class:`Filter`, :class:`Device`.
+
+* **cm_nn.py**
+    :class:`CMLayer` — слой *torch.nn.Module* для аналитического
+    расчёта S‑параметров в составе нейросети.
+
+* **cm_gen.py**
+    Утилиты генерации данных:
+    `schema_to_space`, `space_to_schema`, :class:`CMDataset`.
 
 Основные точки входа
 --------------------
-- Topology / get_topology / register_topology — описание топологий.
-- CouplingMatrix — контейнер параметров матрицы связи.
-- solve_sparams  — прямой вызов ядра (sparams_core).
-- Filter         — готовый 2‑портовый фильтр (LP/HP/BP/BR).
+* **Функции/классы структуры**
+    – :class:`Topology`, :func:`get_topology`,
+      :class:`ParamSchema`, :class:`CouplingMatrix`.
+
+* **Вычислительное ядро**
+    – :func:`solve_sparams`, :class:`CoreSpec`.
+
+* **Устройства**
+    – :class:`Filter` (LP/HP/BP/BR).
+
+* **Интеграция с PyTorch**
+    – :class:`CMLayer`, :class:`CMDataset`.
 """
 
+# ────────────────────────────────────────────────────────────────────────────
+#                                  imports
+# ────────────────────────────────────────────────────────────────────────────
 from .topologies import (
     Topology,
     TopologyError,
     register_topology,
     get_topology,
     list_topologies,
+)
+
+from .cm_schema import (
+    ParamSchema,
 )
 
 from .cm import (
@@ -41,6 +81,8 @@ from .cm_core import (
     CoreSpec,
     CMError,
     DEFAULT_DEVICE,
+    clear_core_cache,
+    core_cache_info,
 )
 
 from .cm_io import (
@@ -54,6 +96,19 @@ from .devices import (
     Multiplexer,
 )
 
+from .cm_nn import (
+    CMLayer,
+)
+
+from .cm_gen import (
+    schema_to_space,
+    space_to_schema,
+    CMDataset,
+)
+
+# ────────────────────────────────────────────────────────────────────────────
+#                                   __all__
+# ────────────────────────────────────────────────────────────────────────────
 __all__ = [
     # topologies
     "Topology",
@@ -61,6 +116,8 @@ __all__ = [
     "register_topology",
     "get_topology",
     "list_topologies",
+    # schema
+    "ParamSchema",
     # coupling matrix
     "CouplingMatrix",
     "MatrixLayout",
@@ -71,6 +128,8 @@ __all__ = [
     "CoreSpec",
     "CMError",
     "DEFAULT_DEVICE",
+    "clear_core_cache",
+    "core_cache_info",
     # io
     "write_matrix",
     "read_matrix",
@@ -78,5 +137,9 @@ __all__ = [
     "Device",
     "Filter",
     "Multiplexer",
+    # torch integration
+    "CMLayer",
+    "schema_to_space",
+    "space_to_schema",
+    "CMDataset",
 ]
-
