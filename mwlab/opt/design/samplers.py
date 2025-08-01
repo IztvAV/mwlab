@@ -166,6 +166,8 @@ class BaseSampler:
     """
 
     requires: str | None = None  # строка для docs – «pyDOE2», «torch», …
+    requires_full_plan = False # False - допускают потоковую генерацию точек (можно генерировать порциями)
+                               # True - требуется полный план (все точки сразу)
 
     def __init__(self, *, rng: RngLike | None = None):
         self._np_rng, self._torch_gen, self._seed = _resolve_rng(rng)
@@ -285,6 +287,7 @@ class HaltonSampler(BaseSampler):
 @register("lhs", "latin")
 class LHSampler(BaseSampler):
     """Classic Latin Hypercube (без оптимизации расстояний)."""
+    requires_full_plan = True  # Требуется полный план - генерация всех точек сразу
 
     def sample(self, space, n: int) -> List[PointDict]:
         d = len(space)
@@ -297,6 +300,7 @@ class LHSampler(BaseSampler):
 @register("lhs_maximin")
 class LHSMaximinSampler(BaseSampler):
     """LHS + оптимизация критерия «maximin» (`scipy.stats.qmc.optimize_lhs`)."""
+    requires_full_plan = True  # Требуется полный план - генерация всех точек сразу
 
     def __init__(self, *, iterations: int = 50, rng: RngLike | None = None):
         super().__init__(rng=rng)
@@ -350,6 +354,7 @@ class NormalSampler(BaseSampler):
 @register("factorial_full", "ff2k")
 class FactorialFullSampler(BaseSampler):
     """Полный 2^d план (углы гиперкуба). Предупреждение при d>max_dim."""
+    requires_full_plan = True  # Требуется полный план - генерация всех точек сразу
 
     def __init__(
         self,
@@ -390,6 +395,7 @@ if _spec is not None:
         """Дробный 2^k план (Resolution IV)."""
 
         requires = "pyDOE2"
+        requires_full_plan = True  # Требуется полный план - генерация всех точек сразу
 
         def __init__(self, *, gen: str | None = None, rng: RngLike | None = None):
             super().__init__(rng=rng)
@@ -410,6 +416,7 @@ if _spec is not None:
         """Plackett–Burman дизайн (N = 4·⌈d/4⌉)."""
 
         requires = "pyDOE2"
+        requires_full_plan = True  # Требуется полный план - генерация всех точек сразу
 
         def sample(self, space, n: int | None = None) -> List[PointDict]:
             d = len(space)
@@ -425,6 +432,7 @@ if _spec is not None:
         """Central Composite Design (alpha='orth')"""
 
         requires = "pyDOE2"
+        requires_full_plan = True  # Требуется полный план - генерация всех точек сразу
 
         def __init__(
                 self,
@@ -451,6 +459,7 @@ if _spec is not None:
         """Box–Behnken план для локальной Response Surface Methodology."""
 
         requires = "pyDOE2"
+        requires_full_plan = True  # Требуется полный план - генерация всех точек сразу
 
         def __init__(self, *, rng: RngLike | None = None):
             super().__init__(rng=rng)
