@@ -1,304 +1,220 @@
 # mwlab/data_gen/base.py
 """
-mwlab.data_gen.base
-───────────────────
-Базовые абстракции, из которых строится любой генератор данных
-в экосистеме MWLab.
+Базовые абстракции подсистемы **mwlab.data_gen**
+================================================
+Данный модуль определяет _контракты_ (абстрактные классы) для трёх
+непосредственно взаимодействующих звеньев пайп‑лайна генерации данных:
 
-Поток данных:
+1. **ParamSource**  – выдаёт уникальные наборы параметров (dict‑ы).  Источник
+   может быть конечным (список, CSV‑файл) или бесконечным (онлайн‑DOE).  Все
+   методы, связанные с распределёнными вычислениями (*reserve*, *mark_done*,
+   *mark_failed*), по умолчанию делают ничего – их переопределяет конкретная
+   реализация.
 
-    ParamSource  →  DataGenerator  →  Writer
-      (параметры)                     (результат + meta)
+2. **DataGenerator** – чистая функция «batch параметров → batch данных».
+   Генератор не знает где лежит Source и куда Writer складывает результат; он
+   может требовать внешних ресурсов (HFSS‑сессия, GPU) – для этого класс
+   является контекст‑менеджером.
 
-* **ParamSource** – отдаёт точки пространства параметров.
-* **DataGenerator** – превращает батч параметров в данные
-  (TouchstoneData, Tensor, …) и формирует произвольную мета-информацию.
-* **Writer** – сохраняет полученные результаты в выбранный backend
-  (каталог .sNp, HDF5, LMDB, прямо в StorageBackend …).
+3. **Writer** – принимает результаты генерации и сохраняет их в нужный backend
+   (каталог .sNp, монолитный HDF5, in‑memory список …).  По умолчанию Writer
+   потокобезопасен _только_ если это гарантирует конкретная реализация.
 
-Дизайн-решения
-──────────────
-1. Все классы – контекст-менеджеры; достаточно писать::
-
-       with CsvSource(csv) as src, HDF5Writer("out.h5") as wr:
-           gen.run(src, wr)
-
-2. Метаданные могут возвращаться
-   • поэлементно (List[dict])
-   • единым скалярным dict (распространяется на все элементы)
-   • None (ничего).
-3. Встроенный `tqdm`-progress-bar включается флагом `show_progress`.
-4. Используется стандартный `logging`, ссылка хранится в
-   `self.logger`, доступна во всех методах генератора.
+Важно: **Сам модуль _не содержит_ управляющего цикла**.  Этим занимается
+отдельный компонент – *Runner* (см. ``mwlab.data_gen.runner``), который клеит
+Source, Generator и Writer, управляет многопоточностью, прогресс‑баром и
+корректным завершением.
 """
 
 from __future__ import annotations
 
-import itertools
-import logging
-from abc import ABC, abstractmethod
-from contextlib import AbstractContextManager
-from typing import (
-    Any,
-    Iterable,
-    Iterator,
-    Mapping,
-    MutableSequence,
-    Sequence,
-    Tuple,
-    Union,
-)
+import abc
+from typing import Any, Iterable, Iterator, Mapping, Sequence, Tuple, TYPE_CHECKING, Union
+import contextlib
 
-import torch
+# ---------------------------------------------------------------------------
+# Type aliases – единая терминология по всему пакету
+# ---------------------------------------------------------------------------
+ParamDict  = Mapping[str, Any]      # один набор входных параметров (имеет __id)
+MetaDict   = Mapping[str, Any]      # произвольная мета‑информация
+Batch      = Sequence[ParamDict]    # пакет параметров одинаковой длины
+MetaBatch  = Sequence[MetaDict]     # пакет метаданных той же длины, что Batch
 
-from mwlab.io.touchstone import TouchstoneData
+# «Сырой» результат генератора может быть практически любым.
+# Сам Writer решает – понимает он этот объект или выкинет исключение.
+if TYPE_CHECKING:  # чтобы не тянуть тяжёлые импорты во время рантайма
+    from mwlab.io.touchstone import TouchstoneData  # pragma: no cover
+    import torch                                    # pragma: no cover
+    Output = Union["TouchstoneData", "torch.Tensor", Any]
+else:
+    Output = Any
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Type aliases
-# ─────────────────────────────────────────────────────────────────────────────
-GeneratorOutput = Union[
-    TouchstoneData,
-    torch.Tensor,
-    Mapping[str, Any],           # «сырые» данные в произвольном формате
-]
+Outputs = Sequence[Output]        # пакет результатов такой же длины, как Batch
 
-# meta может быть
-#   • None
-#   • один общий словарь
-#   • список словарей длиной = batch
-MetaLike = Union[None, Mapping[str, Any], Sequence[Mapping[str, Any]]]
+# ---------------------------------------------------------------------------
+# 1. ParamSource – абстрактный интерфейс источника параметров
+# ---------------------------------------------------------------------------
+class ParamSource(abc.ABC):
+    """Итерируемый источник `dict`‑ов параметров.
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. ParamSource – откуда брать параметры
-# ─────────────────────────────────────────────────────────────────────────────
-class ParamSource(AbstractContextManager, ABC):
-    """
-    Итератор (и, опционально, менеджер ресурсов) для чтения точек параметров.
-
-    *По умолчанию* все методы-хуки (`reserve`, `mark_done`, `fail`) ничего
-    не делают – этого достаточно для простых in-memory списков.
-    При распределённом или fault-tolerant запуске наследник переопределяет
-    нужные вызовы (запись статуса точки в CSV/БД/Redis …).
+    * Каждый dict *обязан* содержать ключ ``"__id"`` – уникальный идентификатор
+      точки (строка).  Это требование упрощает логику Writer‑ов и системы
+      восстановления после падения.
+    * Класс является контекст‑менеджером, чтобы при необходимости открыть файл,
+      БД‑соединение или сетевой ресурс.
+    * Методы :py:meth:`reserve`, :py:meth:`mark_done`, :py:meth:`mark_failed`
+      нужны для распределённых сценариев; дефолтные реализации ничего не
+      делают.
     """
 
-    # ––––– интерфейс итератора –––––
-    @abstractmethod
-    def __iter__(self) -> Iterator[Mapping[str, Any]]:
-        """Возвращает *бесконечный* или конечный поток параметров."""
-        ...
+    # ------------------------------------------------------- базовый протокол
+    @abc.abstractmethod
+    def __iter__(self) -> Iterator[ParamDict]:
+        """Должен вернуть *итератор* уникальных ``ParamDict``.
 
-    # длина может быть неизвестна → вернуть None
-    def __len__(self) -> int | None:  # noqa: D401
-        return None
-
-    # ––––– опциональные вызовы для распределённых сценариев –––––
-    def reserve(self, n: int) -> None:
+        Длина источника может быть неизвестна, поэтому метод ``__len__`` по
+        умолчанию **не** объявляем.  Если конкретный Source знает точную длину –
+        пусть реализует ``__len__`` самостоятельно.
         """
-        Сообщить источнику, что прямо сейчас планируется обработать *n* точек.
-        Используется для атомарного «захвата» кусочка работы.
+
+    # ----------------------- контекст‑менеджер (обычно достаточно pass)
+    def __enter__(self):  # noqa: D401
+        return self
+
+    def __exit__(self, exc_type, exc, tb):  # noqa: D401
+        # Возвращаем False, чтобы возможное исключение не проглатывалось
+        return False
+
+    # ------------------------------------------------- fault‑tolerance hooks
+    def reserve(self, ids: Sequence[str]):  # noqa: D401
+        """Отметить набор *ids* как «захваченные» текущим воркером."""
+        pass
+
+    def mark_done(self, ids: Sequence[str]):  # noqa: D401
+        """Отметить *ids* как успешно обработанные."""
+        pass
+
+    def mark_failed(self, ids: Sequence[str], exc: Exception):  # noqa: D401
+        """Отметить *ids* как **failed**; *exc* – причина.
+
+        По умолчанию точку зрения Source это не интересует, но CSV‑/DB‑sources
+        могут сохранить текст ошибки прямо в таблицу (для последующего анализа).
         """
         pass
 
-    def mark_done(self, params: Mapping[str, Any]) -> None:
-        """Точка успешно обработана."""
-        pass
+# ---------------------------------------------------------------------------
+# 2. DataGenerator – абстрактный «производитель» данных
+# ---------------------------------------------------------------------------
+class DataGenerator(abc.ABC):
+    """Преобразует батч параметров → батч данных (+ метаданные).
 
-    def fail(self, params: Mapping[str, Any], exc: Exception) -> None:
-        """Точка завершилась исключением *exc*."""
-        pass
+    Генератор **не** содержит внешнего цикла – только одну функцию
+    :py:meth:`generate`.  Используем контекст‑менеджер для открытия/закрытия
+    тяжёлых ресурсов (HFSS, лицензия CST, CUDA‑контекст …).
+    """
 
-    # ––––– контекст-менеджер –––––
-    # большинству источников ничего не нужно закрывать
+    # ----------------------- контекст‑менеджер
+    def __enter__(self):  # noqa: D401
+        return self
+
     def __exit__(self, exc_type, exc, tb):  # noqa: D401
         return False
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. BaseWriter – куда складывать результат
-# ─────────────────────────────────────────────────────────────────────────────
-class BaseWriter(AbstractContextManager, ABC):
-    """
-    “Приёмник” (sink) для результатов генератора.
-
-    •   `outputs` – список объектов любого поддерживаемого типа
-        (TouchstoneData, Tensor, ...).
-    •   `params_batch` – ровно те же словари параметров,
-        что подавались генератору.
-    •   `meta` – либо None, либо общий dict, либо список dict'ов.
-        Writer решает, что с ними делать: писать в header .sNp,
-        в HDF5-атрибуты, игнорировать…
-    """
-
-    @abstractmethod
-    def write(
-        self,
-        outputs: Sequence[GeneratorOutput],
-        params_batch: Sequence[Mapping[str, Any]],
-        meta: MetaLike = None,
-    ) -> None: ...
-
-    # логировать ошибку (по желанию)
-    def log_error(self, params_batch, exc):  # noqa: D401
-        pass
-
-    # для буферизованных Writer'ов можно перегрузить flush
-    def flush(self):  # noqa: D401
-        pass
-
-    # контекст-менеджер
-    def __exit__(self, exc_type, exc, tb):  # noqa: D401
-        self.flush()
-        return False
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. DataGenerator – ядро
-# ─────────────────────────────────────────────────────────────────────────────
-class DataGenerator(ABC):
-    """
-    Базовый класс конкретных генераторов.
-
-    Пользователь обычно переопределяет **только** `generate_batch`.
-    При необходимости – `preprocess` и/или `postprocess`.
-
-    * Атрибут `batch_size` можно задать через конструктор.
-    * Логгер доступен как `self.logger`.
-    """
-
-    # ------------------------------------------------------------------ init
-    def __init__(
-        self,
-        *,
-        batch_size: int = 1,
-        logger: logging.Logger | None = None,
-    ):
-        if batch_size <= 0:
-            raise ValueError("batch_size must be > 0")
-        self.batch_size = int(batch_size)
-        self.logger = logger or logging.getLogger(self.__class__.__name__)
-
-    # ---------------------------------------------------------------- hooks
+    # ----------------------- необязательные pre-hooks (по умолчанию no-op)
     def preprocess(self, params: Mapping[str, Any]) -> Mapping[str, Any]:
-        """Опциональная валидация / нормализация входных параметров."""
+        """
+        Хук предварительной обработки ОДНОЙ точки параметров.
+
+        По умолчанию возвращает входной dict без изменений.
+
+        Замечания
+        ---------
+        * РЕКОМЕНДАЦИЯ: не изменяйте ключ ``"__id"``.
+          Идентификатор используется Runner-ом для резервирования
+          и отметок done/failed в Source.
+        * Здесь удобно делать легкую валидацию, нормализацию форматов
+          (например, разворот скаляров в вектора) и пр.
+        """
         return params
 
-    @abstractmethod
-    def generate_batch(
-        self,
-        params_batch: Sequence[Mapping[str, Any]],
-    ) -> Tuple[Sequence[GeneratorOutput], MetaLike]:
-        """Главная работа: params → данные (+ meta)."""
-        ...
-
-    def postprocess(
-        self,
-        outputs: Sequence[GeneratorOutput],
-        meta: MetaLike,
-        params_batch: Sequence[Mapping[str, Any]],
-    ) -> Tuple[Sequence[GeneratorOutput], Sequence[Mapping[str, Any]]]:
+    def preprocess_batch(self, batch: Batch) -> Batch:
         """
-        Финальная обработка перед записью.
-        ↳ Возвращаем гарантированно *список* meta той же длины,
-        что и outputs.
+        Хук предварительной обработки ВСЕГО батча параметров.
+
+        По умолчанию возвращает входной батч без изменений.
+
+        Замечания
+        ---------
+        * Длина батча ДОЛЖНА сохраниться неизменной.
+        * РЕКОМЕНДАЦИЯ: не меняйте ``"__id"`` для элементов.
+          Если нужно обогатить параметры — делайте это «внутри» dict-ов.
+        * Подходит для операций, которые удобнее делать «оптом»,
+          например, векторные трансформации.
         """
-        if meta is None:
-            meta_seq: Sequence[Mapping[str, Any]] = [{} for _ in outputs]
-        elif isinstance(meta, Mapping):
-            meta_seq = [meta] * len(outputs)
-        else:
-            meta_seq = list(meta)
-            if len(meta_seq) != len(outputs):
-                raise ValueError("meta длины batch не совпадает с outputs")
-        return outputs, meta_seq
+        return batch
 
-    # ---------------------------------------------------------------- public run
-    def run(
-        self,
-        source: ParamSource,
-        writer: BaseWriter,
-        *,
-        show_progress: bool = True,
-    ):
+    # ----------------------- обязательный метод
+    @abc.abstractmethod
+    def generate(self, params_batch: Batch) -> Tuple[Outputs, MetaBatch]:
+        """Синхронно обрабатывает *params_batch*.
+
+        Требования к возвращаемым значениям:
+        * ``len(outputs)  == len(params_batch)``
+        * ``len(meta)     == len(params_batch)``
+
+        Runner будет это проверять.  При несоответствии возникнет
+        :class:`ValueError`.
         """
-        Высокоуровневый цикл:
 
-            for batch in source:
-                preprocess → generate_batch → postprocess → writer.write
-        """
-        iterator: Iterable[Mapping[str, Any]] = source
-        total = len(source) if hasattr(source, "__len__") else None
+# ---------------------------------------------------------------------------
+# 3. Writer – абстрактный «приёмник» результатов
+# ---------------------------------------------------------------------------
+class Writer(abc.ABC):
+    """Сохраняет результаты в файловую систему / БД / память.
 
-        # progress-bar (tqdm подключается, если есть и если включён)
-        if show_progress:
-            try:
-                from tqdm.auto import tqdm
-                iterator = tqdm(iterator, total=total, desc="DataGen")
-            except ModuleNotFoundError:
-                self.logger.debug("tqdm не установлен – прогрессбар выключен")
-
-        with source, writer:
-            batch: list[Mapping[str, Any]] = []
-
-            def _commit():
-                """Обработать накопленный batch."""
-                if not batch:
-                    return
-                try:
-                    clean = [self.preprocess(p) for p in batch]
-                    outs, meta = self.generate_batch(clean)
-                    outs, meta = self.postprocess(outs, meta, clean)
-                    writer.write(outs, clean, meta)
-                    for p in clean:
-                        source.mark_done(p)
-                except Exception as e:
-                    self.logger.exception("Batch failed")
-                    for p in batch:
-                        source.fail(p, e)
-                    writer.log_error(batch, e)
-                finally:
-                    batch.clear()
-
-            # основной цикл
-            for params in iterator:
-                if not batch:
-                    # захватываем «porцию» заранее, если нужно
-                    source.reserve(self.batch_size)
-                batch.append(params)
-
-                if len(batch) >= self.batch_size:
-                    _commit()
-
-            # хвост
-            _commit()
-
-        writer.flush()
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Утилита (может пригодиться)
-# ─────────────────────────────────────────────────────────────────────────────
-def batched(iterable: Iterable[Any], n: int) -> Iterator[Tuple[Any, ...]]:
+    Writer является *sink*‑ом: он ничего не возвращает в процессе работы.
+    Большинство реализаций будут буферизовать данные и сбрасывать их при
+    вызове :py:meth:`flush` (автоматически вызывается из ``__exit__``).
     """
-    Разбивает любой итерируемый объект на чанки по *n* элементов.
-    Последний чанк может быть короче.
-    """
-    it = iter(iterable)
-    while True:
-        chunk = tuple(itertools.islice(it, n))
-        if not chunk:
-            break
-        yield chunk
 
+    # ----------------------- контекст‑менеджер
+    def __enter__(self):  # noqa: D401
+        return self
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Re-export
-# ─────────────────────────────────────────────────────────────────────────────
+    def __exit__(self, exc_type, exc, tb):  # noqa: D401
+        # гарантированно пытаемся сбросить буферы
+        with contextlib.suppress(Exception):  # type: ignore[name-defined]
+            self.flush()
+        return False
+
+    # ----------------------- обязательный метод
+    @abc.abstractmethod
+    def write(self, outputs: Outputs, meta: MetaBatch, params: Batch):
+        """Записать батч результатов.
+
+        Контракт: все три последовательности **одинаковой длины**.
+        В случае нарушения реализация может бросить ``ValueError``.
+        """
+        ...  # pragma: no cover
+
+    # ----------------------- не обязательный, но желательный метод
+    def flush(self):  # noqa: D401
+        """Сбросить внутренние буферы на диск/в сеть.
+
+        По умолчанию ничего не делает.
+        """
+        pass
+
+# ---------------------------------------------------------------------------
+# public re‑export
+# ---------------------------------------------------------------------------
 __all__ = [
-    "GeneratorOutput",
-    "MetaLike",
+    "ParamDict",
+    "MetaDict",
+    "Batch",
+    "MetaBatch",
+    "Outputs",
     "ParamSource",
-    "BaseWriter",
     "DataGenerator",
-    "batched",
+    "Writer",
 ]
