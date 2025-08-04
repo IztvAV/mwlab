@@ -180,25 +180,59 @@ def read_matrix(
     permutation: Sequence[int] | None = None,
 ):
     """
-    Читает файл с расширенной матрицей связи и возвращает CouplingMatrix.
+    Читает файл с **расширенной реальной матрицей связи** и возвращает `CouplingMatrix`.
+
+    Поддерживаемые форматы файла:
+      • ASCII (табличный) — первая(-ые) строка(-и) начинаются с '#', там же могут быть
+        зашиты метаданные: `layout`, `order`, `ports`, `qu`, `qu_i`, `phase_a[_i]`, `phase_b[_i]`.
+      • JSON — объект с полями: "layout", "order", "ports", "M" (список списков),
+        а также опционально "qu"/"qu_vec", "phase_a"/"phase_a_vec", "phase_b"/"phase_b_vec".
 
     Параметры
     ----------
     path : str | Path
-        Путь к ASCII/JSON файлу.
+        Путь к файлу.
     topo : Topology | None
-        Готовая топология, если известна. Иначе будет восстановлена в from_matrix().
-    layout : MatrixLayout | \"auto\" | str
-        Макет во входном файле:
-          * \"auto\" — попытаться определить (SL/TAIL) эвристикой;
-          * явное значение Enum или строковое имя.
+        Если **указана топология**, то чтение будет **строго ограничено** этой топологией:
+        из матрицы берутся **только** элементы
+          1) главной диагонали **резонаторной** подматрицы (M1_1..M_order_order),
+          2) пары (i,j) из `topo.links` (верхний треугольник, 1-based),
+        причём **считываются все значения, включая нулевые**.
+        Порядок портов во входном файле учитывается через параметр `layout`.
+        Если `topo` не задана — поведение остаётся прежним (реконструкция по всем
+        ненулевым элементам верхнего треугольника через `CouplingMatrix.from_matrix`).
+    layout : MatrixLayout | "auto" | str
+        Макет портов во входном файле:
+          • "auto" — попытаться определить (SL/TAIL) эвристикой или из метаданных;
+          • явное значение `MatrixLayout` или имя Enum (строкой).
     delimiter : str
-        Разделитель для ASCII.
+        Разделитель столбцов для ASCII.
+    permutation : Sequence[int] | None
+        Пользовательская перестановка для `layout=CUSTOM` (0-based, длина K, является
+        перестановкой 0..K-1). Семантика та же, что и в `make_perm()`:
+        `perm[i] = j` означает, что **i-я строка/столбец внешней матрицы** берётся
+        из **j-й строки/столбца канонической (TAIL)**.
 
     Возвращает
     ----------
     CouplingMatrix
         Объект с матрицей связи и (при наличии) параметрами qu/phase_a/phase_b.
+
+    Особенности поведения при явно переданной `topo`
+    -----------------------------------------------
+    1) Матрица из файла сначала приводится к каноническому порядку **TAIL**
+       по указанному/детектированному `layout` (операция `M_can = P^T @ M_ext @ P`).
+    2) Формируется словарь `mvals` **только** по:
+         • резонаторной диагонали: (1,1)..(order,order);
+         • звеньям из `topo.links` (i<j, 1-based; портовые связи также допустимы).
+       В `mvals` записываются **все** значения (включая нули).
+    3) Возвращается `CouplingMatrix(topo, mvals, qu, phase_a, phase_b)`
+       **без** промежуточного вызова `CouplingMatrix.from_matrix()`, чтобы
+       не отбрасывать нулевые значения и не добавлять «лишние» связи.
+
+    Если `topo` не задана, используется прежняя логика:
+    — чтение полной матрицы → `CouplingMatrix.from_matrix(...)` с возможной
+      авто-догадкой топологии/макета.
     """
     path = Path(path)
     text = path.read_text()
@@ -206,12 +240,20 @@ def read_matrix(
     qu = None
     phase_a = None
     phase_b = None
+    detected = None  # тип макета из файла (если присутствует явно)
 
     # ---------------- JSON ----------------
     if text.lstrip().startswith("{"):
         blob = json.loads(text)
+
+        # сама матрица (внешний макет)
         M = np.asarray(blob["M"], dtype=float)
-        detected = MatrixLayout[blob.get("layout", "TAIL")]
+        if M.ndim != 2 or M.shape[0] != M.shape[1]:
+            raise ValueError("JSON: поле 'M' должно быть квадратной матрицей K×K")
+
+        # макет из файла (если указан)
+        if "layout" in blob:
+            detected = MatrixLayout[str(blob["layout"]).upper()]
 
         # qu
         if "qu" in blob:
@@ -219,12 +261,13 @@ def read_matrix(
         elif "qu_vec" in blob:
             qu = np.asarray(blob["qu_vec"], dtype=float)
 
-        # phases
+        # phase_a
         if "phase_a" in blob:
             phase_a = float(blob["phase_a"])
         elif "phase_a_vec" in blob:
             phase_a = np.asarray(blob["phase_a_vec"], dtype=float)
 
+        # phase_b
         if "phase_b" in blob:
             phase_b = float(blob["phase_b"])
         elif "phase_b_vec" in blob:
@@ -232,23 +275,23 @@ def read_matrix(
 
     # ---------------- ASCII ----------------
     else:
-        import re
-
+        # Собираем все строки-комментарии (начинаются с '#') в единый заголовок
         header_lines = [ln for ln in text.splitlines() if ln.startswith("#")]
         header = " ".join(h[1:].strip() for h in header_lines)
 
-        # layout
-        m = re.search(r"layout\s*=\s*(\w+)", header)
-        detected = MatrixLayout[m.group(1)] if m else None
+        # layout=...
+        m = re.search(r"\blayout\s*=\s*(\w+)", header)
+        if m:
+            detected = MatrixLayout[m.group(1)]
 
-        # qu scalar
-        m_qu = re.search(r"\bqu\s*=\s*([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)", header)
+        # qu (скаляр)
+        m_qu = re.search(r"\bqu\s*=\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)", header)
         if m_qu:
             qu = float(m_qu.group(1))
         else:
-            # qu_i
+            # qu_i из заголовка
             qu_matches = re.findall(
-                r"qu_(\d+)\s*=\s*([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)", header
+                r"\bqu_(\d+)\s*=\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)", header
             )
             if qu_matches:
                 max_i = max(int(idx) for idx, _ in qu_matches)
@@ -258,12 +301,12 @@ def read_matrix(
                 qu = arr
 
         # phase_a
-        m_pa = re.search(r"\bphase_a\s*=\s*([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)", header)
+        m_pa = re.search(r"\bphase_a\s*=\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)", header)
         if m_pa:
             phase_a = float(m_pa.group(1))
         else:
             pa_matches = re.findall(
-                r"phase_a(\d+)\s*=\s*([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)",
+                r"\bphase_a(\d+)\s*=\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)",
                 header,
             )
             if pa_matches:
@@ -274,12 +317,12 @@ def read_matrix(
                 phase_a = arr
 
         # phase_b
-        m_pb = re.search(r"\bphase_b\s*=\s*([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)", header)
+        m_pb = re.search(r"\bphase_b\s*=\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)", header)
         if m_pb:
             phase_b = float(m_pb.group(1))
         else:
             pb_matches = re.findall(
-                r"phase_b(\d+)\s*=\s*([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)",
+                r"\bphase_b(\d+)\s*=\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)",
                 header,
             )
             if pb_matches:
@@ -289,20 +332,78 @@ def read_matrix(
                     arr[int(idx) - 1] = float(val)
                 phase_b = arr
 
-        # сама матрица
+        # численные данные матрицы (внешний макет)
         M = np.loadtxt(path, delimiter=delimiter)
+        if M.ndim != 2 or M.shape[0] != M.shape[1]:
+            raise ValueError("ASCII: считанная матрица должна быть квадратной K×K")
+        M = np.asarray(M, dtype=float)
 
-    # --------------- определяем макет ---------------
+    # --------------- определяем макет (если не задан явно) ---------------
     if layout == "auto":
         if detected is not None:
             lay = detected
         else:
-            # передаём numpy-массив напрямую
             lay = _guess_layout(M) or MatrixLayout.TAIL
     else:
         lay = MatrixLayout[layout] if isinstance(layout, str) else layout
 
-    # --------------- финальный объект ---------------
+    # --------------- ОСНОВНАЯ ВЕТКА: topo задан → «считываем строго по топологии» ---------------
+    if topo is not None:
+        K = M.shape[0]
+        if topo.size != K:
+            raise ValueError(f"Размер матрицы ({K}) не совпадает с topo.size ({topo.size})")
+
+        # Приводим внешнюю матрицу к каноническому порядку TAIL.
+        # Семантика перестановки соответствует make_perm():
+        #   M_ext = P @ M_can @ P.T  →  M_can = P.T @ M_ext @ P
+        if lay is MatrixLayout.TAIL:
+            perm = list(range(K))
+        elif lay is MatrixLayout.SL:
+            if topo.ports != 2:
+                raise ValueError("layout='SL' применим только к 2-портовым устройствам (ports == 2)")
+            perm = make_perm(topo.order, topo.ports, MatrixLayout.SL)
+        elif lay is MatrixLayout.CUSTOM:
+            if permutation is None:
+                raise ValueError("CUSTOM layout требует параметр 'permutation'")
+            perm = list(permutation)
+            if len(perm) != K or sorted(perm) != list(range(K)):
+                raise ValueError("permutation должна быть перестановкой 0…K-1")
+        else:
+            # Защита от будущих значений Enum
+            raise ValueError(f"Неизвестный layout: {lay}")
+
+        P = np.eye(K)[perm]
+        M_can = P.T @ M @ P  # теперь M_can в порядке [R1..Rn, P1..Pp]
+
+        # Формируем mvals ТОЛЬКО по диагонали резонаторов и topo.links.
+        # ВАЖНО: записываем даже нулевые значения (не используем порог отсечки).
+        mvals: dict[str, float] = {}
+
+        # (1) Диагональ резонаторов: индексы 1..order (1-based).
+        for i in range(1, topo.order + 1):
+            mvals[f"M{i}_{i}"] = float(M_can[i - 1, i - 1])
+
+        # (2) Связи из topo.links (верхний треугольник, 1-based; портовые тоже возможны).
+        # Гарантируем, что ключи идут как (min,max).
+        for (i, j) in topo.links:
+            if j < i:
+                i, j = j, i
+            mvals[f"M{i}_{j}"] = float(M_can[i - 1, j - 1])
+
+        # Собираем итоговый объект строго под заданную топологию.
+        return CouplingMatrix(
+            topo,
+            mvals,
+            qu=qu,
+            phase_a=phase_a,
+            phase_b=phase_b,
+        )
+
+    # --------------- ИНАЧЕ: прежнее поведение (полная реконструкция) ---------------
+    # Без заданной topo передаём всё в CouplingMatrix.from_matrix:
+    #   • он при необходимости усреднит матрицу с её транспонированной (force_sym),
+    #   • отфильтрует малые значения по atol,
+    #   • восстановит или примет переданную топологию и т.д.
     return CouplingMatrix.from_matrix(
         M,
         topo=topo,
@@ -312,6 +413,7 @@ def read_matrix(
         phase_b=phase_b,
         permutation=permutation,
     )
+
 
 
 # -----------------------------------------------------------------------------
