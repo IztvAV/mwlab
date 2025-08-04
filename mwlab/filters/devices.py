@@ -202,16 +202,49 @@ class Device(ABC):
 
     # ---------- установка Q со стороны пользователя ----------
     def set_Q(self, Q):
-        """Задать *физические* добротности Q и пересчитать нормированные qu."""
+        """
+        Задать *физические* добротности Q и пересчитать нормированные qu.
+
+        Правила:
+        - Если Q — скаляр (вкл. numpy-скаляр или torch-тензор из 1 элемента),
+          то cm.qu будет установлен СКАЛЯРОМ: qu = Q * self._qu_scale().
+        - Если Q — последовательность/массив длиной order, то cm.qu будет вектором
+          той же длины (после масштабирования).
+        - Если Q is None — сбросить cm.qu в None.
+
+        Примечание:
+        Для BP/BR используется масштаб FBW: qu = Q * FBW.
+        Для LP/HP масштаб равен 1: qu = Q.
+        """
         if Q is None:
             self.cm.qu = None
+            return
+
+        # Поддержка скалярных форм: python float/int, numpy-скаляр, torch-тензор numel==1
+        import numpy as _np
+        import torch as _torch
+
+        scale = self._qu_scale()
+
+        # torch.Tensor
+        if _torch.is_tensor(Q):
+            if Q.numel() == 1:
+                self.cm.qu = float(Q.item()) * scale
+                return
+            # множественные значения → приведём к numpy-массиву
+            arr = Q.detach().cpu().numpy().astype(float, copy=False)
         else:
-            arr = np.asarray(Q, dtype=float)
-            if arr.ndim == 0:  # скаляр
-                arr = np.full(self.order, float(arr), dtype=float)
-            if arr.size != self.order:
-                raise ValueError(f"Q: ожидалось {self.order} значений, получено {arr.size}")
-            self.cm.qu = arr * self._qu_scale()
+            # Преобразуем к numpy и отличим скаляр от вектора
+            arr = _np.asarray(Q, dtype=float)
+            if arr.ndim == 0:  # скаляр (в т.ч. numpy-скаляр)
+                self.cm.qu = float(arr) * scale
+                return
+
+        # В этот момент Q — массив из нескольких значений
+        if arr.size != self.order:
+            raise ValueError(f"Q: ожидалось {self.order} значений, получено {arr.size}")
+
+        self.cm.qu = arr * scale
 
     # ---------------------------------------------------------------- API – S-параметры
     def sparams(
