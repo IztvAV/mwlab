@@ -238,7 +238,6 @@ class CMGenerator(DataGenerator):
         outputs: List[Any] = []
         meta_list: List[Dict[str, Any]] = []
 
-        # Общая часть метаданных про топологию и сетку
         topo_meta = {
             "topo_order": self.topology.order,
             "topo_ports": self.topology.ports,
@@ -248,20 +247,28 @@ class CMGenerator(DataGenerator):
         }
 
         if self.output_mode == "touchstone":
-            # Создаём список TouchstoneData: Network берётся из соответствующей срезки S_all[i]
-            # skrf ожидает NumPy-массив complex, переводим с устройства на CPU
+            # ✅ Жёсткая проверка формы, чтобы ловить подобные баги сразу
+            if S_all.ndim != 4 or S_all.shape[0] != B or S_all.shape[-2:] != (P, P):
+                raise RuntimeError(
+                    f"CMGenerator: ожидаю S_all формы (B,F,P,P), получил {tuple(S_all.shape)}"
+                )
+
+            # Чтобы не дергать .detach().cpu().numpy() на каждом элементе,
+            # переносим весь батч на CPU разом — затем zip по первому измерению B.
+            s_batch_np = S_all.detach().cpu().numpy()  # (B, F, P, P)
             freq_obj = self._freq_obj
-            for i, p_map in enumerate(params_batch):
-                net = rf.Network(frequency=freq_obj, s=S_all[i].detach().cpu().numpy())
-                meta = {**p_map, **topo_meta}  # исходные поля + сервисная инфо
+
+            for s_item, p_map in zip(s_batch_np, params_batch):
+                # s_item: (F, P, P)  — то, что ждёт scikit-rf
+                net = rf.Network(frequency=freq_obj, s=s_item)
+                meta = {**p_map, **topo_meta}
                 outputs.append(TouchstoneData(net, params=meta))
                 meta_list.append(meta)
         else:
-            # Режим «tensor»: возвращаем для каждого элемента (F, P, P)
-            for i, p_map in enumerate(params_batch):
-                s_item = S_all[i]  # (F,P,P), на device генератора
+            # Режим «tensor»: возвращаем для каждого образца (F, P, P)
+            for s_item, p_map in zip(S_all, params_batch):
                 meta = {**p_map, **topo_meta}
-                outputs.append(s_item)
+                outputs.append(s_item)  # остаётся на том же device
                 meta_list.append(meta)
 
         return outputs, meta_list
