@@ -271,6 +271,7 @@ class CMGenerator(DataGenerator):
                 outputs.append(s_item)  # остаётся на том же device
                 meta_list.append(meta)
 
+
         return outputs, meta_list
 
 
