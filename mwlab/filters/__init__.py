@@ -96,14 +96,9 @@ from .devices import (
     Multiplexer,
 )
 
-from .cm_nn import (
-    CMLayer,
-)
-
 from .cm_gen import (
     schema_to_space,
     space_to_schema,
-    CMDataset,
 )
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -138,8 +133,6 @@ __all__ = [
     "Filter",
     "Multiplexer",
     # torch integration
-    "CMLayer",
     "schema_to_space",
     "space_to_schema",
-    "CMDataset",
 ]
