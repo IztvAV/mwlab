@@ -607,11 +607,28 @@ class CouplingMatrix:
 
     # ---------------------------------------------------------------- repr
     def __repr__(self) -> str:
+        # Считаем кол-во фазовых параметров (оба вектора, если заданы)
         ph_cnt = (len(self._phase_to_list(self.phase_a, name="phase_a") or []) +
                   len(self._phase_to_list(self.phase_b, name="phase_b") or []))
-        qu_info = "None" if self.qu is None else (
-            f"vec[{len(self.qu)}]" if isinstance(self.qu, (list, tuple)) else f"{float(self.qu):g}"
-        )
+
+        # Аккуратно формируем строку о qu (поддержка list/tuple/np.ndarray/torch.Tensor/скаляр)
+        import numpy as _np
+        import torch as _torch
+
+        if self.qu is None:
+            qu_info = "None"
+        elif _torch.is_tensor(self.qu):
+            qu_info = (f"vec[{int(self.qu.numel())}]"
+                       if self.qu.numel() > 1 else f"{float(self.qu.item()):g}")
+        elif isinstance(self.qu, _np.ndarray):
+            qu_info = (f"vec[{int(self.qu.size)}]"
+                       if self.qu.size > 1 else f"{float(self.qu.item()):g}")
+        elif isinstance(self.qu, (list, tuple)):
+            qu_info = f"vec[{len(self.qu)}]"
+        else:
+            # Пытаемся трактовать как скаляр (int/float и т.п.)
+            qu_info = f"{float(self.qu):g}"
+
         return (f"CouplingMatrix(order={self.topo.order}, ports={self.topo.ports}, "
                 f"M={len(self.mvals)}, qu={qu_info}, phases={ph_cnt})")
 
