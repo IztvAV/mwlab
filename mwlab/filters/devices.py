@@ -2,83 +2,131 @@
 """
 mwlab.filters.devices
 =====================
+
 Высокоуровневый слой «устройств» (Device-level) поверх матрицы связи.
 
-Что изменилось по сравнению с прежней версией:
----------------------------------------------
-* Backend NumPy/Torch заменён на **Torch-only**. Параметр `backend` удалён.
-* Добавлен параметр `device` (по умолчанию авто: CUDA если доступна, иначе CPU).
-* Все расчёты S-параметров выполняются на Torch; для Touchstone/`skrf` данные
-  конвертируются в NumPy (`.detach().cpu().numpy()`).
-* Логика и API классов сохранены концептуально, но сигнатуры обновлены.
+Что делает модуль
+-----------------
+* **Device** — абстрактный N-портовый прибор, рассчитывающий S-параметры по частоте *f*.
+* **Filter** — 2-портовый одно-полосный фильтр (LP / HP / BP / BR) с отображениями Ω↔f.
+* **Multiplexer** — заготовка N-канального мультиплексора (API совместим, реализация неполная).
 
-Компоненты
-----------
-* **Device**  – абстрактное устройство (N-порт, любое число звеньев)
-* **Filter**  – 2-портовый одно-полосный фильтр (LP / HP / BP / BR)
-* **Multiplexer** – заготовка N-канального мультиплексора (не завершён)
-
-Основные возможности
---------------------
-* Прямой расчёт S-матрицы устройства в шкале **f (Гц)**.
-* Преобразования сеток Ω ↔ f с учётом типа фильтра.
-* Круглая триада «CouplingMatrix ↔ Filter ↔ Touchstone».
-* Фабрики-шорткаты: `Filter.lp / hp / bp / br / bp_edges / br_edges`.
+Ключевые особенности (после обновления)
+---------------------------------------
+* **Ленивый импорт `scikit-rf`**: зависимость нужна только при работе с Touchstone
+  и при запросе выдачи `rf.Frequency`. Если `skrf` не установлен, остальной функционал
+  (расчёт S-параметров) полностью работоспособен.
+* **Единая трактовка единиц**:
+  - Все публичные методы, принимающие частоты, имеют параметр `unit` (по умолчанию `"Hz"`),
+    который **интерпретирует входной числовой массив** (если на входе не `rf.Frequency`).
+  - Если на вход подан `rf.Frequency`, он уже содержит частоты в Гц, и `unit` используется
+    только как *оформление* (например, для Touchstone-файла), но на вычисления не влияет.
+* **Новые Ω-методы**:
+  - `Device.sparams_omega(omega, ...)` — прямой расчёт S(Ω), минуя обсуждение единиц.
+  - `Filter.to_touchstone_omega(omega, f_unit="Hz", ...)` — строит Touchstone напрямую из Ω,
+    сам переводя в *f* и подставляя нужные единицы частоты в выходном файле.
+* **Чёткий контракт `Filter.freq_grid`**: параметр `unit` — это **единица результата**.
+  Возвращаются либо числовые частоты в указанных единицах, либо `rf.Frequency` при `as_rf=True`.
+* **Валидация для LP/HP**: если передан `f_edges` и оба края указаны (не `None`), это ошибка —
+  для LP/HP нужен ровно один «край» (`f_cut`).
+* **Документация**: докстринги уточнены (про единицы, батч-оси и устойчивость в окрестности Ω=0).
 
 Зависимости
 -----------
-* torch — вычисления S
-* numpy — вспомогательные операции, создание массивов частот
-* scikit-rf (skrf) — Touchstone I/O
-
-Автор: (c) MWLab, 2025
+* `numpy` — вспомогательные операции и работа с сетками частот.
+* `torch`  — все расчёты S-параметров выполняются средствами Torch.
+* `scikit-rf` (необязательная) — только для Touchstone I/O и для возврата `rf.Frequency`.
 """
+
 from __future__ import annotations
 
 import math
 from abc import ABC, abstractmethod
-from typing import Dict, Mapping, Sequence, Tuple, Optional
+from typing import Dict, Mapping, Sequence, Tuple, Optional, Any
 
 import numpy as np
 import torch
-import skrf as rf
 
 from mwlab.filters.cm import CouplingMatrix
 from mwlab.filters.cm_core import DEFAULT_DEVICE
 from mwlab.io.touchstone import TouchstoneData
 
+
 # ────────────────────────────────────────────────────────────────────────────
-#                               helpers
+#                         Внутренние вспомогательные утилиты
 # ────────────────────────────────────────────────────────────────────────────
 
-def _as_frequency(f, *, unit: str = "Hz") -> Tuple[np.ndarray, Optional[rf.Frequency]]:
-    """Приводит *f* к ``ndarray`` в Гц.
+# Локальный словарь множителей единиц (без зависимости от scikit-rf)
+_UNIT_MULT = {
+    "hz": 1.0,
+    "khz": 1e3,
+    "mhz": 1e6,
+    "ghz": 1e9,
+}
 
-    Если передан объект ``rf.Frequency`` – возвращает ``(f_numpy, rf.Frequency)``
-    для сохранения исходных единиц при экспортe в Touchstone.
 
-    Параметр *unit* используется только когда на входе массив чисел (для
-    согласованности с прежним API, хотя здесь мы предполагаем, что массив уже в Гц).
+def _to_hz(val: float | np.ndarray, unit: str) -> float | np.ndarray:
     """
-    if isinstance(f, rf.Frequency):
-        return f.f.copy(), f
+    Переводит число/массив *val* из единиц `unit` ('Hz'/'kHz'/'MHz'/'GHz') в Гц.
+
+    Бросает ValueError при неизвестной единице.
+    """
+    key = unit.lower()
+    try:
+        mult = _UNIT_MULT[key]
+    except KeyError as err:
+        valid = ", ".join(sorted(_UNIT_MULT.keys()))
+        raise ValueError(f"Неизвестная единица частоты: {unit!r}. Допустимые: {valid}") from err
+    return np.asarray(val, dtype=float) * mult
+
+
+def _require_skrf():
+    """
+    Лениво импортирует scikit-rf.
+
+    Возвращает модуль `skrf` или бросает информативный ImportError, если пакет не установлен.
+    """
+    try:
+        import skrf as rf  # type: ignore
+        return rf
+    except ModuleNotFoundError as err:  # pragma: no cover
+        raise ImportError(
+            "Эта операция требует установленный пакет 'scikit-rf'. "
+            "Установите его, например: pip install scikit-rf"
+        ) from err
+
+
+def _as_frequency(f: Any, *, unit: str = "Hz") -> Tuple[np.ndarray, Optional[Any]]:
+    """
+    Приводит аргумент *f* к кортежу `(f_hz, freq_obj)`.
+
+    Варианты:
+    * Если *f* — числовой скаляр/массив, трактуется как частоты в единицах `unit`
+      и конвертируется в Гц: `f_hz = np.asarray(f)*mult(unit)`. `freq_obj = None`.
+    * Если *f* — `rf.Frequency`, извлекается `f.f` (Гц) и возвращается исходный
+      объект как `freq_obj` (для последующего использования в Touchstone).
+
+    Примечание: импорт `skrf` выполняется лениво. Если `skrf` не установлен,
+    путь с `rf.Frequency` просто никогда не сработает (поскольку объект создать нельзя).
+    """
+    # Попытаться опознать rf.Frequency, если пакет установлен
+    rf = None
+    try:
+        import skrf as _rf  # type: ignore
+        rf = _rf
+    except Exception:
+        rf = None
+
+    if rf is not None and isinstance(f, rf.Frequency):  # type: ignore
+        f_hz = f.f.copy()
+        return f_hz, f  # freq_obj = исходный Frequency
+
+    # Числа → массив → перевод в Гц
     arr = np.asarray(f, dtype=float)
     if arr.ndim == 0:  # скаляр → (1,)
         arr = arr.reshape(1)
-    return arr, None
-
-
-def _to_hz(val: float, unit: str) -> float:
-    """Переводит число *val* из unit ('kHz'/'MHz'/'GHz'/…) в Гц."""
-    mdict = rf.frequency.Frequency.multiplier_dict
-    try:
-        mult = mdict[unit.lower()]
-    except KeyError as err:
-        valid = ", ".join(sorted(mdict.keys()))
-        raise ValueError(
-            f"Неизвестная единица частоты: {unit!r}. Допустимые: {valid}"
-        ) from err
-    return float(val) * mult
+    f_hz = _to_hz(arr, unit=unit)
+    return np.asarray(f_hz, dtype=float), None
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -94,6 +142,17 @@ class Device(ABC):
         Контейнер с топологией и параметрами матрицы связи.
     name : str | None
         Человекочитаемое имя устройства.
+
+    Особенности API
+    ---------------
+    * Методы, принимающие частоты, интерпретируют **числовые** массивы как частоты
+      в единицах `unit` (по умолчанию Гц) и сами переводят их во внутренние Гц.
+      Если передан `rf.Frequency`, он уже в Гц — вычисления используют его без
+      преобразований (параметр `unit` влияет лишь на оформление вывода, например,
+      в Touchstone).
+    * Поддерживаются **batch-оси**: если вы передаёте f как массив формы
+      `(..., F)`, ядро Torch выполнит вещание (broadcast) над ведущими осями.
+      Частотная ось должна быть **последней**.
     """
 
     __slots__ = ("cm", "name")
@@ -115,10 +174,15 @@ class Device(ABC):
 
     @property
     def Q(self):
-        """Физическая добротность резонаторов (скаляр или вектор) или None."""
+        """
+        Физическая добротность резонаторов (скаляр или вектор) или None.
+
+        Если `cm.qu` не задан, возвращает None. Иначе делит `cm.qu` на
+        масштаб `self._qu_scale()` (для BP/BR — это FBW), возвращая физический Q.
+        """
         if self.cm.qu is None:
             return None
-        return np.asarray(self.cm.qu) / self._qu_scale()
+        return np.asarray(self.cm.qu, dtype=float) / self._qu_scale()
 
     # ----------------------------------------------------- abstract methods
     @abstractmethod
@@ -128,7 +192,8 @@ class Device(ABC):
 
     @abstractmethod
     def _qu_scale(self) -> float | np.ndarray:
-        """Отношение qu / Q для устройства.
+        """
+        Отношение qu / Q для устройства.
 
         LP/HP  → 1
         BP/BR  → FBW
@@ -151,18 +216,25 @@ class Device(ABC):
     # ---------------------------------------------------------------- API – S-параметры
     def sparams(
         self,
-        f_hz,
+        f,
         *,
+        unit: str = "Hz",
         device: str | torch.device = DEFAULT_DEVICE,
         method: str = "auto",
         fix_sign: bool = False,
     ) -> torch.Tensor:
-        """Комплексная матрица **S(f)** в реальной шкале частот.
+        """
+        Комплексная матрица **S(f)** в реальной шкале частот.
 
-        Parameters
+        Параметры
         ----------
-        f_hz : array-like | rf.Frequency
-            Сетка частот в Гц или объект `skrf.Frequency`.
+        f : array-like | rf.Frequency
+            Сетка частот. Если это числа — трактуются как частоты в единицах `unit`
+            и конвертируются в Гц. Если это `rf.Frequency` — берётся `f.f` (Гц).
+            Поддерживаются ведущие batch-оси; частотная ось должна быть последней.
+        unit : {"Hz","kHz","MHz","GHz"}
+            Единицы, *в которых заданы числовые частоты* (если f — числа).
+            Для `rf.Frequency` не используется при вычислениях.
         device : torch.device | str
             Устройство вычислений (по умолчанию авто).
         method : {"auto","inv","solve"}
@@ -173,31 +245,66 @@ class Device(ABC):
         Returns
         -------
         torch.Tensor
-            Тензор формы (F, P, P) complex64 (или с batch-осями, если поданы соответствующие батчи).
+            Тензор формы (..., F, P, P) complex64 (или (F,P,P), если без batch-осей).
         """
-        f_arr, _ = _as_frequency(f_hz)
-        omega = self._omega(f_arr)
+        f_hz, _ = _as_frequency(f, unit=unit)  # приводим к Гц
+        omega = self._omega(f_hz)
         return self.cm.sparams(omega, device=device, method=method, fix_sign=fix_sign)
+
+    def sparams_omega(
+        self,
+        omega,
+        *,
+        device: str | torch.device = DEFAULT_DEVICE,
+        method: str = "auto",
+        fix_sign: bool = False,
+    ) -> torch.Tensor:
+        """
+        Прямой расчёт комплексной матрицы **S(Ω)**.
+
+        Этот метод удобен, когда вы работаете в нормированной шкале и хотите
+        избежать любых вопросов с единицами частоты.
+        """
+        omega_arr = np.asarray(omega, dtype=float)
+        return self.cm.sparams(omega_arr, device=device, method=method, fix_sign=fix_sign)
 
     # -------------------------- Touchstone экспорт -----------------------
     def to_touchstone(
         self,
-        f_hz,
+        f,
         *,
         unit: str = "Hz",
         device: str | torch.device = DEFAULT_DEVICE,
         method: str = "auto",
         fix_sign: bool = False,
     ) -> TouchstoneData:
-        """Возвращает `TouchstoneData` с готовой сетью `skrf.Network`.
+        """
+        Возвращает `TouchstoneData` с готовой сетью `skrf.Network`.
+
+        Аргумент `f` трактуется так же, как в `sparams(...)`:
+        - Если `f` — числа: это частоты в единицах `unit`; внутренние расчёты
+          выполняются в Гц, а объект `rf.Frequency` для Touchstone формируется
+          с лейблом `unit`.
+        - Если `f` — `rf.Frequency`: используется **как есть** (в Гц) и
+          определяет метки оси частоты в выходном файле.
 
         Все метаданные (параметры фильтра/матрицы связи) кладутся в `params`.
         """
-        f_arr, freq_obj = _as_frequency(f_hz)
-        S_t = self.sparams(f_arr, device=device, method=method, fix_sign=fix_sign)
+        # 1) Посчитать S(f) консистентно с трактовкой sparams(...)
+        S_t = self.sparams(f, unit=unit, device=device, method=method, fix_sign=fix_sign)
         S_np = S_t.detach().cpu().numpy()
 
-        freq = freq_obj or rf.Frequency.from_f(f_arr, unit=unit)
+        # 2) Подготовить объект rf.Frequency для Touchstone
+        rf = _require_skrf()
+        if isinstance(f, rf.Frequency):  # type: ignore
+            freq = f
+        else:
+            arr = np.asarray(f, dtype=float)
+            if arr.ndim == 0:
+                arr = arr.reshape(1)
+            freq = rf.Frequency.from_f(arr, unit=unit.lower())
+
+        # 3) Сборка Network и TouchstoneData
         net = rf.Network(frequency=freq, s=S_np)
 
         params = {
@@ -217,7 +324,12 @@ class Device(ABC):
         kind: str | None = None,
         name: str | None = None,
     ):
-        """Восстанавливает объект-потомок `Device` из Touchstone-структуры."""
+        """
+        Восстанавливает объект-потомок `Device` из Touchstone-структуры.
+
+        Ожидается, что `ts.params["device"]` либо не задан, либо равен "Filter".
+        Для других устройств (в будущем) возможны специализированные конструкторы.
+        """
         dev = str(ts.params.get("device", "")).lower()
         if dev and dev != "filter":
             raise ValueError(
@@ -229,7 +341,7 @@ class Device(ABC):
 
     # ---------------------------------------------------------------- params
     def _device_params(self) -> Dict[str, float | str]:
-        """Параметры устройства для записи в Touchstone (переопределяется)."""
+        """Параметры устройства для записи в Touchstone (переопределяется в наследниках)."""
         return {"device": type(self).__name__}
 
     # ---------------------------------------------------------------- repr
@@ -253,12 +365,16 @@ class Filter(Device):
 
     Задание полосы:
     --------------
-    | kind  | допустимые параметры                 |
-    |-------|--------------------------------------|
-    | LP/HP | `f_cut`                              |
+    | kind  | допустимые параметры                        |
+    |-------|---------------------------------------------|
+    | LP/HP | `f_cut`                                     |
     | BP/BR | `f_edges=(f_l,f_u)` **или** `f0,bw` **или** `f0,fbw` |
 
-    Фабрики-шорткаты: `Filter.lp`, `hp`, `bp`, `br`, `bp_edges`, `br_edges`.
+    Пояснения:
+    ----------
+    * `fbw` — **относительная** полоса (доля), например `0.02` = 2 %.
+    * Методы, принимающие частоты, поддерживают batch-оси в точности как ядро:
+      частотная ось — последняя.
     """
 
     __slots__ = ("kind", "f_edges", "f0", "bw", "fbw", "_spec")
@@ -272,10 +388,11 @@ class Filter(Device):
         bw,
         fbw,
     ) -> Tuple[str, float, Optional[float], Optional[float], Tuple[Optional[float], Optional[float]]]:
-        """Унифицирует входные частотные аргументы.
+        """
+        Унифицирует входные частотные аргументы.
 
-        Возвращает кортеж ``(spec, f0, bw, fbw, (f_l, f_u))``, где *spec* фиксирует,
-        каким образом была задана полоса ("cut" | "bw" | "fbw" | "edges").
+        Возвращает кортеж `(spec, f0, bw, fbw, (f_l, f_u))`, где *spec* фиксирует,
+        каким образом была задана полоса: "cut" | "bw" | "fbw" | "edges".
         """
         kind = kind.upper()
 
@@ -285,6 +402,9 @@ class Filter(Device):
                 if len(f_edges) != 2:
                     raise ValueError("f_edges должен быть кортежем (low, high)")
                 low, high = f_edges
+                # Важно: оба края задавать нельзя — для LP/HP нужен ровно один край (f_cut)
+                if (low is not None) and (high is not None):
+                    raise ValueError("LP/HP: укажите только один край (f_cut), не оба.")
                 f_cut = (low if low is not None else high)
             else:
                 f_cut = f0
@@ -362,36 +482,37 @@ class Filter(Device):
     # LP / HP
     @classmethod
     def lp(cls, cm, f_cut, *, unit: str = "Hz", **kw):
-        return cls(cm, kind="LP", f0=_to_hz(f_cut, unit), **kw)
+        return cls(cm, kind="LP", f0=float(_to_hz(f_cut, unit)), **kw)
 
     @classmethod
     def hp(cls, cm, f_cut, *, unit: str = "Hz", **kw):
-        return cls(cm, kind="HP", f0=_to_hz(f_cut, unit), **kw)
+        return cls(cm, kind="HP", f0=float(_to_hz(f_cut, unit)), **kw)
 
     # BP / BR (f0 + bw)
     @classmethod
     def bp(cls, cm, f0, bw, *, unit: str = "Hz", **kw):
-        return cls(cm, kind="BP", f0=_to_hz(f0, unit), bw=_to_hz(bw, unit), **kw)
+        return cls(cm, kind="BP", f0=float(_to_hz(f0, unit)), bw=float(_to_hz(bw, unit)), **kw)
 
     @classmethod
     def br(cls, cm, f0, bw, *, unit: str = "Hz", **kw):
-        return cls(cm, kind="BR", f0=_to_hz(f0, unit), bw=_to_hz(bw, unit), **kw)
+        return cls(cm, kind="BR", f0=float(_to_hz(f0, unit)), bw=float(_to_hz(bw, unit)), **kw)
 
     # BP / BR (edges)
     @classmethod
     def bp_edges(cls, cm, f_l, f_u, *, unit: str = "Hz", **kw):
-        return cls(cm, kind="BP", f_edges=(_to_hz(f_l, unit), _to_hz(f_u, unit)), **kw)
+        return cls(cm, kind="BP", f_edges=(float(_to_hz(f_l, unit)), float(_to_hz(f_u, unit))), **kw)
 
     @classmethod
     def br_edges(cls, cm, f_l, f_u, *, unit: str = "Hz", **kw):
-        return cls(cm, kind="BR", f_edges=(_to_hz(f_l, unit), _to_hz(f_u, unit)), **kw)
+        return cls(cm, kind="BR", f_edges=(float(_to_hz(f_l, unit)), float(_to_hz(f_u, unit))), **kw)
 
     # ------------------------------------------------------- _qu_scale
     def _qu_scale(self):
-        """Коэффициент масштабирования добротности.
+        """
+        Коэффициент масштабирования добротности.
 
-        LP/HP: qu = Q    -> scale = 1
-        BP/BR: qu = Q*FBW -> scale = FBW
+        LP/HP: qu = Q    → scale = 1
+        BP/BR: qu = Q*FBW → scale = FBW
         """
         if self.kind in {"BP", "BR"}:
             return self.fbw
@@ -399,12 +520,13 @@ class Filter(Device):
 
     # ------------------------------------------------------- Ω-mapping
     def _omega(self, f_hz: np.ndarray) -> np.ndarray:
-        """Преобразование **f → Ω** для заданного типа фильтра.
+        """
+        Преобразование **f → Ω** для заданного типа фильтра.
 
-        Используется epsilon для избежания деления на ноль.
+        Численная защита: используется epsilon для избежания деления на ноль.
         """
         k = self.kind
-        f = f_hz.astype(float, copy=False)
+        f = np.asarray(f_hz, dtype=float)
         eps = np.finfo(float).eps
 
         if k == "LP":  # Ω = f / f_cut
@@ -433,9 +555,20 @@ class Filter(Device):
         unit: str = "Hz",
         as_rf: bool = False,
     ):
-        """Обратное преобразование **Ω → f**.
+        """
+        Обратное преобразование **Ω → f**.
 
-        Для **BP**/**BR** возвращается «двойной» массив частот (нижняя и верхняя ветви).
+        Параметр `unit` определяет **единицы результата**:
+        функция возвращает массив частот в указанных единицах. Если `as_rf=True`,
+        возвращается объект `rf.Frequency` с соответствующей единицей.
+
+        Для **BP**/**BR** возвращаемая сетка является «двойной» в том смысле,
+        что положительные и отрицательные Ω соответствуют верхней и нижней ветвям
+        полосы (см. формулы ниже). Численная устойчивость обеспечивается
+        защитой от делений на ноль вблизи Ω = 0.
+
+        Примечание: если `as_rf=True`, для создания `rf.Frequency` выполняется
+        ленивый импорт `scikit-rf`.
         """
         om = np.asarray(omega, dtype=float)
         k = self.kind
@@ -457,22 +590,50 @@ class Filter(Device):
             f_low = f0 / r
             f = np.where(sgn > 0, f_high, np.where(sgn < 0, f_low, f0))
 
-        mult = rf.frequency.Frequency.multiplier_dict[unit.lower()]
-        f_out = f / mult
+        # Привести к требуемым единицам вывода
+        mult = _UNIT_MULT.get(unit.lower())
+        if mult is None:
+            valid = ", ".join(sorted(_UNIT_MULT.keys()))
+            raise ValueError(f"Неизвестная единица частоты: {unit!r}. Допустимые: {valid}")
+        f_out = f / mult  # делим, чтобы получить значения в выбранной единице
 
         if not as_rf:
             return f_out
 
-        # skrf.Frequency требует монотонность
-        if np.any(np.diff(f_out) <= 0):
-            f_sorted = np.sort(f_out)
-        else:
-            f_sorted = f_out
+        # Для rf.Frequency требуется монотонность; отсортируем при необходимости
+        f_sorted = np.sort(f_out) if np.any(np.diff(f_out) <= 0) else f_out
+        rf = _require_skrf()
         return rf.Frequency.from_f(f_sorted, unit=unit.lower())
+
+    # ---------------------- Ω → Touchstone (удобный шорткат) --------------
+    def to_touchstone_omega(
+        self,
+        omega,
+        *,
+        f_unit: str = "Hz",
+        device: str | torch.device = DEFAULT_DEVICE,
+        method: str = "auto",
+        fix_sign: bool = False,
+    ) -> TouchstoneData:
+        """
+        Удобный шорткат: строит Touchstone напрямую из сетки **Ω**.
+
+        1) Переводит Ω → f в единицах `f_unit` (числовой массив).
+        2) Вызывает `to_touchstone(f, unit=f_unit, ...)`.
+        """
+        f = self.freq_grid(omega, unit=f_unit, as_rf=False)
+        return self.to_touchstone(f, unit=f_unit, device=device, method=method, fix_sign=fix_sign)
 
     # ------------------------------------------------ Touchstone helpers
     def _device_params(self) -> Dict[str, float | str]:
-        """Параметры устройства без дублирования (используем исходную спецификацию)."""
+        """
+        Параметры устройства без дублирования (используется исходная спецификация).
+
+        Для LP/HP:
+            {'device': 'Filter', 'kind': 'LP'|'HP', 'f_cut': <float>}
+        Для BP/BR:
+            {'device': 'Filter', 'kind': 'BP'|'BR', 'f_center': f0, 'bw'| 'fbw' | 'f_lower'/'f_upper': ...}
+        """
         d: Dict[str, float | str] = {"device": "Filter", "kind": self.kind}
         if self.kind in {"LP", "HP"}:
             cut = self.f_edges[0] or self.f_edges[1]
@@ -500,7 +661,12 @@ class Filter(Device):
         kind: Optional[str] = None,
         name: Optional[str] = None,
     ):
-        """Внутренний хелпер для `Device.from_touchstone`."""
+        """
+        Внутренний хелпер для `Device.from_touchstone`.
+
+        Восстанавливает объект `Filter` по параметрам, сохранённым ранее через
+        `to_touchstone()`: читает тип, центральную частоту и способ задания полосы.
+        """
         kind = (kind or params.get("kind", "BP")).upper()
 
         if kind in {"LP", "HP"}:
@@ -534,7 +700,10 @@ class Filter(Device):
 # ────────────────────────────────────────────────────────────────────────────
 
 class Multiplexer(Device):
-    """Каркас N-канального мультиплексора (один общий вход)."""
+    """Каркас N-канального мультиплексора (один общий вход).
+
+    Полная реализация будет добавлена в будущих версиях.
+    """
 
     __slots__ = ("channels",)
 
@@ -562,5 +731,6 @@ __all__ = [
     "Filter",
     "Multiplexer",
 ]
+
 
 
