@@ -96,11 +96,6 @@ from .devices import (
     Multiplexer,
 )
 
-from .cm_gen import (
-    schema_to_space,
-    space_to_schema,
-)
-
 # ────────────────────────────────────────────────────────────────────────────
 #                                   __all__
 # ────────────────────────────────────────────────────────────────────────────
@@ -132,7 +127,4 @@ __all__ = [
     "Device",
     "Filter",
     "Multiplexer",
-    # torch integration
-    "schema_to_space",
-    "space_to_schema",
 ]
