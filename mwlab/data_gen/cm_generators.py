@@ -251,31 +251,11 @@ class CMGenerator(DataGenerator):
             # Создаём список TouchstoneData: Network берётся из соответствующей срезки S_all[i]
             # skrf ожидает NumPy-массив complex, переводим с устройства на CPU
             freq_obj = self._freq_obj
-            # ----- до цикла: разово переносим на CPU/NumPy -----
-            S_np = S_all.detach().cpu().numpy()  # ожидаемая форма (B, F, P, P)
-            B = S_np.shape[0]
-
-            # sanity-check + авто-адаптация на случай иной расстановки осей
-            if S_np.ndim != 4:
-                raise ValueError(f"Ожидалась форма (B,F,P,P), получено {S_np.shape}")
-            if S_np.shape[0] != len(params_batch) and S_np.shape[1] == len(params_batch):
-                # оси (F,B,P,P) → переставим в (B,F,P,P)
-                S_np = np.moveaxis(S_np, 1, 0)
-
-            # теперь гарантированно S_np[i] имеет форму (F, P, P)
             for i, p_map in enumerate(params_batch):
-                s_item = S_np[i, ...]  # (F, P, P) — конкретный образец
-                net = rf.Network(frequency=freq_obj, s=s_item)
-                meta = {**p_map, **topo_meta}
+                net = rf.Network(frequency=freq_obj, s=S_all[i].detach().cpu().numpy())
+                meta = {**p_map, **topo_meta}  # исходные поля + сервисная инфо
                 outputs.append(TouchstoneData(net, params=meta))
                 meta_list.append(meta)
-
-
-            #for i, p_map in enumerate(params_batch):
-            #    net = rf.Network(frequency=freq_obj, s=S_all[i].detach().cpu().numpy())
-            #    meta = {**p_map, **topo_meta}  # исходные поля + сервисная инфо
-            #    outputs.append(TouchstoneData(net, params=meta))
-            #    meta_list.append(meta)
         else:
             # Режим «tensor»: возвращаем для каждого элемента (F, P, P)
             for i, p_map in enumerate(params_batch):
