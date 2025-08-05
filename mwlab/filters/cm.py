@@ -372,12 +372,11 @@ class CouplingMatrix:
 
         # Топология (если не задана)
         if topo is None:
-            if topo is None:
-                if layout is MatrixLayout.SL:
-                    order = K - 2
-                    ports = 2
-                else:
-                    raise ValueError("Передайте topo или используйте layout=SL (2-портовый случай).")
+            if layout is MatrixLayout.SL:
+                order = K - 2
+                ports = 2
+            else:
+                raise ValueError("Передайте topo или используйте layout=SL (2-портовый случай).")
 
 
             # links = все ненулевые элементы верхнего треугольника без диагонали
