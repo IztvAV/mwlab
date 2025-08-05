@@ -277,7 +277,6 @@ class CMGenerator(DataGenerator):
                 phase_b=phase_b,
                 device=self.device,
             )
-        print("S_all:", tuple(S_all.shape))  # → (B, F, P, P)
 
         # Проверка формы (для dev-режима):
         B, P = len(params_batch), self.topology.ports
