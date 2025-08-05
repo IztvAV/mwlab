@@ -322,9 +322,7 @@ class ParamSchema:
         if qu_slice.stop > qu_slice.start:
             block = vec[..., qu_slice]
             if self.include_qu == "scalar":
-                # (...,) -> (..., 1) -> repeat
-                val = block.unsqueeze(-1)
-                qu = val.repeat_interleave(self.topo.order, dim=-1)
+                qu = block.expand(block.shape[:-1] + (self.topo.order,))  # (..., order)
             else:
                 qu = block
 

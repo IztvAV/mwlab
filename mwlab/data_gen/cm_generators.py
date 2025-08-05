@@ -264,6 +264,11 @@ class CMGenerator(DataGenerator):
         # -------- 2) Собираем блоки ядра --------
         M_real, qu, phase_a, phase_b = self.schema.assemble(vecs, device=self.device)
         # M_real: (B,K,K), qu: (B,order)|None, phase_*: (B,P)|None
+        print("DEBUG shapes:",
+              "M_real", tuple(M_real.shape),
+              "qu", None if qu is None else tuple(qu.shape),
+              "pa", None if phase_a is None else tuple(phase_a.shape),
+              "pb", None if phase_b is None else tuple(phase_b.shape))
 
         # -------- 3) Один вызов solve_sparams на весь батч --------
         # Результат: (B, F, P, P) complex64
@@ -277,6 +282,7 @@ class CMGenerator(DataGenerator):
                 phase_b=phase_b,
                 device=self.device,
             )
+        print("S_all:", tuple(S_all.shape))  # → (B, F, P, P)
 
         P = self.topology.ports
 
