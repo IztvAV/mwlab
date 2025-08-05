@@ -67,7 +67,6 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Literal
 
 import numpy as np
 import torch
-import skrf as rf
 
 from mwlab.data_gen.base import Batch, DataGenerator, MetaBatch, Outputs
 from mwlab.filters.cm_core import (
@@ -82,6 +81,23 @@ from mwlab.io.touchstone import TouchstoneData
 
 # Для DeviceCMGenerator — подключаем отдельно, чтобы избежать циклов импортов
 from mwlab.filters.devices import Device
+
+from typing import TYPE_CHECKING
+try:
+    import skrf as _rf  # только для TYPE_CHECKING/исключений
+except Exception:
+    _rf = None
+
+def _require_skrf():
+    try:
+        import skrf as rf
+        return rf
+    except ModuleNotFoundError as err:
+        raise ImportError(
+            "Для output_mode='touchstone' требуется пакет 'scikit-rf'. "
+            "Либо установите его: pip install scikit-rf, "
+            "либо используйте output_mode='tensor'."
+        ) from err
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -166,31 +182,61 @@ class CMGenerator(DataGenerator):
         self.topology: Topology = topology
         self.schema: ParamSchema = schema or ParamSchema.from_topology(topology)
 
-        # --- частотный объект для скриптов/экспорта (Ω численно → Hz) ---
-        # В нормализованном режиме это просто удобный ненулевой rf.Frequency
-        # с той же числовой сеткой; downstream-код ориентируется по meta["freq_normalized"].
-        self._freq_obj: rf.Frequency = rf.Frequency.from_f(
-            self.omega.detach().cpu().numpy(), unit="Hz"
-        )
-        self._freq_is_normalized: bool = True
-
         # --- спецификация ядра ---
         self._spec = CoreSpec(self.topology.order, self.topology.ports, method)
 
         # --- формат выхода ---
         self.output_mode: Literal["touchstone", "tensor"] = output_mode
 
+        # --- частотный объект для скриптов/экспорта (Ω численно → Hz) ---
+        # В нормализованном режиме это просто удобный ненулевой rf.Frequency
+        # с той же числовой сеткой; downstream-код ориентируется по meta["freq_normalized"].
+        self._freq_obj = None
+        self._freq_is_normalized = True
+        if self.output_mode == "touchstone":
+            rf = _require_skrf()
+            self._freq_obj = rf.Frequency.from_f(
+                self.omega.detach().cpu().numpy(), unit="Hz"
+            )
     # ----------------------------------------------------------------- hooks
     def preprocess(self, params: Mapping[str, Any]) -> Mapping[str, Any]:  # noqa: D401
-        """Мини-проверки входного словаря (в дополнение к хукам раннера).
+        """Мини-проверки входного словаря.
 
-        * Проверяем, что все *присутствующие* ключи понятны схеме.
-          Наличие всех обязательных ключей проверит `schema.pack(..., strict=True)`.
-        * Возвращаем вход как есть (без модификаций).
+        Логика:
+        * Если `schema.keys` задаёт *фиксированный набор* (множество и т.п.) —
+          отклоняем любые неизвестные ключи, кроме служебных `__*` и сахара фаз.
+        * Если `schema.keys` «разрешает всё» — мягкий режим: не мешаем метаданным,
+          но продолжаем ловить явные опечатки в «CM-похожих» ключах.
         """
-        unknown = [k for k in params.keys() if k not in self.schema.keys and k != "__id"]
-        if unknown:
-            raise KeyError(f"CMGenerator: неизвестные ключи параметров: {unknown}")
+        service_keys = {"__id", "__path"}
+        sugar_ok = {"phase_a", "phase_b"}
+
+        # Признак «строгости» набора ключей
+        is_restricted = isinstance(getattr(self.schema, "keys", None), (set, frozenset))
+
+        if is_restricted:
+            unknown = [
+                k for k in params.keys()
+                if k not in self.schema.keys
+                and k not in service_keys
+                and k not in sugar_ok
+            ]
+            if unknown:
+                raise KeyError(f"CMGenerator: неизвестные ключи параметров: {unknown}")
+            return params
+
+        # Мягкая проверка: рассматриваем только «CM-похожие» ключи
+        cm_like_prefixes = ("M", "qu", "phase_a", "phase_b")
+        bad = []
+        for k in params.keys():
+            if k in service_keys or k in sugar_ok:
+                continue
+            if not k.startswith(cm_like_prefixes):
+                continue
+            if k not in self.schema.keys:  # AllowAllKeys → всегда True; здесь сработает только реальная несостыковка
+                bad.append(k)
+        if bad:
+            raise KeyError(f"CMGenerator: неизвестные ключи параметров: {bad}")
         return params
 
     # ---------------------------------------------------------------- generate
@@ -250,7 +296,10 @@ class CMGenerator(DataGenerator):
         if self.output_mode == "touchstone":
             # Создаём список TouchstoneData: Network берётся из соответствующей срезки S_all[i]
             # skrf ожидает NumPy-массив complex, переводим с устройства на CPU
+            rf = _require_skrf()
             freq_obj = self._freq_obj
+            assert freq_obj is not None
+
             for i, p_map in enumerate(params_batch):
                 net = rf.Network(frequency=freq_obj, s=S_all[i].detach().cpu().numpy())
                 meta = {**p_map, **topo_meta}  # исходные поля + сервисная инфо
@@ -311,14 +360,16 @@ class DeviceCMGenerator(CMGenerator):
         self.device_obj: Device = device
         topology = device.cm.topo
 
-        # ---- 1) Преобразуем входную сетку частот к NumPy и сохраняем Frequency ----
-        if isinstance(f_grid, rf.Frequency):
-            f_arr = f_grid.f.copy()
-            freq_obj = f_grid
-        else:
-            f_arr = np.asarray(f_grid, dtype=float).ravel()
-            # По умолчанию интерпретируем как Гц; пользователь может сделать rf.Frequency сам
-            freq_obj = rf.Frequency.from_f(f_arr, unit="Hz")
+        # ---- 1) Преобразуем входную сетку частот к NumPy; Frequency строим ТОЛЬКО для touchstone ----
+        f_arr = np.asarray(f_grid, dtype=float).ravel()
+        freq_obj = None
+        if output_mode == "touchstone":  # используем ПАРАМЕТР, self.output_mode ещё не инициализирован
+            rf = _require_skrf()
+            if isinstance(f_grid, rf.Frequency):
+                f_arr = f_grid.f.copy()
+                freq_obj = f_grid
+            else:
+                freq_obj = rf.Frequency.from_f(f_arr, unit="Hz")
 
         # ---- 2) Реализуем f → Ω через устройство ----
         omega = device._omega(f_arr)
@@ -337,7 +388,7 @@ class DeviceCMGenerator(CMGenerator):
         )
 
         # ---- 5) Переопределяем частотный объект и флаг нормировки ----
-        self._freq_obj = freq_obj
+        self._freq_obj = freq_obj  # None в режиме 'tensor'
         self._freq_is_normalized = False
 
     # Переопределять generate() **не требуется**, но мы расширим метаданные.

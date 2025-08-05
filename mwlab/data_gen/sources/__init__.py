@@ -13,6 +13,9 @@
 просто реализовав абстрактный контракт и импортировав класс здесь для
 автодоступности через `mwlab.data_gen.sources`.
 """
+from typing import TYPE_CHECKING
+
+__all__ = ["ListSource", "CsvSource", "DesignSpaceSource", "FolderSource"]
 
 def __getattr__(name):
     if name == "ListSource":
@@ -24,3 +27,10 @@ def __getattr__(name):
     if name == "FolderSource":
         from .folder import FolderSource; return FolderSource
     raise AttributeError(name)
+
+if TYPE_CHECKING:  # только для подсветки/автодополнения
+    from .list import ListSource as ListSource
+    from .csv import CsvSource as CsvSource
+    from .design_space import DesignSpaceSource as DesignSpaceSource
+    from .folder import FolderSource as FolderSource
+
