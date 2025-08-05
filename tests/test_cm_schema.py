@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import pytest
 
-from mwlab.filters.topologies import get_topology
+from mwlab.filters.topologies import get_topology, Topology
 from mwlab.filters.cm_schema import ParamSchema
 from mwlab.filters.cm_core import build_M
 
@@ -103,5 +103,14 @@ def test_masks_lengths(schema_full):
         assert masks["phase_a"].sum() == sl_len(schema_full.slices["phase_a"])
     if "b" in schema_full.include_phase:
         assert masks["phase_b"].sum() == sl_len(schema_full.slices["phase_b"])
+
+def test_assemble_scalar_qu_has_no_extra_axis(topo):
+    sch = ParamSchema.from_topology(topo, include_qu="scalar", include_phase=("a","b"))
+    params = {k: 0.0 for k in sch.keys}
+    params["qu"] = 1000.0
+    vec = sch.pack(params, strict=True)
+    M, qu, pa, pb = sch.assemble(vec)
+    assert qu.shape == (topo.order,)  # без паразитной оси
+
 
 
