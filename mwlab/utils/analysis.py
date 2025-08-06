@@ -65,8 +65,7 @@ class TouchstoneDatasetAnalyzer:
         include_numeric: bool = True,
         include_categorical: bool = False,
         coerce_numeric_strings: bool = False,
-        drop_keys: Optional[Iterable[str]] = None,
-        **kwargs,  # для обратной совместимости с numeric_only
+        drop_keys: Optional[Iterable[str]] = None
     ) -> pd.DataFrame:
         """
         Сводная статистика по параметрам (X-колонкам).
@@ -92,27 +91,6 @@ class TouchstoneDatasetAnalyzer:
             и ['nunique','top','top_freq','nan_count','is_constant'] для категориальных.
             Колонки — выбранные ключи параметров.
         """
-        # --- Обратная совместимость: numeric_only ---
-        if "numeric_only" in kwargs:
-            numeric_only = bool(kwargs.pop("numeric_only"))
-            warnings.warn(
-                "summarize_params(numeric_only=...) устарел; "
-                "используйте include_numeric / include_categorical",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            if numeric_only:
-                include_numeric = True
-                include_categorical = False
-            # если numeric_only=False — оставляем include_* как есть
-
-        if kwargs:
-            warnings.warn(
-                f"summarize_params: проигнорированы неизвестные аргументы {list(kwargs)}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-
         df = self.get_params_df().copy()
 
         # опционально выкидываем служебные ключи
