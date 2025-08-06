@@ -1,11 +1,12 @@
 # mwlab/utils/analysis.py
+import warnings
 import numpy as np
 import pandas as pd
 import xarray as xr
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from typing import Optional, List, Literal, Dict, Any
+from typing import Iterable, Any, Dict, Optional, List, Literal
 
 from mwlab import TouchstoneDataset
 import skrf as rf
@@ -58,62 +59,149 @@ class TouchstoneDatasetAnalyzer:
 
     # mwlab/utils/analysis.py
 
-    def summarize_params(self,
-                         *,
-                         numeric_only: bool = True,
-                         include_categorical: bool = False) -> pd.DataFrame:
+    def summarize_params(
+        self,
+        *,
+        include_numeric: bool = True,
+        include_categorical: bool = False,
+        coerce_numeric_strings: bool = False,
+        drop_keys: Optional[Iterable[str]] = None,
+        **kwargs,  # для обратной совместимости с numeric_only
+    ) -> pd.DataFrame:
         """
-        numeric_only=True:
-            вернуть сводку только по числовым колонкам (mean/std/min/max/nan_count/is_constant).
-        numeric_only=False и include_categorical=True:
-            добавить сводку по категориальным: nunique/top/top_freq/nan_count/is_constant.
+        Сводная статистика по параметрам (X-колонкам).
+
+        Параметры
+        ---------
+        include_numeric : bool, default True
+            Включать ли числовые колонки. Метрики: mean/std/min/max/nan_count/is_constant.
+        include_categorical : bool, default False
+            Включать ли категориальные (строковые/объектные) колонки.
+            Метрики: nunique/top/top_freq/nan_count/is_constant.
+        coerce_numeric_strings : bool, default False
+            Если True, пытаемся привести строковые столбцы к числам (pd.to_numeric, errors='coerce').
+            Те, что успешно привелись (и не состоят полностью из NaN) → считаем числовыми.
+        drop_keys : Iterable[str] | None
+            Список колонок, которые нужно исключить перед подсчётом статистики
+            (например, ['__id','__path','path','topo_name']).
+
+        Возврат
+        -------
+        pd.DataFrame:
+            Индекс строк: ['mean','std','min','max','nan_count','is_constant'] для числовых,
+            и ['nunique','top','top_freq','nan_count','is_constant'] для категориальных.
+            Колонки — выбранные ключи параметров.
         """
-        df = self.get_params_df()
+        # --- Обратная совместимость: numeric_only ---
+        if "numeric_only" in kwargs:
+            numeric_only = bool(kwargs.pop("numeric_only"))
+            warnings.warn(
+                "summarize_params(numeric_only=...) устарел; "
+                "используйте include_numeric / include_categorical",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if numeric_only:
+                include_numeric = True
+                include_categorical = False
+            # если numeric_only=False — оставляем include_* как есть
 
-        # 1) Разделяем на числовые и прочие заранее, а не после coercion
-        num_cols = df.select_dtypes(include=["number", "bool"]).columns
-        cat_cols = df.columns.difference(num_cols)
+        if kwargs:
+            warnings.warn(
+                f"summarize_params: проигнорированы неизвестные аргументы {list(kwargs)}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
 
-        # 2) Числовая сводка только по num_cols
-        df_num = df[num_cols]
-        summary_num = pd.DataFrame({
-            "mean": df_num.mean(),
-            "std": df_num.std(),
-            "min": df_num.min(),
-            "max": df_num.max(),
-            "nan_count": df_num.isna().sum(),
-            "is_constant": df_num.nunique(dropna=True) <= 1,
-        }).T
+        df = self.get_params_df().copy()
 
-        # Если просили только числовые – сразу выходим
-        if numeric_only:
-            return summary_num
+        # опционально выкидываем служебные ключи
+        if drop_keys:
+            to_drop = [k for k in drop_keys if k in df.columns]
+            if to_drop:
+                df = df.drop(columns=to_drop)
 
-        # 3) Категориальная часть (только если запрошена)
-        if include_categorical and len(cat_cols) > 0:
-            stats: dict[str, dict[str, Any]] = {}
-            for col in cat_cols:
+        # --- Разделяем на numeric / non-numeric ---
+        if coerce_numeric_strings:
+            df_num_try = df.apply(pd.to_numeric, errors="coerce")
+            numeric_cols = [
+                c for c in df.columns
+                if pd.api.types.is_numeric_dtype(df_num_try[c].dtype)
+                and not df_num_try[c].isna().all()
+            ]
+            df_num = df_num_try[numeric_cols]
+        else:
+            numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
+            df_num = df[numeric_cols]
+
+        obj_cols = [c for c in df.columns if c not in numeric_cols]
+
+        # --- Блок: числовые метрики ---
+        summary_num = pd.DataFrame()
+        if include_numeric and numeric_cols:
+            summary_num = pd.DataFrame({
+                "mean":        df_num.mean(numeric_only=True),
+                "std":         df_num.std(numeric_only=True),
+                "min":         df_num.min(numeric_only=True),
+                "max":         df_num.max(numeric_only=True),
+                "nan_count":   df_num.isna().sum(),
+                "is_constant": df_num.nunique(dropna=True) <= 1,
+            }).T
+
+        # --- Блок: категориальные метрики ---
+        summary_cat = pd.DataFrame()
+        if include_categorical and obj_cols:
+            stats: Dict[str, Dict[str, Any]] = {}
+            for col in obj_cols:
                 s = df[col].astype("object")
                 vc = s.value_counts(dropna=True)
-                top_val = vc.index[0] if not vc.empty else None
-                top_freq = int(vc.iloc[0]) if not vc.empty else 0
+                top_val = (vc.index[0] if not vc.empty else None)
+                top_freq = (int(vc.iloc[0]) if not vc.empty else 0)
                 stats[col] = {
-                    "nunique": int(s.nunique(dropna=True)),
-                    "top": top_val,
-                    "top_freq": top_freq,
-                    "nan_count": int(s.isna().sum()),
+                    "nunique":     int(s.nunique(dropna=True)),
+                    "top":         top_val,
+                    "top_freq":    top_freq,
+                    "nan_count":   int(s.isna().sum()),
                     "is_constant": bool(s.nunique(dropna=True) <= 1),
                 }
-            summary_cat = pd.DataFrame(stats)
-            # 4) Итог: конкатенируем по колонкам (числовые + категориальные)
-            return pd.concat([summary_num, summary_cat], axis=1, sort=False)
+            if stats:
+                summary_cat = pd.DataFrame(stats)
 
-        # 5) Категориальные не просили – возвращаем только числовые
-        return summary_num
+        # --- Возврат: по выбранным блокам ---
+        if summary_num.empty and summary_cat.empty:
+            warnings.warn(
+                "summarize_params: результат пуст (проверьте include_numeric/include_categorical "
+                "или drop_keys/coerce_numeric_strings).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return pd.DataFrame()
 
-    def get_varying_keys(self, *, numeric_only: bool = True) -> List[str]:
-        summary = self.summarize_params(numeric_only=numeric_only,
-                                        include_categorical=not numeric_only)
+        if summary_num.empty:
+            return summary_cat
+        if summary_cat.empty:
+            return summary_num
+        return pd.concat([summary_num, summary_cat], axis=1, sort=False)
+
+    def get_varying_keys(
+        self,
+        *,
+        include_numeric: bool = True,
+        include_categorical: bool = False,
+        coerce_numeric_strings: bool = False,
+        drop_keys: Optional[Iterable[str]] = None,
+    ) -> List[str]:
+        """Ключи, которые реально варьируются (is_constant == False)
+        в выбранном подмножестве столбцов.
+        """
+        summary = self.summarize_params(
+            include_numeric=include_numeric,
+            include_categorical=include_categorical,
+            coerce_numeric_strings=coerce_numeric_strings,
+            drop_keys=drop_keys,
+        )
+        if "is_constant" not in summary.index or summary.empty:
+            return []
         mask = summary.loc["is_constant"].astype(bool)
         return summary.columns[~mask].tolist()
 
