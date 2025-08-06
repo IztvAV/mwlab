@@ -37,6 +37,14 @@ def get_backend(path: pathlib.Path, **backend_kwargs) -> StorageBackend:
     raise ValueError(f"Не знаю, какой backend выбрать для {path}")
 
 
+def _is_scalar_number(x) -> bool:
+    """True для скалярных int/float/bool (включая numpy-скаляры)."""
+    # np.isscalar(True) == True, np.isscalar(np.float32(1.)) == True
+    if not np.isscalar(x):
+        return False
+    return isinstance(x, (int, float, bool, np.integer, np.floating, np.bool_))
+
+
 class TouchstoneDataset(Dataset):
     """
     Итератор над StorageBackend.
@@ -53,6 +61,8 @@ class TouchstoneDataset(Dataset):
             x_keys=None,
             x_tf=None,
             s_tf=None,
+            x_numeric_only: bool = False,
+            x_drop_private: bool = False,
             **backend_kwargs
     ):
         if isinstance(source, (str, pathlib.Path)):
@@ -64,6 +74,8 @@ class TouchstoneDataset(Dataset):
         self.x_keys = x_keys
         self.x_tf = x_tf
         self.s_tf = s_tf
+        self.x_numeric_only = bool(x_numeric_only)
+        self.x_drop_private = bool(x_drop_private)
 
     def __len__(self):
         return len(self.backend)
@@ -72,9 +84,15 @@ class TouchstoneDataset(Dataset):
         ts = self.backend.read(idx)  # TouchstoneData
 
         # ----------- X (скалярные параметры) -----------
-        x = {k: ts.params.get(k, np.nan) for k in (self.x_keys or ts.params)}
-        if self.x_tf:
-            x = self.x_tf(x)
+        raw = {k: ts.params.get(k, np.nan) for k in (self.x_keys or ts.params)}
+
+        if self.x_drop_private:
+            raw = {k: v for k, v in raw.items() if not str(k).startswith("__")}
+
+        if self.x_numeric_only:
+            raw = {k: v for k, v in raw.items() if _is_scalar_number(v)}
+
+        x = self.x_tf(raw) if self.x_tf else raw
 
         # ----------- S-матрица --------------------------
         net = ts.network
