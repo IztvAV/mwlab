@@ -101,9 +101,12 @@ class DesignSpaceSource(ParamSource):
     def _produce_incremental(self, k: int):
         """Генерирует k точек для инкрементального режима."""
         pts = self.sampler.sample(self.space, k)
+        # учитываем фактическое количество возвращенных точек
+        produced = len(pts)
         with self._lock:
             start = self._generated
-            self._generated += k
+            self._generated += produced
+
         for off, p in enumerate(pts):
             p["__id"] = f"p{start + off}"
         self._queue.extend(pts)
@@ -134,7 +137,7 @@ class DesignSpaceSource(ParamSource):
                 before = len(self._queue)
                 self._produce_incremental(take)
 
-                if len(self._queue) == before:
+                if len(self._queue) <= before:
                     # сэмплер не добавил ни одной точки — считаем «пустую дозагрузку»
                     empty_refills += 1
                     if empty_refills > MAX_EMPTY_REFILLS:
@@ -170,7 +173,7 @@ class DesignSpaceSource(ParamSource):
             remain = None if self.n_total is None else (self.n_total - self._generated)
             take = self.reserve_n if remain is None else min(self.reserve_n, remain)
             if take > 0 and not self._queue:
-                self._produce_incremental(take)
+                self._produce_incremental(take)  # _generated += фактическое len(pts)
 
     def mark_done(self, ids: Sequence[str]):  # noqa: D401,WPS110
         pass
