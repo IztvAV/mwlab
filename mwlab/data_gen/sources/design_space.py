@@ -79,7 +79,7 @@ class DesignSpaceSource(ParamSource):
 
         self._generated = 0  # счётчик для id
         self._queue: deque[ParamDict] = deque()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         if self._cache_all:
             if self.n_total is None:
@@ -171,9 +171,13 @@ class DesignSpaceSource(ParamSource):
             if self.n_total is not None and self._generated >= self.n_total:
                 return
             remain = None if self.n_total is None else (self.n_total - self._generated)
-            take = self.reserve_n if remain is None else min(self.reserve_n, remain)
-            if take > 0 and not self._queue:
-                self._produce_incremental(take)  # _generated += фактическое len(pts)
+            need = self.reserve_n if remain is None else min(self.reserve_n, remain)
+            # дозагружаем только если очередь пуста
+            do_refill = (need > 0) and (not self._queue)
+
+        # Важно: вызов вне лока!
+        if do_refill and need > 0:
+            self._produce_incremental(need)
 
     def mark_done(self, ids: Sequence[str]):  # noqa: D401,WPS110
         pass
