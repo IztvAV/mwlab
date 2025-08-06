@@ -56,65 +56,59 @@ class TouchstoneDatasetAnalyzer:
             self._params_df = pd.DataFrame(records)
         return self._params_df
 
+    # mwlab/utils/analysis.py
+
     def summarize_params(self,
                          *,
                          numeric_only: bool = True,
-                         include_categorical: bool = False,
-                         ) -> pd.DataFrame:
+                         include_categorical: bool = False) -> pd.DataFrame:
         """
-        Сводная статистика по параметрам.
-
         numeric_only=True:
-            возвращает mean/std/min/max/nan_count/is_constant по числовым колонкам
-            (строки = метрики, колонки = имена параметров).
-
+            вернуть сводку только по числовым колонкам (mean/std/min/max/nan_count/is_constant).
         numeric_only=False и include_categorical=True:
-            дополнительно считает для текстовых/категориальных:
-            nunique, top (мода), top_freq, nan_count, is_constant.
+            добавить сводку по категориальным: nunique/top/top_freq/nan_count/is_constant.
         """
         df = self.get_params_df()
 
-        # --- Числовая часть ---
-        df_num = df.apply(pd.to_numeric, errors="coerce")
+        # 1) Разделяем на числовые и прочие заранее, а не после coercion
+        num_cols = df.select_dtypes(include=["number", "bool"]).columns
+        cat_cols = df.columns.difference(num_cols)
+
+        # 2) Числовая сводка только по num_cols
+        df_num = df[num_cols]
         summary_num = pd.DataFrame({
-            'mean':        df_num.mean(numeric_only=True),
-            'std':         df_num.std(numeric_only=True),
-            'min':         df_num.min(numeric_only=True),
-            'max':         df_num.max(numeric_only=True),
-            'nan_count':   df_num.isna().sum(),
-            'is_constant': df_num.nunique(dropna=True) <= 1,
+            "mean": df_num.mean(),
+            "std": df_num.std(),
+            "min": df_num.min(),
+            "max": df_num.max(),
+            "nan_count": df_num.isna().sum(),
+            "is_constant": df_num.nunique(dropna=True) <= 1,
         }).T
 
+        # Если просили только числовые – сразу выходим
         if numeric_only:
             return summary_num
 
-        # --- Категориальная часть (при необходимости) ---
-        summary_cat = pd.DataFrame()
-        if include_categorical:
-            # object/строковые/разнородные
-            obj_cols = [c for c in df.columns
-                        if not np.issubdtype(df[c].dtype, np.number)]
-
-            stats: Dict[str, Dict[str, Any]] = {}
-            for col in obj_cols:
-                s = df[col].astype('object')
+        # 3) Категориальная часть (только если запрошена)
+        if include_categorical and len(cat_cols) > 0:
+            stats: dict[str, dict[str, Any]] = {}
+            for col in cat_cols:
+                s = df[col].astype("object")
                 vc = s.value_counts(dropna=True)
-                top_val = (vc.index[0] if not vc.empty else None)
-                top_freq = (int(vc.iloc[0]) if not vc.empty else 0)
+                top_val = vc.index[0] if not vc.empty else None
+                top_freq = int(vc.iloc[0]) if not vc.empty else 0
                 stats[col] = {
-                    'nunique':     int(s.nunique(dropna=True)),
-                    'top':         top_val,
-                    'top_freq':    top_freq,
-                    'nan_count':   int(s.isna().sum()),
-                    'is_constant': bool(s.nunique(dropna=True) <= 1),
+                    "nunique": int(s.nunique(dropna=True)),
+                    "top": top_val,
+                    "top_freq": top_freq,
+                    "nan_count": int(s.isna().sum()),
+                    "is_constant": bool(s.nunique(dropna=True) <= 1),
                 }
-
-            if stats:
-                summary_cat = pd.DataFrame(stats)
-
-        # совмещаем: числовые + категориальные (по столбцам)
-        if not summary_cat.empty:
+            summary_cat = pd.DataFrame(stats)
+            # 4) Итог: конкатенируем по колонкам (числовые + категориальные)
             return pd.concat([summary_num, summary_cat], axis=1, sort=False)
+
+        # 5) Категориальные не просили – возвращаем только числовые
         return summary_num
 
     def get_varying_keys(self, *, numeric_only: bool = True) -> List[str]:
