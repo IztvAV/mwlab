@@ -58,6 +58,8 @@ class TouchstoneDatasetAnalyzer:
 
     def summarize_params(self) -> pd.DataFrame:
         df = self.get_params_df()
+        # Переводим все колонки в числовые, нечисловые -> NaN
+        df_num = df.apply(pd.to_numeric, errors='coerce')
         return pd.DataFrame({
             'mean':        df.mean(),
             'std':         df.std(),
@@ -68,9 +70,11 @@ class TouchstoneDatasetAnalyzer:
         }).T
 
     def get_varying_keys(self) -> List[str]:
-        summary = self.summarize_params()
-        mask = summary.loc["is_constant"].astype(bool)
-        return summary.columns[~mask].tolist()
+        df = self.get_params_df()
+        df_num = df.apply(pd.to_numeric, errors='coerce')
+        mask = (df_num.nunique(dropna=True) <= 1).astype(bool)
+        return df_num.columns[~mask].tolist()
+
 
     # ---------------------- графики параметров ----------------------
 
