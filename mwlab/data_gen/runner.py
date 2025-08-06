@@ -314,8 +314,8 @@ def run_pipeline(
                             "exception": exc,
                         })
             finally:
-                if progress:
-                    iterator.update(len(batch))  # type: ignore[attr-defined]
+                #if progress:
+                #    iterator.update(len(batch))  # type: ignore[attr-defined]
                 batch = []  # очищаем для следующего набора
 
         # ---------------------- основной цикл ----------------------
