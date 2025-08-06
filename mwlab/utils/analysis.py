@@ -58,8 +58,8 @@ class TouchstoneDatasetAnalyzer:
 
     def summarize_params(self,
                          *,
-                         numeric_only: bool = False,
-                         include_categorical: bool = True,
+                         numeric_only: bool = True,
+                         include_categorical: bool = False,
                          ) -> pd.DataFrame:
         """
         Сводная статистика по параметрам.
@@ -117,7 +117,7 @@ class TouchstoneDatasetAnalyzer:
             return pd.concat([summary_num, summary_cat], axis=1, sort=False)
         return summary_num
 
-    def get_varying_keys(self, *, numeric_only: bool = False) -> List[str]:
+    def get_varying_keys(self, *, numeric_only: bool = True) -> List[str]:
         summary = self.summarize_params(numeric_only=numeric_only,
                                         include_categorical=not numeric_only)
         mask = summary.loc["is_constant"].astype(bool)
