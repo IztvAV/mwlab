@@ -6,6 +6,7 @@ from torch import nn
 
 from filters.codecs import MWFilterTouchstoneCodec
 from filters.mwfilter_lightning import MWFilterBaseLMWithMetrics
+from models import CorrectionNet
 from mwlab import TouchstoneDataset, TouchstoneDatasetAnalyzer, TouchstoneLDataModule
 from mwlab.nn import MinMaxScaler
 from mwlab.transforms import TComposite
@@ -16,6 +17,9 @@ from filters.datasets.theoretical_dataset_generator import CMShifts, PSShift, CM
 import models
 import configs
 import lightning as L
+from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
+
+
 
 
 def plot_distribution(ds: TouchstoneDataset, num_params: int, batch: int = 6):
@@ -32,9 +36,9 @@ def create_origin_filter(path_orig_filter: str, f_start=None, f_stop=None, f_uni
     f0 = origin_filter.f0
     bw = origin_filter.bw
     if f_start is None:
-        f_start = f0 - 3 * bw
+        f_start = f0 - 2 * bw
     if f_stop is None:
-        f_stop = f0 + 3 * bw
+        f_stop = f0 + 2 * bw
     if f_unit is None:
         f_unit = "MHz"
     y_transform = TComposite([
@@ -50,7 +54,8 @@ def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_p
     sampler_configs = {
         "pss_origin": PSShift(phi11=0.547, phi21=-1.0, theta11=0.01685, theta21=0.017),
         "pss_shifts_delta": PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
-        "cm_shifts_delta": CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=5e-3, parasitic_coupling=5e-3),
+        # "cm_shifts_delta": CMShifts(self_coupling=1.8, mainline_coupling=0.3, cross_coupling=9e-2, parasitic_coupling=5e-3),
+        "cm_shifts_delta": CMShifts(self_coupling=0.5, mainline_coupling=0.1, cross_coupling=5e-3, parasitic_coupling=5e-3),
         "samplers_size": dataset_size,
     }
     samplers_all_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
@@ -85,7 +90,7 @@ def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_p
         total_samplers.pss._type = sampler_type
     else:
         # total_samplers = CMTheoreticalDatasetGeneratorSamplers.concat(
-        #     (samplers_all_params, samplers_all_params_flip_sign_cms_cols)
+        #     (samplers_all_params, samplers_all_params_shuffle_pss_cols)
         # )
         total_samplers = samplers_all_params
         total_samplers.cms._type = sampler_type
@@ -125,6 +130,32 @@ def get_model(name: str="resnet_with_correction", **kwargs):
         #     # use_se=False,
         #     # se_reduction=8
         # )
+        # resnet = models.ResNet1DFlexible(
+        #     in_channels=kwargs["in_channels"],
+        #     out_channels=kwargs["out_channels"],
+        #     num_blocks=[4, 6, 4, 4],
+        #     layer_channels=[128, 256, 64, 128],
+        #     first_conv_kernel=9,
+        #     first_conv_channels=128,
+        #     first_maxpool_kernel=9,
+        #     activation_in='gelu',
+        #     activation_block='mish',
+        #     # use_se=False,
+        #     # se_reduction=1
+        # )
+        resnet = models.ResNet1DFlexible(
+            in_channels=kwargs["in_channels"],
+            out_channels=kwargs["out_channels"],
+            first_conv_channels=512,
+            first_conv_kernel=7,
+            first_maxpool_kernel=11,
+            block_kernel_size=7,
+            layer_channels=[512, 512, 512, 256],
+            num_blocks=[8, 8, 5, 8],
+            activation_in='leaky_relu',
+            activation_block='rrelu',
+            block_type='bottleneck'
+        )
         return resnet
     elif name == "resnet_2d":
         main = models.ResNet2DFlexible(
@@ -143,30 +174,91 @@ def get_model(name: str="resnet_with_correction", **kwargs):
         )
         return main
     elif name == "resnet_with_correction":
-        main = models.ResNet1DFlexible(
-            in_channels=kwargs["in_channels"],
-            out_channels=kwargs["out_channels"],
-            num_blocks=[4, 6, 4, 4],
-            layer_channels=[128, 256, 64, 128],
-            first_conv_kernel=9,
-            first_conv_channels=128,
-            first_maxpool_kernel=9,
-            activation_in='gelu',
-            activation_block='mish',
-            # use_se=False,
-            # se_reduction=1
-        )
+        # main = models.ResNet1DFlexible(
+        #     in_channels=kwargs["in_channels"],
+        #     out_channels=kwargs["out_channels"],
+        #     num_blocks=[3, 7, 7, 4],
+        #     layer_channels=[512, 1024, 16, 128],
+        #     first_conv_kernel=9,
+        #     first_conv_channels=512,
+        #     first_maxpool_kernel=9,
+        #     activation_in='gelu',
+        #     activation_block='mish',
+        # )
+        # mlp = models.CorrectionMLP(
+        #     input_dim=kwargs["out_channels"],
+        #     output_dim=kwargs["out_channels"],
+        #     hidden_dims=[8, 512, 8],
+        #     activation_fun='mish'
+        # )
+
+        # main = models.ResNet1DFlexible(
+        #     in_channels=kwargs["in_channels"],
+        #     out_channels=kwargs["out_channels"],
+        #     num_blocks=[4, 6, 4, 4],
+        #     layer_channels=[128, 256, 64, 128],
+        #     first_conv_kernel=9,
+        #     first_conv_channels=128,
+        #     first_maxpool_kernel=9,
+        #     activation_in='gelu',
+        #     activation_block='mish',
+        #     # block_kernel_size=5,
+        #     # use_se=False,
+        #     # se_reduction=1
+        # )
+        # mlp = models.CorrectionMLP(
+        #     input_dim=kwargs["out_channels"],
+        #     output_dim=kwargs["out_channels"],
+        #     hidden_dims=[2048, 4096, 256],
+        #     activation_fun='gelu'
+        # )
+
+        # main = models.ResNet1DFlexible(
+        #     in_channels=kwargs["in_channels"],
+        #     out_channels=kwargs["out_channels"],
+        #     num_blocks=[7, 7, 1, 3],
+        #     layer_channels=[512, 64, 64, 32],
+        #     block_kernel_size=7,
+        #     block_type='basic',
+        #     first_conv_kernel=11,
+        #     first_conv_channels=1024,
+        #     first_maxpool_kernel=3,
+        #     activation_in='leaky_relu',
+        #     activation_block='leaky_relu',
+        #     # use_se=False,
+        #     # se_reduction=1
+        # )
+        # mlp = models.CorrectionMLP(
+        #     input_dim=kwargs["out_channels"],
+        #     output_dim=kwargs["out_channels"],
+        #     hidden_dims=[256, 4096, 512],
+        #     activation_fun='soft_sign'
+        # )
+        main = get_model('resnet', **kwargs)
         mlp = models.CorrectionMLP(
             input_dim=kwargs["out_channels"],
             output_dim=kwargs["out_channels"],
-            hidden_dims=[2048, 4096, 256],
-            activation_fun='gelu'
+            hidden_dims=[2048, 2048, 128],
+            activation_fun='sin'
         )
         model = models.ModelWithCorrection(
             main_model=main,
             correction_model=mlp,
         )
         return model
+    elif name=="resnet_with_wide_correction":
+        residual_correction_model = kwargs["main_model"]
+        wide_correction_model = models.ModelWithCorrectionAndSparameters(
+            main_model=residual_correction_model,
+            correction_model=CorrectionNet(s_shape=(8, 301), m_dim=kwargs["out_channels"])
+        )
+        return wide_correction_model
+    elif name=="simple_opt":
+        simple_opt_model = models.Simple_Opt_3(**kwargs)
+        return simple_opt_model
+    elif name=="birnn":
+        birnn = models.BiRNN(**kwargs)
+        return birnn
     else:
         raise ValueError(f"Unknown model name: {name}")
 
@@ -218,14 +310,16 @@ class MySafeCheckpoint(ModelCheckpoint):
 class WorkModel:
     CHECKPOINT_DIRPATH = "saved_models/" + configs.FILTER_NAME
     BEST_MODEL_FILENAME_SUFFIX = "-batch_size={batch_size}-base_dataset_size={base_dataset_size}-sampler={sampler_type}"
-    def __init__(self):
+    def __init__(self, ds_path, ds_size, sampler_type=SamplerTypes.SAMPLER_SOBOL):
         L.seed_everything(0)
         print("Создаем фильтр")
         self.orig_filter = create_origin_filter(configs.ENV_ORIGIN_DATA_PATH, resample_scale=301)
         print("Создаем сэмплеры")
-        self.samplers = create_sampler(self.orig_filter, SamplerTypes.SAMPLER_SOBOL)
+        self.ds_size = ds_size
+        self.ds_path = ds_path
+        self.samplers = create_sampler(self.orig_filter, sampler_type, dataset_size=ds_size)
         self.ds_gen = CMTheoreticalDatasetGenerator(
-            path_to_save_dataset=os.path.join(configs.ENV_DATASET_PATH, self.samplers.cms.type.name, f"{len(self.samplers.cms)}"),
+            path_to_save_dataset=os.path.join(ds_path, self.samplers.cms.type.name, f"{len(self.samplers.cms)}"),
             backend_type='ram',
             orig_filter=self.orig_filter,
             filename="Dataset",
@@ -237,6 +331,7 @@ class WorkModel:
         self.trainer = self._configure_trainer()
         # self.codec = MWFilterTouchstoneCodec.from_dataset(ds=self.ds,
         #                                          keys_for_analysis=[f"m_{r}_{c}" for r, c in self.orig_filter.coupling_matrix.links])
+        self.model_name = None
         self.meta = None
         self.codec = None
         self.model = None
@@ -249,7 +344,7 @@ class WorkModel:
                                       filename="best-{epoch}-{train_loss:.5f}-{val_loss:.5f}-{val_r2:.5f}-{val_mse:.5f}-"
                                                                   "{val_mae:.5f}" + self.BEST_MODEL_FILENAME_SUFFIX.format(
                                                              batch_size=configs.BATCH_SIZE,
-                                                             base_dataset_size=configs.BASE_DATASET_SIZE,
+                                                             base_dataset_size=self.ds_size,
                                                              sampler_type=self.samplers.cms.type
                                                          ),
                                       mode="min",
@@ -260,7 +355,7 @@ class WorkModel:
                                       )
         trainer = L.Trainer(
             deterministic=True,
-            max_epochs=150,  # Максимальное количество эпох обучения
+            max_epochs=26,  # Максимальное количество эпох обучения
             accelerator="auto",  # Автоматический выбор устройства (CPU/GPU)
             log_every_n_steps=100,  # Частота логирования в процессе обучения
             callbacks=[stoping, checkpoint]
@@ -268,7 +363,13 @@ class WorkModel:
         return trainer
 
     def setup(self, model_name: str, model_cfg: dict, dm_codec: MWFilterTouchstoneCodec):
+        self.model_name = model_name
         self.model = get_model(model_name, **model_cfg)
+        # self.model = self.inference("saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=29-train_loss=0.04166-val_loss=0.04450-val_r2=0.92560-val_mse=0.00588-val_mae=0.03862-batch_size=32-base_dataset_size=1500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
+        # self.model = models.ModelWithCorrectionAndSparameters(
+        #     main_model=self.model,
+        #     correction_model=CorrectionNet(s_shape=(8, 301), m_dim=len(dm_codec.x_keys))
+        # )
         print(dm_codec)
         print("Каналы Y:", dm_codec.y_channels)
         print("Каналы X:", dm_codec.x_keys)
@@ -303,6 +404,9 @@ class WorkModel:
 
 
     def train(self, optimizer_cfg: dict, scheduler_cfg: dict, loss_fn):
+        tb_logger = TensorBoardLogger(save_dir="lightning_logs", name=f"{self.model_name}")
+        csv_logger = CSVLogger(save_dir="lightning_logs", name=f"{self.model_name}_csv")
+        self.trainer.loggers = [tb_logger, csv_logger]
         lit_model = train_model(model=self.model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, dm=self.dm,
                     trainer=self.trainer, loss_fn=loss_fn)
         print(f"Лучшая модель сохранена в: {self.trainer.checkpoint_callback.best_model_path}")
