@@ -26,8 +26,31 @@ _activations = {
         'rrelu': F.rrelu,
         'relu6': F.relu6,
         'soft_sign': F.softsign,
-        'soft_plus': F.softplus
+        'soft_plus': F.softplus,
+        # --- Gaussian Error Linear Unit v2 ---
+        'gelu_approx': lambda x: 0.5 * x * (
+                    1 + torch.tanh(torch.sqrt(torch.tensor(2 / torch.pi)) * (x + 0.044715 * x ** 3))),
+
+        # --- Bent Identity ---
+        'bent_identity': lambda x: ((torch.sqrt(x ** 2 + 1) - 1) / 2) + x,
+        # --- Sinusoidal ---
+        'sin': torch.sin,
+        'cos': torch.cos,
+        'sinc': lambda x: torch.where(x == 0, torch.ones_like(x), torch.sin(x) / x),
+        # --- Snake (периодическая) ---
+        'snake': lambda x, alpha=1.0: x + (1.0 / alpha) * torch.sin(alpha * x) ** 2,
+        # --- SReLU (Simplified ReLU) ---
+        'srelu': lambda x: torch.max(torch.min(x, torch.tensor(1.0)), torch.tensor(-1.0)),
+        # --- TanhExp ---
+        'tanh_exp': lambda x: x * torch.tanh(torch.exp(x)),
+        # --- SQNL (Softsign Quartic Nonlinearity) ---
+        'sqnl': lambda x: torch.where(x > 2, torch.ones_like(x),
+                                      torch.where(x < -2, -torch.ones_like(x),
+                                                  x - x ** 3 / 6)),
+        # --- Gaussian ---
+        'gaussian': lambda x: torch.exp(-x ** 2),
     }
+
 
 def get_activation(name):
     """Возвращает функцию активации по имени"""
@@ -264,11 +287,11 @@ class SEBlock1D(nn.Module):
 
 
 class BasicBlock1D(nn.Module):
-    def __init__(self, in_channels, out_channels, stride=1, activation='relu', use_se=False, se_reduction=16):
+    def __init__(self, in_channels, out_channels, stride=1, kernel_size=3, activation='relu', use_se=False, se_reduction=16):
         super().__init__()
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1)
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=kernel_size//2)
         self.bn1 = nn.BatchNorm1d(out_channels)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=kernel_size, padding=kernel_size//2)
         self.bn2 = nn.BatchNorm1d(out_channels)
         self.shortcut = nn.Sequential()
         if stride != 1 or in_channels != out_channels:
@@ -292,6 +315,46 @@ class BasicBlock1D(nn.Module):
         out += self.shortcut(x)  # Residual connection
         out = self.activation(out)
         return out
+
+
+class BottleneckBlock1D(nn.Module):
+    expansion = 4
+
+    def __init__(self, in_channels, out_channels, stride=1,
+                 kernel_size=3, activation='relu', use_se=False, se_reduction=16):
+        super().__init__()
+        mid_channels = out_channels // self.expansion
+        padding = kernel_size // 2
+
+        self.conv1 = nn.Conv1d(in_channels, mid_channels, kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm1d(mid_channels)
+        self.conv2 = nn.Conv1d(mid_channels, mid_channels, kernel_size=kernel_size,
+                               stride=stride, padding=padding, bias=False)
+        self.bn2 = nn.BatchNorm1d(mid_channels)
+        self.conv3 = nn.Conv1d(mid_channels, out_channels, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm1d(out_channels)
+
+        self.activation = get_activation(activation)
+        self.use_se = use_se
+        if use_se:
+            self.se = SEBlock1D(out_channels, reduction=se_reduction)
+
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm1d(out_channels)
+            )
+
+    def forward(self, x):
+        out = self.activation(self.bn1(self.conv1(x)))
+        out = self.activation(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+        if self.use_se:
+            out = self.se(out)
+        out += self.shortcut(x)
+        return self.activation(out)
+
 
 
 class ResNet1D(nn.Module):
@@ -329,16 +392,96 @@ class ResNet1D(nn.Module):
         return x
 
 
+# class ResNet1DFlexible(nn.Module):
+#     def __init__(self, in_channels=8, out_channels=10,
+#                  first_conv_channels=64, first_conv_kernel=7,
+#                  first_maxpool_kernel=3,
+#                  layer_channels=[64, 128, 256, 512],
+#                  num_blocks=[1, 2, 3, 1],
+#                  activation_in='relu', activation_block='relu',
+#                  use_se=True, se_reduction=16):
+#         super().__init__()
+#
+#         self.activation_name = activation_in
+#         self.activation = get_activation(activation_in)
+#
+#         dilation = 1
+#         self.conv1 = nn.Conv1d(in_channels, first_conv_channels,
+#                                groups=1,
+#                                kernel_size=first_conv_kernel,
+#                                stride=2,
+#                                padding=dilation*(first_conv_kernel // 2),
+#                                dilation=dilation)
+#         self.bn1 = nn.BatchNorm1d(first_conv_channels)
+#         # self.bn1 = nn.GroupNorm(num_groups=8, num_channels=first_conv_channels)
+#         self.maxpool = nn.MaxPool1d(kernel_size=first_maxpool_kernel, stride=2, padding=first_maxpool_kernel // 2)
+#
+#         self.layers = nn.ModuleList()
+#         in_ch = first_conv_channels
+#         for out_ch, n_blocks in zip(layer_channels, num_blocks):
+#             self.layers.append(
+#                 self.make_layer(in_ch, out_ch, n_blocks,
+#                                 stride=2 if in_ch != out_ch else 1,
+#                                 activation=activation_block,
+#                                 use_se=use_se,
+#                                 se_reduction=se_reduction)
+#             )
+#             in_ch = out_ch
+#
+#         self.avgpool = nn.AdaptiveAvgPool1d(1)
+#         self.fc = nn.Sequential(
+#             # nn.LayerNorm(in_ch),
+#             nn.Flatten(),
+#             nn.Linear(in_ch, out_channels)
+#         )
+#         self.shortcut = nn.Sequential(
+#             nn.BatchNorm1d(in_channels),
+#             nn.Conv1d(in_channels, out_channels, kernel_size=1, stride=1),
+#             nn.AdaptiveAvgPool1d(1),
+#             nn.Flatten()
+#         )
+#
+#     @staticmethod
+#     def make_layer(in_channels, out_channels, num_blocks, stride, activation, use_se, se_reduction):
+#         layers = [BasicBlock1D(in_channels, out_channels, stride, activation,
+#                                use_se=use_se, se_reduction=se_reduction)]
+#         for _ in range(1, num_blocks):
+#             layers.append(BasicBlock1D(out_channels, out_channels, stride=1,
+#                                        activation=activation, use_se=use_se, se_reduction=se_reduction))
+#         return nn.Sequential(*layers)
+#
+#     def forward(self, x):
+#         identity = self.shortcut(x)
+#         x = self.activation(self.bn1(self.conv1(x)))
+#         x = self.maxpool(x)
+#
+#         for layer in self.layers:
+#             x = layer(x)
+#
+#         x = self.avgpool(x)
+#         # if type(self.fc) != nn.Identity:
+#             # x = nn.Flatten(x)
+#             # x = x.view(x.size(0), -1)
+#         x = self.fc(x)
+#         x += identity
+#         return x
+
+
 class ResNet1DFlexible(nn.Module):
-    def __init__(self, in_channels=8, out_channels=10,
+    def __init__(self,
+                 in_channels=8, out_channels=10,
                  first_conv_channels=64, first_conv_kernel=7,
                  first_maxpool_kernel=3,
+                 block_kernel_size=3,
                  layer_channels=[64, 128, 256, 512],
                  num_blocks=[1, 2, 3, 1],
                  activation_in='relu', activation_block='relu',
-                 use_se=True, se_reduction=16):
+                 use_se=True, se_reduction=16,
+                 block_type='basic'  # <-- NEW
+                 ):
         super().__init__()
 
+        self.block_type = block_type.lower()
         self.activation_name = activation_in
         self.activation = get_activation(activation_in)
 
@@ -347,11 +490,11 @@ class ResNet1DFlexible(nn.Module):
                                groups=1,
                                kernel_size=first_conv_kernel,
                                stride=2,
-                               padding=dilation*(first_conv_kernel // 2),
+                               padding=dilation * (first_conv_kernel // 2),
                                dilation=dilation)
         self.bn1 = nn.BatchNorm1d(first_conv_channels)
-        # self.bn1 = nn.GroupNorm(num_groups=8, num_channels=first_conv_channels)
-        self.maxpool = nn.MaxPool1d(kernel_size=first_maxpool_kernel, stride=2, padding=first_maxpool_kernel // 2)
+        self.maxpool = nn.MaxPool1d(kernel_size=first_maxpool_kernel, stride=2,
+                                    padding=first_maxpool_kernel // 2)
 
         self.layers = nn.ModuleList()
         in_ch = first_conv_channels
@@ -361,14 +504,17 @@ class ResNet1DFlexible(nn.Module):
                                 stride=2 if in_ch != out_ch else 1,
                                 activation=activation_block,
                                 use_se=use_se,
-                                se_reduction=se_reduction)
+                                se_reduction=se_reduction,
+                                block_kernel_size=block_kernel_size)
             )
-            in_ch = out_ch
+            # Обновляем входные каналы с учётом expansion для bottleneck
+            if self.block_type == 'bottleneck':
+                in_ch = out_ch
+            else:
+                in_ch = out_ch
 
         self.avgpool = nn.AdaptiveAvgPool1d(1)
         self.fc = nn.Sequential(
-            # nn.LayerNorm(in_ch),
-            nn.Flatten(),
             nn.Linear(in_ch, out_channels)
         )
         self.shortcut = nn.Sequential(
@@ -378,17 +524,25 @@ class ResNet1DFlexible(nn.Module):
             nn.Flatten()
         )
 
-    @staticmethod
-    def make_layer(in_channels, out_channels, num_blocks, stride, activation, use_se, se_reduction):
-        layers = [BasicBlock1D(in_channels, out_channels, stride, activation,
-                               use_se=use_se, se_reduction=se_reduction)]
+    def make_layer(self, in_channels, out_channels, num_blocks, stride, activation,
+                   use_se, se_reduction, block_kernel_size):
+        if self.block_type == 'bottleneck':
+            block = BottleneckBlock1D
+        else:
+            block = BasicBlock1D
+
+        layers = [block(in_channels, out_channels, stride=stride,
+                        kernel_size=block_kernel_size, activation=activation,
+                        use_se=use_se, se_reduction=se_reduction)]
         for _ in range(1, num_blocks):
-            layers.append(BasicBlock1D(out_channels, out_channels, stride=1,
-                                       activation=activation, use_se=use_se, se_reduction=se_reduction))
+            layers.append(block(out_channels, out_channels, stride=1,
+                                kernel_size=block_kernel_size, activation=activation,
+                                use_se=use_se, se_reduction=se_reduction))
         return nn.Sequential(*layers)
 
     def forward(self, x):
         identity = self.shortcut(x)
+
         x = self.activation(self.bn1(self.conv1(x)))
         x = self.maxpool(x)
 
@@ -396,53 +550,10 @@ class ResNet1DFlexible(nn.Module):
             x = layer(x)
 
         x = self.avgpool(x)
-        # if type(self.fc) != nn.Identity:
-            # x = nn.Flatten(x)
-            # x = x.view(x.size(0), -1)
+        x = x.view(x.size(0), -1)
         x = self.fc(x)
         x += identity
         return x
-    # def forward(self, x):
-    #     residual = x  # Сохраняем вход
-    #     x = self.activation(self.bn1(self.conv1(x)))
-    #     x = self.maxpool(x)
-    #
-    #     for layer in self.layers:
-    #         x = layer(x)
-    #
-    #     x = self.avgpool(x)
-    #     x = x.view(x.size(0), -1)
-    #
-    #     # Глобальный скип-коннекшен, если размерности совпадают
-    #     if residual.shape[1] == x.shape[1]:
-    #         x += residual.mean(dim=2)  # Приводим residual к размерности (batch, channels)
-    #     else:
-    #         # Приводим residual к размерности выхода
-    #         residual_proj = nn.AdaptiveAvgPool1d(1)(residual)
-    #         residual_proj = residual_proj.view(residual_proj.size(0), -1)
-    #         if residual_proj.shape[1] != x.shape[1]:
-    #             # 1x1 "проекционный слой"
-    #             proj = nn.Linear(residual_proj.shape[1], x.shape[1]).to(x.device)
-    #             residual_proj = proj(residual_proj)
-    #         x += residual_proj
-    #
-    #     x = self.fc(x)
-    #     return x
-
-    # def forward(self, x):
-    #     x = self.activation(self.bn1(self.conv1(x)))
-    #     x = self.maxpool(x)
-    #
-    #     for layer in self.layers:
-    #         residual = x
-    #         x = layer(x)
-    #         if residual.shape == x.shape:
-    #             x += residual  # межблочный скип-коннекшен
-    #
-    #     x = self.avgpool(x)
-    #     x = x.view(x.size(0), -1)
-    #     x = self.fc(x)
-    #     return x
 
 
 class ModelWithCorrection(nn.Module):
@@ -474,6 +585,22 @@ class ModelWithCorrection(nn.Module):
         # # scaled_decoded = self._scaler_in(s_concat)
         # decoded = self._correction_model(s_concat)
         return final
+
+
+class ModelWithCorrectionAndSparameters(nn.Module):
+    def __init__(self,
+                 main_model: nn.Module, correction_model: nn.Module,
+                 *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._main_model = main_model
+        self._correction_model = correction_model
+
+    def forward(self, x):
+        main_output = self._main_model(x)
+        correction = self._correction_model(x, main_output)
+        final = correction
+        return final
+
 
 
 class CorrectEachFeature(nn.Module):
@@ -553,6 +680,24 @@ class CorrectionMLP(nn.Module):
         return x
 
 
+class CorrectionNet(nn.Module):
+    def __init__(self, s_shape, m_dim, hidden_dim=256):
+        super().__init__()
+        s_dim = s_shape[0] * s_shape[1]  # 301 * 8 = 2408
+        self.fc1 = nn.Linear(s_dim + m_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, m_dim)
+
+    def forward(self, s_params, matrix_pred):
+
+        s_params = s_params.view(s_params.size(0), -1)  # B x 2408
+        x = torch.cat([s_params, matrix_pred], dim=1)
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        delta = self.fc3(x)
+        return matrix_pred + delta
+
+
 class CorrectionCNN1D(nn.Module):
     def __init__(self, input_len=30, output_dim=30):
         super().__init__()
@@ -573,44 +718,6 @@ class CorrectionCNN1D(nn.Module):
         x = x.flatten(1)  # (B, 16*30)
         x = self.fc(self.norm(x))
         return x
-
-
-
-class Bottleneck1D(nn.Module):
-    expansion = 4
-
-    def __init__(self, in_channels, out_channels, stride=1, dilation=1):
-        super().__init__()
-        mid_channels = out_channels // self.expansion
-
-        self.conv1 = nn.Conv1d(in_channels, mid_channels, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm1d(mid_channels)
-
-        self.conv2 = nn.Conv1d(mid_channels, mid_channels, kernel_size=3,
-                               stride=stride, padding=dilation,
-                               dilation=dilation, bias=False)
-        self.bn2 = nn.BatchNorm1d(mid_channels)
-
-        self.conv3 = nn.Conv1d(mid_channels, out_channels, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm1d(out_channels)
-
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_channels != out_channels:
-            self.shortcut = nn.Sequential(
-                nn.Conv1d(in_channels, out_channels,
-                          kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm1d(out_channels)
-            )
-
-        self.dropout = nn.Dropout1d(0.2)
-
-    def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = F.relu(self.bn2(self.conv2(out)))
-        out = self.bn3(self.conv3(out))
-        out += self.shortcut(x)
-        out = F.relu(out)
-        return self.dropout(out)
 
 
 class RobustAttention(nn.Module):
@@ -768,22 +875,63 @@ class Simple_Opt_3(nn.Module):
         self.nargout = 1
         # Количество выходных каналов
 
+        # # --------------------------  1 conv-слой ---------------------------
+        # self.conv1 = nn.Conv1d(in_channels=in_channels, out_channels=64, kernel_size=7, stride=1, padding='same')
+        # # --------------------------  2 conv-слой ---------------------------
+        # self.conv2 = nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same')
+        # # --------------------------  3 conv-слой ---------------------------
+        # self.conv3 = nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same')
+        # # --------------------------  4 conv-слой ---------------------------
+        # self.conv4 = nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same')
+        # self.seq_conv = nn.Sequential(
+        #     # --------------------------  1 conv-слой ---------------------------
+        #     self.conv1,
+        #     nn.ReLU(),
+        #     nn.AvgPool1d(kernel_size=3, stride=3, padding=1),
+        #     # --------------------------  2 conv-слой ---------------------------
+        #     self.conv2,
+        #     nn.ReLU(),
+        #     self.conv2,
+        #     nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
+        #     # --------------------------  3 conv-слой ---------------------------
+        #     self.conv3,
+        #     nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
+        #     # --------------------------  4 conv-слой ---------------------------
+        #     self.conv4,
+        # )
+        # self.seq_fc = nn.Sequential(
+        #     # --------------------------  fc-слои ---------------------------
+        #     nn.Linear(64 * 26, 2048),
+        #     nn.ReLU(),
+        #     nn.LayerNorm(2048),
+        #     nn.Linear(2048, 1024),
+        #     nn.ReLU(),
+        #     nn.LayerNorm(1024),
+        #     nn.Linear(1024, 512),
+        #     nn.ReLU(),
+        #     nn.LayerNorm(512),
+        #     nn.Linear(512, out_channels),  # N - количество ненулевых элементов матрицы связи
+        #     nn.Tanh()
+        # )
         # --------------------------  1 conv-слой ---------------------------
         self.conv1 = nn.Conv1d(in_channels=in_channels, out_channels=64, kernel_size=7, stride=1, padding='same')
         # --------------------------  2 conv-слой ---------------------------
-        self.conv2 = nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same')
+        self.conv2 = nn.Sequential(
+                                   nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same'))
         # --------------------------  3 conv-слой ---------------------------
-        self.conv3 = nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same')
+        self.conv3 = nn.Sequential(
+                                   nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same'))
         # --------------------------  4 conv-слой ---------------------------
-        self.conv4 = nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same')
-        self.seq_conv = nn.Sequential(
+        self.conv4 = nn.Sequential(
+                                   nn.Conv1d(in_channels=64, out_channels=64, kernel_size=5, stride=1, padding='same'))
+        self.seq_conv = torch.nn.Sequential(
             # --------------------------  1 conv-слой ---------------------------
             self.conv1,
-            nn.ReLU(),
-            nn.AvgPool1d(kernel_size=3, stride=3, padding=1),
+            nn.LeakyReLU(),
+            nn.MaxPool1d(kernel_size=3, stride=3, padding=1),
             # --------------------------  2 conv-слой ---------------------------
             self.conv2,
-            nn.ReLU(),
+            nn.LeakyReLU(),
             self.conv2,
             nn.MaxPool1d(kernel_size=2, stride=2, padding=1),
             # --------------------------  3 conv-слой ---------------------------
@@ -794,17 +942,14 @@ class Simple_Opt_3(nn.Module):
         )
         self.seq_fc = nn.Sequential(
             # --------------------------  fc-слои ---------------------------
-            nn.Linear(64 * 26, 2048),
-            # nn.LayerNorm(2048),
-            nn.ReLU(),
-            nn.Linear(2048, 1024),
-            # nn.LayerNorm(1024),
-            nn.ReLU(),
-            nn.Linear(1024, 512),
-            # nn.LayerNorm(512),
-            nn.ReLU(),
-            nn.Linear(512, out_channels),  # N - количество ненулевых элементов матрицы связи
-            nn.Tanh()
+            nn.Linear(26*64, 512),
+            nn.Softsign(),
+            nn.LayerNorm(512),
+            nn.Linear(512, 512),
+            nn.Softsign(),
+            nn.LayerNorm(512),
+            nn.Linear(512, out_channels), # N - количество ненулевых элементов матрицы связи
+            nn.Softsign()
         )
 
     def encode(self, x):
