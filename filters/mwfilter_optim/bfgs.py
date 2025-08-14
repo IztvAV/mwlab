@@ -10,6 +10,8 @@ from scipy.optimize import minimize
 from filters.mwfilter_optim.base import FastMN2toSParamCalculation
 from filters.datasets.theoretical_dataset_generator import DatasetMWFilter
 from scipy.optimize import least_squares
+from torch import compile
+import sensivity
 
 
 def create_bounds(origin_matrix: CouplingMatrix):
@@ -59,13 +61,7 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
         _, s11_pred, s21_pred, s22_pred = fast_calc.RespM2(mat, with_s22=True)
 
         def normalize(tensor: torch.Tensor):
-            # mean = tensor.mean()
-            # std = tensor.std()
-            # return (tensor - mean) / (std + 1e-8)
             return tensor
-            # min = tensor.min()
-            # max = tensor.max()
-            # return (tensor - min) / (max - min)
 
         # Приведение к dB и нормализация
         s11_pred_db = normalize(MWFilter.to_db(s11_pred))*freq_weights
@@ -77,19 +73,17 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
 
         # Loss
         loss = (
-                0.5 * torch.nn.functional.l1_loss(s11_pred_db, s11_origin_db) +
-                1.0 * torch.nn.functional.l1_loss(s21_pred_db, s21_origin_db) +
-                0.5 * torch.nn.functional.l1_loss(s22_pred_db, s22_origin_db) +
-                0.5 * torch.nn.functional.mse_loss(s11_pred_db, s11_origin_db) +
-                1.0 * torch.nn.functional.mse_loss(s21_pred_db, s21_origin_db) +
-                0.5 * torch.nn.functional.mse_loss(s22_pred_db, s22_origin_db)
+                1.0*torch.nn.functional.l1_loss(s11_pred_db, s11_origin_db) +
+                1.0*torch.nn.functional.l1_loss(s21_pred_db, s21_origin_db) +
+                1.0*torch.nn.functional.l1_loss(s22_pred_db, s22_origin_db) +
+                1.0*torch.nn.functional.mse_loss(s11_pred_db, s11_origin_db) +
+                1.0*torch.nn.functional.mse_loss(s21_pred_db, s21_origin_db) +
+                1.0*torch.nn.functional.mse_loss(s22_pred_db, s22_origin_db)
         )
-
         # Регуляризация
-        reg = 1 * torch.norm(x, p=2)
-        loss += reg
-        reg = 0.1 * torch.nn.L1Loss()(s11_pred_db, s22_pred_db)
-        loss += reg
+        # reg = torch.nn.functional.l1_loss(s11_pred_db, s22_pred_db)
+        # loss += reg
+        loss = torch.sqrt(loss)
 
         # backward
         loss.backward()
@@ -107,13 +101,7 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
         _, s11_pred, s21_pred, s22_pred = fast_calc.RespM2(M, with_s22=True)
 
         def normalize(tensor: torch.Tensor):
-            # mean = tensor.mean()
-            # std = tensor.std()
-            # return (tensor - mean) / (std + 1e-8)  # добавим epsilon, чтобы избежать деления на 0
             return tensor
-            # min = tensor.min()
-            # max = tensor.max()
-            # return (tensor - min) / (max - min)
 
         s11_pred_db = normalize(MWFilter.to_db(s11_pred))*freq_weights
         s21_pred_db = normalize(MWFilter.to_db(s21_pred))*freq_weights
@@ -124,21 +112,21 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
 
         # Loss
         loss = (
-                0.5*torch.nn.L1Loss()(s11_pred_db, s11_origin_db) +
-                1.0*torch.nn.L1Loss()(s21_pred_db, s21_origin_db) +
-                0.5*torch.nn.L1Loss()(s22_pred_db, s22_origin_db) +
-                0.5*torch.nn.MSELoss()(s11_pred_db, s11_origin_db) +
-                1.0*torch.nn.MSELoss()(s21_pred_db, s21_origin_db) +
-                0.5*torch.nn.MSELoss()(s22_pred_db, s22_origin_db)
+                1.0*torch.nn.functional.l1_loss(s11_pred_db, s11_origin_db) +
+                1.0*torch.nn.functional.l1_loss(s21_pred_db, s21_origin_db) +
+                1.0*torch.nn.functional.l1_loss(s22_pred_db, s22_origin_db) +
+                1.0*torch.nn.functional.mse_loss(s11_pred_db, s11_origin_db) +
+                1.0*torch.nn.functional.mse_loss(s21_pred_db, s21_origin_db) +
+                1.0*torch.nn.functional.mse_loss(s22_pred_db, s22_origin_db)
         )
-        reg = 1 * torch.norm(x, p=2)  # L2-регуляризация
-        loss += reg
-        reg = 0.1 * torch.nn.L1Loss()(s11_pred_db, s22_pred_db)
-        loss += reg
+        # reg = torch.nn.functional.l1_loss(s11_pred_db, s22_pred_db)
+        # loss += reg
+        loss = torch.sqrt(loss)
 
 
         loss.backward()
-        return loss.item(), x.grad.detach().numpy()
+        grad = x.grad.detach().numpy()*importance
+        return loss.item(), grad
 
     results = {}
     print("Start optimize (L-BFGS-B)")
@@ -150,7 +138,8 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
                                            wlist=pred_filter.f_norm,
                                            Q=pred_filter.Q,
                                            fbw=pred_filter.fbw)
-    freq_weights = torch.tensor([min(abs(1/f), 1) for f in pred_filter.f_norm], dtype=torch.float32)
+    fast_calc.RespM2 = torch.compile(fast_calc.RespM2, backend="eager")
+    freq_weights = torch.tensor([min(abs(1/f), 0.95) for f in pred_filter.f_norm], dtype=torch.float32)
 
     s11_origin = orig_filter.s[:, 0, 0]
     s21_origin = orig_filter.s[:, 1, 0]
@@ -174,6 +163,8 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
     start_time = time.time()
 
     lambda_values = np.linspace(0.05, 1.0, 20)  # Например, num_steps = 10
+    # importance = sensivity.run(orig_filter)
+    importance = 1
     r0, _ = cost_with_grad(x0, fast_calc, orig_filter, s11_origin_db, s21_origin_db, s22_origin_db, links, matrix_order)
     print("Initial cost value:", r0)
 
@@ -195,7 +186,13 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
             cross_couplings.append((i, j))
 
     optim_matrix = pred_filter.coupling_matrix.matrix
-    for couplings in self_couplings:
+    # imp = [(1, 2), (2, 2), (2, 3), (2, 11), (3, 3), (4, 4), (5, 5), (6, 6), (7, 7), (9, 9), (10, 10), (10, 11), (11, 11), (11, 12)]
+    # imp = [(1, 1), (1, 2), (2, 2), (2, 11), (3, 3), (3, 4), (4, 4), (4, 5), (5, 5), (5, 6), (5, 7), (5, 8), (5, 9), (6, 6),
+    #        (7, 7), (7, 8), (8, 8), (8, 9), (9, 10), (10, 10), (10, 11), (11, 11), (11, 12), (12, 12), (12, 13)]
+    # imp = [(1, 1), (2, 11), (3, 3), (3, 4), (4, 4), (4, 5), (5, 5), (5, 6), (6, 6), (7, 7), (8, 8), (10, 10)]
+    # imp = [(2, 2), (3, 4), (4, 4), (4, 5), (5, 5), (5, 6), (6, 6), (6, 7), (7, 7), (7, 8), (8, 8), (8, 9), (9, 9), (10, 10), (11, 11), (12, 12), (12, 13)]
+    for couplings in cross_couplings+self_couplings+main_couplings:
+    # for couplings in test:
         # Индексы связей
         indices = torch.tensor(couplings, dtype=torch.long)  # (L, 2)
         # i_idx, j_idx = indices[:, 0], indices[:, 1]
@@ -222,16 +219,22 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
         if result.fun < 0.5:
             break
 
+    print(f"Cost after homotopy L-BFGS-B: {result.fun}")
+
+    stop_time = time.time()
+    print(f"Optimize time: {stop_time - start_time:.3f} sec")
+
     # Постобработка результата
     optim_matrix = CouplingMatrix(list(results.items())[-1][-1])
+    # optim_matrix = optim_matrix.matrix
     x_current = optim_matrix.factors
+    # x_current = pred_filter.coupling_matrix.factors
 
     Mmin, Mmax = create_bounds(
         CouplingMatrix(CouplingMatrix.from_factors(torch.tensor(x_current, dtype=torch.float64),
                                                    pred_filter.coupling_matrix.links,
                                                    pred_filter.coupling_matrix.matrix_order)))
     bounds = [(min(m_min, m_max), max(m_min, m_max)) for m_min, m_max in tuple(zip(Mmin.factors, Mmax.factors))]
-    # freq_weights = torch.ones_like(freq_weights)
     result = minimize(
         fun=cost_with_grad,
         x0=x_current,
@@ -241,6 +244,14 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
         args=(fast_calc, orig_filter, s11_target, s21_target, s22_target, links, matrix_order),
         options={'disp': True, 'maxiter': 100000, 'ftol': 1e-9, 'gtol': 1e-6}
     )
+    optim_matrix = CouplingMatrix.from_factors(
+        torch.tensor(result.x, dtype=torch.float32),
+        links,
+        matrix_order
+    )
+    results.update({result.fun: optim_matrix})
+    optim_matrix = results[sorted(results)[0]]
+
     # for lambda_ in lambda_values:
     #     print(f"Current lambda={lambda_}")
     #     Mmin, Mmax = create_bounds(
@@ -330,35 +341,6 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
     #         x_current = result.x
     #     print(f"Cost after iteration: {result.fun}")
 
-    print(f"Cost after homotopy L-BFGS-B: {result.fun}")
-    # Mmin, Mmax = create_bounds(
-    #     CouplingMatrix(CouplingMatrix.from_factors(torch.tensor(x0, dtype=torch.float64),
-    #                                                pred_filter.coupling_matrix.links,
-    #                                                pred_filter.coupling_matrix.matrix_order)))
-    # bounds = [(min(m_min, m_max), max(m_min, m_max)) for m_min, m_max in tuple(zip(Mmin.factors, Mmax.factors))]
-    #
-    # result = minimize(
-    #     fun=cost_with_grad,
-    #     x0=x0,
-    #     method='l-bfgs-b',
-    #     jac=True,
-    #     bounds=bounds,
-    #     args=(fast_calc, orig_filter, s11_origin_db, s21_origin_db, s22_origin_db, links, matrix_order),
-    #     options={'disp': True, 'maxiter': 100000, 'ftol': 1e-9, 'gtol': 1e-6}
-    # )
-    # print(f"Cost after classic L-BFGS-B: {result.fun}")
-
-    stop_time = time.time()
-    print(f"Optimize time: {stop_time - start_time:.3f} sec")
-
-    # Постобработка результата
-    optim_matrix = CouplingMatrix.from_factors(
-        torch.tensor(result.x, dtype=torch.float32),
-        links,
-        matrix_order
-    )
-    results.update({result.fun: optim_matrix})
-    optim_matrix = list(results.items())[-1][-1]
     w, s11_opt, s21_opt, s22_opt = fast_calc.RespM2(optim_matrix, with_s22=True)
 
     # plt.figure()

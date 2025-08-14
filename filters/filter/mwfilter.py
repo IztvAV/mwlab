@@ -262,12 +262,25 @@ class MWFilter(rf.Network):
         # Batch matrix creation and inversion
         lam_exp = lam.view(-1, 1, 1)  # (B, 1, 1)
         A = lam_exp * I - J + Mpr  # (B, N, N)
-        Ainv = torch.linalg.inv(A)  # (B, N, N)
+        B, N, _ = A.shape
+        e0 = torch.zeros(B, N, 1, dtype=torch.complex64, device=A.device)
+        eN = torch.zeros(B, N, 1, dtype=torch.complex64, device=A.device)
 
-        # S-parameters calculation
-        A00 = Ainv[:, 0, 0]
-        ANN = Ainv[:, -1, -1]
-        AN0 = Ainv[:, -1, 0]
+        e0[:, 0, 0] = 1
+        eN[:, -1, 0] = 1
+
+        x0 = torch.linalg.solve(A, e0)  # A^{-1} @ e0
+        xN = torch.linalg.solve(A, eN)  # A^{-1} @ eN
+
+        A00 = x0[:, 0, 0]
+        AN0 = x0[:, -1, 0]
+        ANN = xN[:, -1, 0]
+        # Ainv = torch.linalg.inv(A)  # (B, N, N)
+        #
+        # # S-parameters calculation
+        # A00 = Ainv[:, 0, 0]
+        # ANN = Ainv[:, -1, -1]
+        # AN0 = Ainv[:, -1, 0]
 
         S11 = 1 + 2j * Rs * A00
         S22 = 1 + 2j * Rl * ANN

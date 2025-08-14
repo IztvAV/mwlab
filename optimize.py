@@ -20,7 +20,7 @@ import lightning as L
 import pickle
 
 
-DATASET_SIZE = 50_000
+DATASET_SIZE = 100_000
 ENV_ORIGIN_DATA_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "origins_data")
 ENV_DATASET_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "optimize_data")
 ENV_STUDY_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME, "study_results")
@@ -49,7 +49,7 @@ def load_study_pickle(path):
         return pickle.load(f)
 
 
-def base_objective(model: nn.Module, optimizer_cfg: dict, scheduler_cfg: dict, metric: str="val_mse", max_epoch: int=50):
+def base_objective(model: nn.Module, optimizer_cfg: dict, scheduler_cfg: dict, metric: str="val_mse", direction="minimize", max_epoch: int=50):
     # 3. Создаем DataLoader
     dm = TouchstoneLDataModule(
         source=ds_gen.backend,  # Путь к датасету
@@ -81,10 +81,16 @@ def base_objective(model: nn.Module, optimizer_cfg: dict, scheduler_cfg: dict, m
         loss_fn=CustomLosses("mse_with_l1")
     )
 
+    if direction == "minimize":
+        mode="min"
+    elif direction == "maximize":
+        mode="max"
+    else:
+        raise ValueError("Unsupported optimize direction")
     stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_loss", patience=5, mode="min", min_delta=0.00001)
-    checkpoint = L.pytorch.callbacks.ModelCheckpoint(monitor="val_loss", dirpath="optimized_models/" + FILTER_NAME,
+    checkpoint = L.pytorch.callbacks.ModelCheckpoint(monitor=metric, dirpath="optimized_models/" + FILTER_NAME,
                                                      filename="best-{epoch}-{val_loss:.5f}-{train_loss:.5f}",
-                                                     mode="min",
+                                                     mode=mode,
                                                      save_top_k=1,  # Сохраняем только одну лучшую
                                                      save_weights_only=False,
                                                      # Сохранять всю модель (включая структуру)
@@ -105,7 +111,8 @@ def base_objective(model: nn.Module, optimizer_cfg: dict, scheduler_cfg: dict, m
 
     # Запуск процесса обучения
     trainer.fit(lit_model, dm)
-    score = trainer.callback_metrics[metric].item()
+    # score = trainer.callback_metrics[metric].item()
+    score = checkpoint.best_model_score
     return score
 
 
@@ -115,57 +122,70 @@ def optimize_lr(metric="val_r2", direction="maximize"):
         # 1. Определяем пространство поиска параметров
         params = {
             'lr': trial.suggest_float('lr', 0.00001, 0.001, step=0.00001),
-            'gamma': trial.suggest_float('gamma', 0.05, 1.0, step=0.05),
+            'gamma': trial.suggest_float('gamma', 0.01, 1.0, step=0.01),
             'step_size': trial.suggest_int('step_size', 1, 30),
         }
 
         orig_filter = create_origin_filter(ENV_ORIGIN_DATA_PATH)
         # 2. Создаем модель
-        main = models.ResNet1DFlexible(
-            in_channels=len(codec.y_channels),
-            out_channels=len(codec.x_keys),
-            num_blocks=[1, 4, 3, 5],
-            layer_channels=[64, 64, 128, 256],
-            first_conv_kernel=8,
-            first_conv_channels=64,
-            first_maxpool_kernel=3,
-            activation_in='sigmoid',
-            activation_block='swish',
-            use_se=False,
-            se_reduction=1
-        )
-        mlp = models.CorrectionMLP(
-            input_dim=len(codec.x_keys),
-            output_dim=len(codec.x_keys),
-            hidden_dims=[32, 16, 1024],
-            activation_fun='soft_sign'
-        )
 
-        model = models.ModelWithCorrection(
-            main_model=main,
-            correction_model=mlp,
-        )
-        # model = models.main = models.ResNet2DFlexible(
-        #     freq_vector=orig_filter.f_norm,
+        # main = models.ResNet1DFlexible(
         #     in_channels=len(codec.y_channels),
         #     out_channels=len(codec.x_keys),
-        #     use_se=False,
-        #     se_reduction=1
+        #     num_blocks=[4, 6, 4, 4],
+        #     layer_channels=[128, 256, 64, 128],
+        #     first_conv_kernel=9,
+        #     first_conv_channels=128,
+        #     first_maxpool_kernel=9,
+        #     activation_in='gelu',
+        #     activation_block='mish',
+        #     # use_se=False,
+        #     # se_reduction=1
         # )
-        optimizer_cfg = {"name": "Adam", "lr": params['lr']}
+        # mlp = models.CorrectionMLP(
+        #     input_dim=len(codec.x_keys),
+        #     output_dim=len(codec.x_keys),
+        #     hidden_dims=[2048, 4096, 256],
+        #     activation_fun='gelu'
+        # )
+
+        # main = models.ResNet1DFlexible(
+        #     in_channels=len(codec.y_channels),
+        #     out_channels=len(codec.x_keys),
+        #     num_blocks=[7, 7, 1, 3],
+        #     layer_channels=[512, 64, 64, 32],
+        #     first_conv_kernel=11,
+        #     first_conv_channels=1024,
+        #     first_maxpool_kernel=3,
+        #     activation_in='leaky_relu',
+        #     activation_block='leaky_relu',
+        #     # use_se=False,
+        #     # se_reduction=1
+        # )
+        # mlp = models.CorrectionMLP(
+        #     input_dim=len(codec.x_keys),
+        #     output_dim=len(codec.x_keys),
+        #     hidden_dims=[256, 4096, 512],
+        #     activation_fun='soft_sign'
+        # )
+        # model = models.ModelWithCorrection(
+        #     main_model=main,
+        #     correction_model=mlp,
+        # )
+
+        model = common.get_model('resnet_with_correction', in_channels=len(codec.y_channels), out_channels=len(codec.x_keys))
+        optimizer_cfg = {"name": "AdamW", "lr": params['lr'], "weight_decay": 1e-5}
         scheduler_cfg = {"name": "StepLR", "step_size": params['step_size'], "gamma": params['gamma']}
-        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric=metric)
+        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric=metric, direction=direction, max_epoch=35)
         return score
 
     # 3. Создаем study и запускаем оптимизацию
-    study = load_study_pickle(os.path.join(ENV_STUDY_PATH,
-                                               f"study_dataset-dataset={DATASET_SIZE}-trials={TRIAL_NUM}.pkl"))
-    # study = optuna.create_study(direction=direction)  # Мы хотим максимизировать accuracy
+    study = optuna.create_study(direction=direction)  # Мы хотим максимизировать accuracy
     study.enqueue_trial(
         {
-         'lr': 0.0005995097360712593,
-         'step_size': 20,
-         'gamma': 0.05
+         'lr': 0.0005371,
+         'step_size': 24,
+         'gamma': 0.01
          }
     )
     study.optimize(objective, n_trials=TRIAL_NUM, callbacks=[print_best_callback])  # Количество итераций оптимизации
@@ -198,7 +218,7 @@ def optimize_efficient_net(metric="val_r2", direction="maximize"):
         )
         optimizer_cfg = {"name": "Adam", "lr": params['lr']}
         scheduler_cfg = {"name": "StepLR", "step_size": params['step_size'], "gamma": params['gamma']}
-        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric=metric)
+        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric=metric, direction=direction)
         return score
 
     # 3. Создаем study и запускаем оптимизацию
@@ -258,7 +278,7 @@ def optimize_resnet(metric="val_r2", direction="maximize"):
         )
         optimizer_cfg = {"name": "Adam", "lr": params['lr']}
         scheduler_cfg = {"name": "StepLR", "step_size": params['step_size'], "gamma": params['gamma']}
-        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric=metric)
+        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric=metric, direction=direction)
         return score
 
     # 3. Создаем study и запускаем оптимизацию
@@ -300,19 +320,20 @@ def optimize_resnet_with_mlp_correction(metric: str="val_mse", direction: str="m
         }
 
         # 2. Создаем модель
-        main = models.ResNet1DFlexible(
-            in_channels=len(codec.y_channels),
-            out_channels=len(codec.x_keys),
-            num_blocks=[4, 6, 4, 4],
-            layer_channels=[128, 256, 64, 128],
-            first_conv_kernel=9,
-            first_conv_channels=128,
-            first_maxpool_kernel=9,
-            activation_in='gelu',
-            activation_block='mish',
-            # use_se=False,
-            # se_reduction=1
-        )
+        # resnet = models.ResNet1DFlexible(
+        #     in_channels=len(codec.y_channels),
+        #     out_channels=len(codec.x_keys),
+        #     num_blocks=[7, 7, 1, 3],
+        #     layer_channels=[512, 64, 64, 32],
+        #     first_conv_kernel=11,
+        #     first_conv_channels=1024,
+        #     first_maxpool_kernel=3,
+        #     activation_in='leaky_relu',
+        #     activation_block='leaky_relu',
+        #     # use_se=False,
+        #     # se_reduction=1
+        # )
+        resnet = common.get_model('resnet', in_channels=len(codec.y_channels), out_channels=len(codec.x_keys))
 
         correction = models.CorrectionMLP(
             input_dim=len(codec.x_keys),
@@ -322,12 +343,12 @@ def optimize_resnet_with_mlp_correction(metric: str="val_mse", direction: str="m
         )
 
         model = models.ModelWithCorrection(
-            main_model=main,
+            main_model=resnet,
             correction_model=correction
         )
         optimizer_cfg = {"name": "AdamW", "lr": 0.0005371, "weight_decay": 1e-5}
         scheduler_cfg = {"name": "StepLR", "step_size": 24, "gamma": 0.01}
-        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric=metric, max_epoch=scheduler_cfg['step_size']+5)
+        score = base_objective(model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, metric=metric, max_epoch=scheduler_cfg['step_size']+5, direction=direction)
         return score
 
     # 3. Создаем study и запускаем оптимизацию
@@ -336,9 +357,9 @@ def optimize_resnet_with_mlp_correction(metric: str="val_mse", direction: str="m
         {'hidden1_features': 128,
          'hidden2_features': 256,
          'hidden3_features': 512,
-         'lr': 0.0005587648891507119,
-         'gamma': 0.1,
-         'step_size': 15,
+         # 'lr': 0.0005587648891507119,
+         # 'gamma': 0.1,
+         # 'step_size': 15,
          'activation_fun': 'swish'
          }
     )
@@ -368,11 +389,13 @@ def main():
     codec.exclude_keys(["f0", "bw", "N", "Q"])
     print(codec)
 
+    study = load_study_pickle(path=os.path.join(ENV_STUDY_PATH,
+                                               f"study_dataset-dataset={DATASET_SIZE}-trials={TRIAL_NUM}.pkl"))
     # Исключаем из анализа ненужные x-параметры
     print("Каналы:", codec.y_channels)
     print("Количество каналов:", len(codec.y_channels))
 
-    study = optimize_resnet_with_mlp_correction(metric="val_mae", direction="minimize")
+    study = optimize_lr(metric="val_r2", direction="maximize")
 
     # 4. Выводим результаты
     print(f"Лучшие параметры: {study.best_params}")
