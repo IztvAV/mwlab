@@ -1,5 +1,6 @@
 import copy
 import math
+from typing import Optional
 
 import torch
 from torch import nn
@@ -1871,33 +1872,269 @@ class TorchvisionModels(nn.Module):
         return x_2d
 
 
-class TemporalTransformer(nn.Module):
-    def __init__(self, input_channels=8, seq_len=301, num_classes=37):
+class ConvAE(nn.Module):
+    # def __init__(self, in_ch=8, z_dim=32):
+    #     super().__init__()
+    #     # -------- Encoder --------
+    #     self.enc = nn.Sequential(
+    #         nn.Conv1d(in_ch, 32, kernel_size=5, stride=2, padding=2),  # 301 -> 151
+    #         nn.ReLU(inplace=True),
+    #         nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2),  # 151 -> 76
+    #         nn.ReLU(inplace=True),
+    #         nn.Conv1d(64, 128, kernel_size=3, stride=1, padding=1),  # 76 -> 76
+    #         nn.ReLU(inplace=True),
+    #     )
+    #     self.to_z = nn.Linear(128 * 76, z_dim)
+    #
+    #     # -------- Decoder --------
+    #     self.from_z = nn.Linear(z_dim, 128 * 76)
+    #     self.dec = nn.Sequential(
+    #         nn.ConvTranspose1d(128, 64, kernel_size=3, stride=1, padding=1),  # 76 -> 76
+    #         nn.ReLU(inplace=True),
+    #         nn.ConvTranspose1d(64, 32, kernel_size=5, stride=2, padding=2),  # 76 -> 151
+    #         nn.ReLU(inplace=True),
+    #         nn.ConvTranspose1d(32, in_ch, kernel_size=5, stride=2, padding=2),  # 151 -> 301
+    #         nn.Sigmoid(),  # если вход нормирован [0,1]; иначе замените
+    #     )
+    #
+    # def encode(self, x):  # x: (B, 8, 301)
+    #     h = self.enc(x)  # (B, 128, 38)
+    #     z = self.to_z(h.view(x.size(0), -1))  # (B, z_dim)
+    #     return z
+    #
+    # def decode(self, z):  # z: (B, z_dim)
+    #     h = self.from_z(z).view(z.size(0), 128, 76)
+    #     x_hat = self.dec(h)  # (B, 8, 301)
+    #     return x_hat
+    #
+    # def forward(self, x):
+    #     z = self.encode(x)
+    #     x_hat = self.decode(z)
+    #     return x_hat, z
+    def __init__(self, in_ch=8, z_dim=32):
         super().__init__()
-        self.patch_size = 16
-        self.num_patches = (seq_len + self.patch_size - 1) // self.patch_size
-        self.patch_embed = nn.Conv1d(input_channels, 128, kernel_size=self.patch_size, stride=self.patch_size)
-
-        self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(
-                d_model=128,
-                nhead=8,
-                dim_feedforward=512
-            ),
-            num_layers=4
+        # -------- Encoder --------
+        self.enc = nn.Sequential(
+            nn.Conv1d(in_ch, 32, kernel_size=5, stride=2, padding=2),  # 301 -> 151
+            nn.SiLU(),
+            nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2),  # 151 -> 76
+            nn.SiLU(),
+            nn.Conv1d(64, 128, kernel_size=3, stride=1, padding=1),  # 76 -> 76
+            nn.SiLU(),
+            nn.Conv1d(128, 256, kernel_size=3, stride=2, padding=1),  # 76 -> 38  (новый слой)
+            nn.SiLU(),
+            nn.Conv1d(256, 256, kernel_size=3, stride=1, padding=1),  # 38 -> 38  (новый слой)
+            nn.SiLU(),
+            nn.Conv1d(256, 512, kernel_size=3, stride=2, padding=1),  # 38 -> 19  (новый слой)
+            nn.SiLU(),
+            nn.Conv1d(512, 512, kernel_size=3, stride=1, padding=1),  # 19 -> 19  (новый слой)
+            nn.SiLU(),
+        )
+        # стало 128 * 38 признаков
+        self.to_z = nn.Sequential(
+            nn.Linear(512 * 19, z_dim),
+            # nn.Softsign(),
+            # nn.Linear(1024, z_dim)
         )
 
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(128),
-            nn.Linear(128, num_classes)
+        # -------- Decoder --------
+        self.from_z = nn.Sequential(
+            nn.Linear(z_dim, 512 * 19),
+            # nn.Softsign(),
+            # nn.Linear(1024, 512 * 19)
         )
+        self.dec = nn.Sequential(
+            # 38 -> 76 (нужен output_padding=1 для точной длины)
+            nn.ConvTranspose1d(512, 512, kernel_size=3, stride=1, padding=1),  # 19 -> 38  (новый слой)
+            nn.SiLU(),
+            nn.ConvTranspose1d(512, 256, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.SiLU(),
+            # 38 -> 76 (нужен output_padding=1 для точной длины)
+            nn.ConvTranspose1d(256, 256, kernel_size=3, stride=1, padding=1),  # 38 -> 38  (новый слой)
+            nn.SiLU(),
+            nn.ConvTranspose1d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=1),
+            nn.SiLU(),
+            # 76 -> 76
+            nn.ConvTranspose1d(128, 64, kernel_size=3, stride=1, padding=1),
+            nn.SiLU(),
+            # 76 -> 151
+            nn.ConvTranspose1d(64, 32, kernel_size=5, stride=2, padding=2),
+            nn.SiLU(),
+            # 151 -> 301
+            nn.ConvTranspose1d(32, in_ch, kernel_size=5, stride=2, padding=2),
+            nn.Sigmoid()
+        )
+
+    def encode(self, x):  # x: (B, 8, 301)
+        h = self.enc(x)  # (B, 128, 38)
+        z = self.to_z(h.view(x.size(0), -1))  # (B, z_dim)
+        return z
+
+    def decode(self, z):  # z: (B, z_dim)
+        h = self.from_z(z).view(z.size(0), 512, 19)  # (B, 128, 38)
+        x_hat = self.dec(h)  # (B, 8, 301)
+        return x_hat
 
     def forward(self, x):
-        # x: [B, C, T]
-        x = self.patch_embed(x)  # [B, 128, num_patches]
-        x = x.permute(2, 0, 1)  # [num_patches, B, 128]
-        x = self.transformer(x)
-        x = x.mean(dim=0)  # Усреднение по патчам
-        return self.classifier(x)
+        z = self.encode(x)
+        x_hat = self.decode(z)
+        return x_hat, z
 
+    # def __init__(self, in_ch=8, z_dim=32):
+    #     super().__init__()
+    #     # -------- Encoder --------
+    #     # 301 -> 152 -> 76 -> 76  (после паддинга до 304 будет 304->152->76)
+    #     self.enc = nn.Sequential(
+    #         nn.Conv1d(in_ch, 32, kernel_size=5, stride=2, padding=2, groups=in_ch),  # ~L/2
+    #         nn.BatchNorm1d(32),
+    #         nn.Tanh(),
+    #         nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2, groups=in_ch),     # ~L/4
+    #         nn.BatchNorm1d(64),
+    #         nn.Tanh(),
+    #         nn.Conv1d(64, 128, kernel_size=3, stride=1, padding=1, groups=in_ch),    # длина та же
+    #         nn.BatchNorm1d(128),
+    #         nn.Tanh(),
+    #     )
+    #     # после двух stride=2 получим L_enc = ceil(L/4). Для L=304 это 76.
+    #     self.to_z = nn.Linear(128 * 76, z_dim)
+    #
+    #     # -------- Decoder --------
+    #     self.from_z = nn.Linear(z_dim, 128 * 76)
+    #     self.dec = nn.Sequential(
+    #         nn.BatchNorm1d(128),
+    #         nn.ConvTranspose1d(128, 64, kernel_size=5, stride=2, padding=2, output_padding=0, groups=in_ch), # 76 -> 152
+    #         nn.Tanh(),
+    #         nn.BatchNorm1d(64),
+    #         nn.ConvTranspose1d(64, 32, kernel_size=5, stride=2, padding=2, output_padding=0, groups=in_ch),  # 152 -> 304
+    #         nn.Tanh(),
+    #         nn.BatchNorm1d(32),
+    #         nn.Conv1d(32, in_ch, kernel_size=3, stride=1, padding=1, groups=in_ch),  # 304 -> 304 (чистка артефактов)
+    #         nn.Sigmoid(),  # если вход нормирован в [0,1]
+    #     )
+    #
+    # @staticmethod
+    # def _pad_to_multiple_of_4(x):
+    #     # x: (B,C,L). Паддим справа нулями до ближайшей длины, кратной 4
+    #     L = x.size(-1)
+    #     need = (4 - (L % 4)) % 4
+    #     if need == 0:
+    #         return x, 0
+    #     return F.pad(x, (0, need)), need
+    #
+    # def encode(self, x):
+    #     x_pad, pad = self._pad_to_multiple_of_4(x)          # -> L=304
+    #     h = self.enc(x_pad)                                  # (B,128,76)
+    #     z = self.to_z(h.flatten(1))                          # (B,z_dim)
+    #     return z, pad
+    #
+    # def decode(self, z, pad):
+    #     h = self.from_z(z).view(z.size(0), 128, 76)          # (B,128,76)
+    #     x_hat_pad = self.dec(h)                              # (B,8,304)
+    #     # срезаем паддинг обратно к исходной длине 301
+    #     L_target = 301
+    #     x_hat = x_hat_pad[..., :L_target]
+    #     return x_hat
+    #
+    # def forward(self, x):
+    #     z, pad = self.encode(x)          # pad храню на случай, если захочешь другой L
+    #     x_hat = self.decode(z, pad)
+    #     return x_hat, z
+    #
 
+class RNNAutoencoder(nn.Module):
+    """
+    RNN (LSTM) autoencoder для входа (B, C, T).
+    - Encoder: LSTM -> латент z (h_T)
+    - Decoder: LSTM с пошаговой генерацией длиной T
+    """
+    def __init__(self, in_ch: int, hidden: int = 128, z_dim: int = 128, num_layers: int = 1, use_gru: bool = False):
+        super().__init__()
+        self.in_ch = in_ch
+        self.hidden = hidden
+        self.z_dim = z_dim
+        self.num_layers = num_layers
+
+        RNN = nn.GRU if use_gru else nn.LSTM
+
+        # Encoder: (B, T, C) -> h_T (num_layers, B, hidden)
+        self.encoder = RNN(input_size=in_ch, hidden_size=hidden, num_layers=num_layers, batch_first=True, bidirectional=False)
+        self.enc_to_z = nn.Linear(hidden, z_dim)
+
+        # Decoder init из латента
+        self.z_to_h0 = nn.Linear(z_dim, hidden * num_layers)  # разворачиваем в (num_layers, B, hidden)
+        self.z_to_c0 = None if use_gru else nn.Linear(z_dim, hidden * num_layers)
+
+        # Decoder RNN
+        self.decoder = RNN(input_size=in_ch, hidden_size=hidden, num_layers=num_layers, batch_first=True, bidirectional=False)
+
+        # Проекция скрытого состояния в выходной вектор признаков (размер C)
+        self.proj = nn.Linear(hidden, in_ch)
+
+        # Специальный токен старта декодера (learnable)
+        self.start_token = nn.Parameter(torch.zeros(1, 1, in_ch))
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, C, T) -> (B, T, C)
+        x_seq = x.transpose(1, 2)
+        out, h = self.encoder(x_seq)               # h: (num_layers, B, hidden) [+ c, если LSTM]
+        if isinstance(h, tuple):                   # LSTM: (h_n, c_n)
+            h_n, _ = h
+        else:                                      # GRU: h_n
+            h_n = h
+        h_last = h_n[-1]                           # (B, hidden)
+        z = self.enc_to_z(h_last)                  # (B, z_dim)
+        return z
+
+    def _init_decoder_state(self, z: torch.Tensor):
+        # z: (B, z_dim) -> начальные состояния decoder’а
+        B = z.size(0)
+        h0 = self.z_to_h0(z).view(self.num_layers, B, self.hidden)
+        if self.z_to_c0 is None:
+            return h0
+        c0 = self.z_to_c0(z).view(self.num_layers, B, self.hidden)
+        return (h0, c0)
+
+    @torch.no_grad()
+    def reconstruct(self, x: torch.Tensor) -> torch.Tensor:
+        """ Инференс без teacher forcing. """
+        self.eval()
+        z = self.encode(x)
+        return self.decode(z, T=x.size(-1), teacher_forcing_ratio=0.0)
+
+    def decode(self, z: torch.Tensor, T: int, teacher_forcing_ratio: float = 0.0, y_teacher: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Декодирование длиной T.
+        - teacher_forcing_ratio \in [0,1]
+        - y_teacher: (B, C, T) — «правильные» сдвинутые входы для teacher forcing
+        Возвращает: (B, C, T)
+        """
+        B = z.size(0)
+        state = self._init_decoder_state(z)  # (num_layers,B,H) или tuple для LSTM
+
+        # Стартовый вход: learnable start token, размноженный по батчу
+        inp = self.start_token.expand(B, 1, self.in_ch)  # (B,1,C)
+
+        outputs = []
+        for t in range(T):
+            out_t, state = self.decoder(inp, state)      # out_t: (B,1,H)
+            y_t = self.proj(out_t)                       # (B,1,C)
+            outputs.append(y_t)
+
+            # решаем, чем кормить следующий шаг
+            if self.training and y_teacher is not None and torch.rand(1).item() < teacher_forcing_ratio:
+                next_inp = y_teacher.transpose(1, 2)[:, t:t+1, :]  # (B,1,C)
+            else:
+                next_inp = y_t.detach()  # собственный предыдущий прогноз
+            inp = next_inp
+
+        y_hat = torch.cat(outputs, dim=1)     # (B,T,C)
+        return y_hat.transpose(1, 2).contiguous()  # -> (B,C,T)
+
+    def forward(self, x: torch.Tensor, teacher_forcing_ratio: float = 0.5) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Тренировочный проход с teacher forcing (по умолчанию 0.5).
+        Возврат: (x_hat, z)
+        """
+        z = self.encode(x)
+        x_hat = self.decode(z, T=x.size(-1), teacher_forcing_ratio=teacher_forcing_ratio, y_teacher=x)
+        return x_hat, z
