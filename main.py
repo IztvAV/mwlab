@@ -4,6 +4,9 @@ from pathlib import Path
 
 import pandas as pd
 from sklearn.ensemble import GradientBoostingRegressor, HistGradientBoostingRegressor
+from torch.nn import MSELoss, L1Loss
+
+from common import check_metrics
 from filters.mwfilter_optim.base import FastMN2toSParamCalculation
 from mwlab.nn.scalers import MinMaxScaler, StdScaler
 from mwlab import TouchstoneDataset, TouchstoneLDataModule, TouchstoneDatasetAnalyzer
@@ -221,8 +224,66 @@ def fine_tune_model(inference_model: nn.Module, target_input: MWFilter, meta: di
     return inference_model
 
 
-def main():
-    work_model = common.WorkModel(configs.ENV_DATASET_PATH, configs.BASE_DATASET_SIZE, SamplerTypes.SAMPLER_STD)
+def main_ae():
+    sampler_configs = {
+        "pss_origin": PSShift(phi11=0, phi21=0, theta11=0, theta21=0),
+        "pss_shifts_delta": PSShift(phi11=0.00000001, phi21=0.00000001, theta11=0.00000001, theta21=0.00000001),
+        "cm_shifts_delta": CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=5e-3,
+                                    parasitic_coupling=5e-3),
+        "samplers_size": configs.BASE_DATASET_SIZE,
+    }
+    work_model = common.AEWorkModel(configs.ENV_DATASET_PATH, sampler_configs, SamplerTypes.SAMPLER_SOBOL)
+    # common.plot_distribution(work_model.ds, num_params=len(work_model.ds_gen.origin_filter.coupling_matrix.links))
+    # plt.show()
+
+    codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
+                                                 keys_for_analysis=[f"m_{r}_{c}" for r, c in
+                                                                    work_model.orig_filter.coupling_matrix.links])
+    codec = codec
+    work_model.setup(
+        model_name="cae",
+        model_cfg={"in_ch":len(codec.y_channels), "z_dim":work_model.orig_filter.order*5+4},
+        dm_codec=codec
+    )
+
+    lit_model = work_model.train(
+        optimizer_cfg={"name": "AdamW", "lr": 0.0005371, "weight_decay": 1e-2},
+        scheduler_cfg={"name": "StepLR", "step_size": 24, "gamma": 0.01},
+        loss_fn=L1Loss()
+    )
+
+    # Загружаем лучшую модель
+    inference_model = work_model.inference(lit_model.trainer.checkpoint_callback.best_model_path)
+    # inference_model = work_model.inference("saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=24-train_loss=0.00163-val_loss=0.00146-val_r2=0.99352-val_mse=0.00002-val_mae=0.00146-batch_size=32-base_dataset_size=1000000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
+
+    check_metrics(trainer=work_model.trainer, model=inference_model, dm=work_model.dm)
+
+    # Предсказываем фильтр из тестового датасета
+    orig_fil, pred_fil = inference_model.predict(work_model.dm, idx=0)
+    inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
+    plt.figure()
+    plt.plot(orig_fil.f, np.real(orig_fil.s[:, 0, 0]), orig_fil.f, np.real(pred_fil.s[:, 0, 0]),
+             orig_fil.f, np.imag(orig_fil.s[:, 0, 0]), orig_fil.f, np.imag(pred_fil.s[:, 0, 0]))
+    plt.legend(["real S11 orig", "real S11 pred", "imag S11 orig", "imag S11 pred"])
+    plt.title("S11")
+
+    plt.figure()
+    plt.plot(orig_fil.f, np.real(orig_fil.s[:, 1, 0]), orig_fil.f, np.real(pred_fil.s[:, 1, 0]),
+             orig_fil.f, np.imag(orig_fil.s[:, 1, 0]), orig_fil.f, np.imag(pred_fil.s[:, 1, 0]))
+    plt.legend(["real S21 orig", "real S21 pred", "imag S21 orig", "imag S21 pred"])
+    plt.title("S21")
+
+
+def main_extract_matrix():
+    sampler_configs = {
+        "pss_origin": PSShift(phi11=0.547, phi21=-1.0, theta11=0.01685, theta21=0.017),
+        "pss_shifts_delta": PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
+        # "cm_shifts_delta": CMShifts(self_coupling=1.8, mainline_coupling=0.3, cross_coupling=9e-2, parasitic_coupling=5e-3), # Параметры для реального фильтра
+        "cm_shifts_delta": CMShifts(self_coupling=0.5, mainline_coupling=0.1, cross_coupling=5e-3,
+                                    parasitic_coupling=5e-3),
+        "samplers_size": configs.BASE_DATASET_SIZE,
+    }
+    work_model = common.WorkModel(configs.ENV_DATASET_PATH, sampler_configs, SamplerTypes.SAMPLER_STD)
     # sensivity.run(work_model.orig_filter)
     # common.plot_distribution(work_model.ds, num_params=len(work_model.ds_gen.origin_filter.coupling_matrix.links))
     # plt.show()
@@ -251,23 +312,10 @@ def main():
     #     dm_codec=codec
     # )
     work_model.setup(
-        model_name="simple_opt",
+        model_name="cae",
         model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
         dm_codec=codec
     )
-
-    weights = []
-    imp = [(1, 1), (2, 11), (3, 3), (3, 4), (4, 4), (4, 5), (5, 5), (5, 6), (6, 6), (7, 7), (8, 8), (10, 10)]
-    for i, j in work_model.orig_filter.coupling_matrix.links:
-        if (i, j) in imp:
-            weights.append(1.25)
-        else:
-            weights.append(1)
-        # if j == i+1:
-        #     weights.append(1.25)
-        # else:
-        #     weights.append(1)
-    weights = torch.tensor(weights, dtype=torch.float32)
 
     lit_model = work_model.train(
         # optimizer_cfg={"name": "AdamW", "lr": 0.0009400000000000001, "weight_decay": 1e-5},
@@ -353,19 +401,6 @@ def main():
         # plt.plot(pred_fil.f_norm, orig_fil.s_db[:, 0, 0], label='S11 origin')
         # plt.plot(pred_fil.f_norm, orig_fil.s_db[:, 1, 0], label='S21 origin')
         # plt.plot(pred_fil.f_norm, orig_fil.s_db[:, 1, 1], label='S22 origin')
-        #
-        fast_calc = FastMN2toSParamCalculation(matrix_order=pred_fil.coupling_matrix.matrix_order,
-                                               wlist=pred_fil.f_norm,
-                                               Q=pred_fil.Q,
-                                               fbw=pred_fil.fbw)
-
-    # Предсказываем эталонный фильтр
-    # orig_fil = work_model.ds_gen.origin_filter
-    # pred_prms = inference_model.predict_x(orig_fil)
-    # corrected = predict_with_corrector(np.array(list(pred_prms.values())).reshape(1, -1), "saved_models\\EAMU4-KuIMUXT3-BPFC1\\ml-correctors")
-    # corr_prms = dict(zip(pred_prms.keys(), list(corrected.reshape(-1))))
-    # pred_fil = inference_model.create_filter_from_prediction(orig_fil, pred_prms, work_model.meta)
-    # inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
 
 
     # Предсказываем эталонный фильтр
@@ -425,7 +460,7 @@ def plot_pl_csv_wide(csv_path, outdir="artifacts_opt3"):
 
 
 if __name__ == "__main__":
-    # csv_path = "lightning_logs/simple_opt_csv/version_0/metrics.csv"
+    # csv_path = "lightning_logs/cae_csv/version_71/metrics.csv"
     # plot_pl_csv_wide(csv_path)
-    main()
+    main_ae()
     plt.show()
