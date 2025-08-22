@@ -105,10 +105,21 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         pred_fil.plot_s_db(m=1, n=1, label='S22 pred', ls=':')
 
 
+def flip_freq(x: torch.Tensor) -> torch.Tensor:
+    # x: (..., F)
+    return torch.flip(x, dims=(-1,))
+
+class RandomFlipFreq:
+    def __init__(self, p=0.5): self.p = p
+    def __call__(self, x):
+        return flip_freq(x) if torch.rand(()) < self.p else x
+
+
 class MWFilterBaseLMWithMetricsAE(MWFilterBaseLMWithMetrics):
     def __init__(self, meta, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.meta = meta
+        self.rand_flip = RandomFlipFreq(p=0.1)
 
     def predict_for(self, dm: TouchstoneLDataModule, idx: int, with_scalers=True) -> tuple[MWFilter, MWFilter]:
         # Возьмем для примера первый touchstone-файл из тестового набора данных
@@ -180,22 +191,48 @@ class MWFilterBaseLMWithMetricsAE(MWFilterBaseLMWithMetrics):
                 torch.stack([S21, S22], dim=1)  # (B, 2, F)
             ], dim=1)  # (B, 2, 2, F)
             return S
+
+        def anti_checker_correct(y_true, y_pred, w=0.1):
+            err = y_pred - y_true  # (B,C,F)
+            F = err.size(-1)
+            alt = torch.tensor([1, -1], device=err.device, dtype=err.dtype).repeat(F // 2 + 1)[:F]
+            alt = alt.view(1, 1, F)
+            # энергия на π (период 2): эквивалент умножению на (-1)^n
+            alt_energy = ((err * alt) ** 2).mean()
+            return w * alt_energy
         x, y, _ = self._split_batch(batch)
+        # x = self.rand_flip(x)
         preds_forward = self(x)
-        preds_backward = self(torch.flip(x, dims=(-1,)))
-        preds_backward = torch.flip(preds_backward, dims=(-1,))
+        # preds_backward = self(torch.flip(x, dims=(-1,)))
+        # preds_backward = torch.flip(preds_backward, dims=(-1,))
         if self.scaler_in is not None:
             x = self.scaler_in(x)
-        loss = self.loss_fn(preds_forward, x) + self.loss_fn(preds_backward, x)
+        loss = self.loss_fn(preds_forward, x) + anti_checker_correct(x, preds_forward, w=0.2)
         if self.scaler_in is not None:
             x = self.scaler_in.inverse(x)
             preds_forward = self.scaler_in.inverse(preds_forward)
-            preds_backward = self.scaler_in.inverse(preds_backward)
-        s_x = sparams_to_complex(x)
-        s_preds_forward = sparams_to_complex(preds_forward)
-        s_preds_backward = sparams_to_complex(preds_backward)
-        loss += 0.1*(self.loss_fn(torch.log10(torch.abs(s_x)+1e-5), torch.log10(torch.abs(s_preds_forward)+1e-5)) + self.loss_fn(torch.log10(torch.abs(s_x)+1e-5), torch.log10(torch.abs(s_preds_backward)+1e-5)))
+            # preds_backward = self.scaler_in.inverse(preds_backward)
+        # s_x = sparams_to_complex(x)
+        # s_preds_forward = sparams_to_complex(preds_forward)
+        # s_preds_backward = sparams_to_complex(preds_backward)
+        # loss += 0.01*torch.nn.functional.l1_loss(torch.log10(torch.abs(s_x)+1e-3), torch.log10(torch.abs(s_preds_forward)+1e-3))
         return loss
+        # x, y, _ = self._split_batch(batch)
+        # preds_forward = self(x)
+        # preds_backward = self(torch.flip(x, dims=(-1,)))
+        # preds_backward = torch.flip(preds_backward, dims=(-1,))
+        # if self.scaler_in is not None:
+        #     x = self.scaler_in(x)
+        # loss = 0.5*(self.loss_fn(preds_forward, x) + self.loss_fn(preds_backward, x))
+        # if self.scaler_in is not None:
+        #     x = self.scaler_in.inverse(x)
+        #     preds_forward = self.scaler_in.inverse(preds_forward)
+        #     preds_backward = self.scaler_in.inverse(preds_backward)
+        # s_x = sparams_to_complex(x)
+        # s_preds_forward = sparams_to_complex(preds_forward)
+        # s_preds_backward = sparams_to_complex(preds_backward)
+        # loss += 0.01*0.5*(self.loss_fn(torch.log10(torch.abs(s_x)+1e-5), torch.log10(torch.abs(s_preds_forward)+1e-5)) + self.loss_fn(torch.log10(torch.abs(s_x)+1e-5), torch.log10(torch.abs(s_preds_backward)+1e-5)))
+        # return loss
 
     # ======================================================================
     #                        validation / test loop
@@ -239,8 +276,10 @@ class MWFilterBaseLMWithMetricsAE(MWFilterBaseLMWithMetrics):
     def plot_origin_vs_prediction(self, origin_fil: MWFilter, pred_fil: MWFilter):
         plt.figure()
         origin_fil.plot_s_db(m=0, n=0, label='S11 origin')
+        origin_fil.plot_s_db(m=0, n=1, label='S12 origin')
         origin_fil.plot_s_db(m=1, n=0, label='S21 origin')
         origin_fil.plot_s_db(m=1, n=1, label='S22 origin')
         pred_fil.plot_s_db(m=0, n=0, label='S11 pred', ls=':')
+        pred_fil.plot_s_db(m=0, n=1, label='S12 pred', ls=':')
         pred_fil.plot_s_db(m=1, n=0, label='S21 pred', ls=':')
         pred_fil.plot_s_db(m=1, n=1, label='S22 pred', ls=':')

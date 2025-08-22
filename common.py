@@ -440,6 +440,9 @@ class AEWorkModel(WorkModel):
         elif name=="rae":
             model = models.RNNAutoencoder(**kwargs)
             return model
+        elif name=="imp_cae":
+            model = models.ConvAE_ShuffleDet(**kwargs)
+            return model
         else:
             ValueError(f"Unknown model name: {name}")
 
