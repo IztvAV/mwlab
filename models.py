@@ -1872,6 +1872,81 @@ class TorchvisionModels(nn.Module):
         return x_2d
 
 
+# --- Фиксированный depthwise FIR: сглаживает высокочастотную рябь после апсемплинга ---
+class AntiAlias1D(nn.Module):
+    """
+    Простой низкочастотный depthwise FIR (по каналам), taps=5 (биномиальный [1,4,6,4,1]/16).
+    Не обучаемый, длину не меняет (padding=taps//2).
+    """
+    def __init__(self, channels: int, taps: int = 5):
+        super().__init__()
+        assert taps in (3, 5, 7), "Рекомендуемые taps: 3,5,7"
+        if taps == 3:
+            k = torch.tensor([1., 2., 1.])
+        elif taps == 5:
+            k = torch.tensor([1., 4., 6., 4., 1.])
+        else:  # 7
+            k = torch.tensor([1., 6., 15., 20., 15., 6., 1.])
+        k = (k / k.sum()).view(1, 1, -1)                   # (1,1,K)
+
+        self.fir = nn.Conv1d(
+            channels, channels, kernel_size=taps,
+            padding=taps // 2, groups=channels, bias=False
+        )
+        # with torch.no_grad():
+        #     self.fir.weight.copy_(k.repeat(channels, 1, 1))  # (C,1,K)
+        # for p in self.fir.parameters():
+        #     p.requires_grad = False
+
+    def forward(self, x):
+        return self.fir(x)
+
+
+# --- Обёртка над ConvTranspose1d: deconv -> AntiAlias -> активация ---
+class DeconvAA1D(nn.Module):
+    def __init__(self, in_ch, out_ch, kernel_size, stride, padding, output_padding=0,
+                 taps=5, act=nn.SiLU):
+        super().__init__()
+        self.deconv = nn.ConvTranspose1d(
+            in_ch, out_ch, kernel_size=kernel_size, stride=stride,
+            padding=padding, output_padding=output_padding
+        )
+        self.aa = AntiAlias1D(out_ch, taps=taps)
+        self.act = act()
+
+    def forward(self, x):
+        x = self.deconv(x)
+        x = self.aa(x)
+        x = self.act(x)
+        return x
+
+
+# --- Свёртка с reflect-паддингом (лучше краев, чем zero-pad) ---
+class ReflectConv1d(nn.Module):
+    def __init__(self, in_ch, out_ch, kernel_size=3, stride=1, bias=True):
+        super().__init__()
+        self.pad = (kernel_size - 1) // 2
+        self.stride = stride
+        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size=kernel_size, stride=stride,
+                              padding=0, bias=bias)
+    def forward(self, x):
+        if self.pad > 0:
+            x = F.pad(x, (self.pad, self.pad), mode='reflect')
+        return self.conv(x)
+
+# --- Блок апсемплинга: интерполяция + Conv1d(+reflect) + SiLU ---
+class UpBlock1D(nn.Module):
+    def __init__(self, in_ch, out_ch, k=3):
+        super().__init__()
+        self.conv = ReflectConv1d(in_ch, out_ch, kernel_size=k, stride=1, bias=True)
+        self.act  = nn.SiLU()
+    def forward(self, x, target_len):
+        # Либо scale_factor=2, либо точный target_len — удобнее второе, чтобы попасть в 151/301
+        x = F.interpolate(x, size=target_len, mode='linear', align_corners=False)
+        x = self.conv(x)
+        return self.act(x)
+
+
 class ConvAE(nn.Module):
     # def __init__(self, in_ch=8, z_dim=32):
     #     super().__init__()
@@ -1911,7 +1986,7 @@ class ConvAE(nn.Module):
     #     z = self.encode(x)
     #     x_hat = self.decode(z)
     #     return x_hat, z
-    def __init__(self, in_ch=8, z_dim=32):
+    def __init__(self, in_ch=8, z_dim=32, aa_taps=5):
         super().__init__()
         # -------- Encoder --------
         self.enc = nn.Sequential(
@@ -1933,15 +2008,17 @@ class ConvAE(nn.Module):
         # стало 128 * 38 признаков
         self.to_z = nn.Sequential(
             nn.Linear(512 * 19, z_dim),
-            # nn.Softsign(),
-            # nn.Linear(1024, z_dim)
+            # nn.Linear(512 * 19, 256),
+            # nn.SiLU(),
+            # nn.Linear(256, z_dim),
         )
 
         # -------- Decoder --------
         self.from_z = nn.Sequential(
             nn.Linear(z_dim, 512 * 19),
-            # nn.Softsign(),
-            # nn.Linear(1024, 512 * 19)
+            # nn.Linear(z_dim, 256),
+            # nn.SiLU(),
+            # nn.Linear(256, 512 * 19),
         )
         self.dec = nn.Sequential(
             # 38 -> 76 (нужен output_padding=1 для точной длины)
@@ -1979,19 +2056,114 @@ class ConvAE(nn.Module):
         z = self.encode(x)
         x_hat = self.decode(z)
         return x_hat, z
+    # def __init__(self, in_ch=8, z_dim=32, out_act='sigmoid'):
+    #     super().__init__()
+    #
+    #     # ---------- Encoder (301 -> 19) ----------
+    #     self.enc = nn.Sequential(
+    #         ReflectConv1d(in_ch, 32, kernel_size=5, stride=2),  # 301 -> 151
+    #         nn.SiLU(),
+    #         ReflectConv1d(32, 64, kernel_size=5, stride=2),  # 151 -> 76
+    #         nn.SiLU(),
+    #         ReflectConv1d(64, 128, kernel_size=3, stride=1),  # 76  -> 76
+    #         nn.SiLU(),
+    #         ReflectConv1d(128, 256, kernel_size=3, stride=2),  # 76  -> 38
+    #         nn.SiLU(),
+    #         ReflectConv1d(256, 256, kernel_size=3, stride=1),  # 38  -> 38
+    #         nn.SiLU(),
+    #         ReflectConv1d(256, 512, kernel_size=3, stride=2),  # 38  -> 19
+    #         nn.SiLU(),
+    #         ReflectConv1d(512, 512, kernel_size=3, stride=1),  # 19  -> 19
+    #         nn.SiLU(),
+    #     )
+    #
+    #     self.to_z = nn.Linear(512 * 19, z_dim)
+    #     self.from_z = nn.Linear(z_dim, 512 * 19)
+    #
+    #     # ---------- Decoder: только Upsample + Conv1d ----------
+    #     self.pre = nn.Sequential(ReflectConv1d(512, 512, kernel_size=3, stride=1), nn.SiLU())  # 19 -> 19
+    #     self.up1 = UpBlock1D(512, 256, k=3)  # 19  -> 38
+    #     self.ref1 = nn.Sequential(ReflectConv1d(256, 256, kernel_size=3, stride=1), nn.SiLU())
+    #
+    #     self.up2 = UpBlock1D(256, 128, k=3)  # 38  -> 76
+    #     self.ref2 = nn.Sequential(ReflectConv1d(128, 128, kernel_size=3, stride=1), nn.SiLU())
+    #
+    #     self.up3 = UpBlock1D(128, 64, k=5)  # 76  -> 151
+    #     self.ref3 = nn.Sequential(ReflectConv1d(64, 64, kernel_size=3, stride=1), nn.SiLU())
+    #
+    #     self.up4 = UpBlock1D(64, 32, k=5)  # 151 -> 301
+    #     self.ref4 = nn.Sequential(ReflectConv1d(32, 32, kernel_size=3, stride=1), nn.SiLU())
+    #
+    #     self.out = ReflectConv1d(32, in_ch, kernel_size=5, stride=1)
+    #
+    #     if out_act == 'sigmoid':
+    #         self.out_act = nn.Sigmoid()
+    #     elif out_act == 'tanh':
+    #         self.out_act = nn.Tanh()
+    #     else:
+    #         self.out_act = nn.Identity()
+    #
+    #     # ---------- API ----------
+    #
+    # def encode(self, x):  # x: (B, 8, 301)
+    #     # Сохраним длины на ключевых уровнях, чтобы точно восстановиться
+    #     e1 = self.enc[0:2](x)  # 151
+    #     e2 = self.enc[2:4](e1)  # 76
+    #     e3 = self.enc[4:6](e2)  # 76
+    #     e4 = self.enc[6:8](e3)  # 38
+    #     e5 = self.enc[8:10](e4)  # 38
+    #     e6 = self.enc[10:12](e5)  # 19
+    #     e7 = self.enc[12:](e6)  # 19
+    #
+    #     h = e7
+    #     z = self.to_z(h.flatten(1))
+    #     # Вернём нужные целевые длины (берём из фактических тензоров)
+    #     lens = {
+    #         "L1": x.size(-1),  # 301
+    #         "L2": e1.size(-1),  # 151
+    #         "L3": e2.size(-1),  # 76
+    #         "L4": e4.size(-1),  # 38
+    #         "L5": e7.size(-1),  # 19 (бутылочное)
+    #     }
+    #     return z, lens
+    #
+    # def decode(self, z, lens):
+    #     B = z.size(0)
+    #     h = self.from_z(z).view(B, 512, lens["L5"])  # 19
+    #     h = self.pre(h)  # 19
+    #
+    #     h = self.up1(h, target_len=lens["L4"])  # 19 -> 38
+    #     h = self.ref1(h)  # 38
+    #
+    #     h = self.up2(h, target_len=lens["L3"])  # 38 -> 76
+    #     h = self.ref2(h)  # 76
+    #
+    #     h = self.up3(h, target_len=lens["L2"])  # 76 -> 151
+    #     h = self.ref3(h)  # 151
+    #
+    #     h = self.up4(h, target_len=lens["L1"])  # 151 -> 301
+    #     h = self.ref4(h)  # 301
+    #
+    #     y = self.out(h)  # 301
+    #     return self.out_act(y)
+    #
+    # def forward(self, x):
+    #     z, lens = self.encode(x)
+    #     x_hat = self.decode(z, lens)
+    #     return x_hat, z
 
     # def __init__(self, in_ch=8, z_dim=32):
     #     super().__init__()
     #     # -------- Encoder --------
     #     # 301 -> 152 -> 76 -> 76  (после паддинга до 304 будет 304->152->76)
     #     self.enc = nn.Sequential(
-    #         nn.Conv1d(in_ch, 32, kernel_size=5, stride=2, padding=2, groups=in_ch),  # ~L/2
+    #         nn.Conv1d(in_ch, 32, kernel_size=5, stride=2, padding=2),  # ~L/2
     #         nn.BatchNorm1d(32),
     #         nn.Tanh(),
-    #         nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2, groups=in_ch),     # ~L/4
+    #         nn.Conv1d(32, 64, kernel_size=5, stride=2, padding=2),     # ~L/4
     #         nn.BatchNorm1d(64),
     #         nn.Tanh(),
-    #         nn.Conv1d(64, 128, kernel_size=3, stride=1, padding=1, groups=in_ch),    # длина та же
+    #         nn.Conv1d(64, 128, kernel_size=3, stride=1, padding=1),    # длина та же
     #         nn.BatchNorm1d(128),
     #         nn.Tanh(),
     #     )
@@ -2002,13 +2174,13 @@ class ConvAE(nn.Module):
     #     self.from_z = nn.Linear(z_dim, 128 * 76)
     #     self.dec = nn.Sequential(
     #         nn.BatchNorm1d(128),
-    #         nn.ConvTranspose1d(128, 64, kernel_size=5, stride=2, padding=2, output_padding=0, groups=in_ch), # 76 -> 152
+    #         nn.ConvTranspose1d(128, 64, kernel_size=5, stride=2, padding=2, output_padding=0), # 76 -> 152
     #         nn.Tanh(),
     #         nn.BatchNorm1d(64),
-    #         nn.ConvTranspose1d(64, 32, kernel_size=5, stride=2, padding=2, output_padding=0, groups=in_ch),  # 152 -> 304
+    #         nn.ConvTranspose1d(64, 32, kernel_size=5, stride=2, padding=2, output_padding=0),  # 152 -> 304
     #         nn.Tanh(),
     #         nn.BatchNorm1d(32),
-    #         nn.Conv1d(32, in_ch, kernel_size=3, stride=1, padding=1, groups=in_ch),  # 304 -> 304 (чистка артефактов)
+    #         nn.Conv1d(32, in_ch, kernel_size=3, stride=1, padding=1),  # 304 -> 304 (чистка артефактов)
     #         nn.Sigmoid(),  # если вход нормирован в [0,1]
     #     )
     #
@@ -2039,7 +2211,8 @@ class ConvAE(nn.Module):
     #     z, pad = self.encode(x)          # pad храню на случай, если захочешь другой L
     #     x_hat = self.decode(z, pad)
     #     return x_hat, z
-    #
+
+
 
 class RNNAutoencoder(nn.Module):
     """
@@ -2137,4 +2310,136 @@ class RNNAutoencoder(nn.Module):
         """
         z = self.encode(x)
         x_hat = self.decode(z, T=x.size(-1), teacher_forcing_ratio=teacher_forcing_ratio, y_teacher=x)
+        return x_hat, z
+
+# ---------- детерминированный reflect-pad 1D (без F.pad(..., mode="reflect")) ----------
+def reflect_pad1d_det(x: torch.Tensor, pad: int) -> torch.Tensor:
+    # x: (B, C, L)
+    if pad == 0:
+        return x
+    B, C, L = x.shape
+    if pad >= L:
+        raise ValueError(f"reflect_pad1d_det: pad ({pad}) must be < input length ({L}).")
+    left  = x[..., 1:pad+1].flip(-1)
+    right = x[..., L - pad - 1 : L - 1].flip(-1)
+    return torch.cat([left, x, right], dim=-1)
+
+class DetReflectConv1d(nn.Module):
+    """Conv1d c детерминированным reflect-паддингом."""
+    def __init__(self, in_ch, out_ch, kernel_size, stride=1, padding=0,
+                 dilation=1, groups=1, bias=True):
+        super().__init__()
+        self.pad = padding
+        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size=kernel_size, stride=stride,
+                              padding=0, dilation=dilation, groups=groups, bias=bias)
+    def forward(self, x):
+        if self.pad > 0:
+            x = reflect_pad1d_det(x, self.pad)
+        return self.conv(x)
+
+# ---------- детерминированный апсемплинг через pixel shuffle 1D ----------
+class UpShuffle1D(nn.Module):
+    """
+    Детерминированный апсемплинг в 2 раза:
+      1) 1x1 Conv1d: (B, Cin, L) -> (B, Cout*2, L)
+      2) Pixel Shuffle (1D): -> (B, Cout, 2L)
+      3) DetReflectConv1d + SiLU
+      4) Опц. обрезка до target_len (например, 2L-1)
+    """
+    def __init__(self, in_ch, out_ch, k=3):
+        super().__init__()
+        self.out_ch = out_ch
+        self.expand = nn.Conv1d(in_ch, out_ch * 2, kernel_size=1, bias=True)
+        self.refine = DetReflectConv1d(out_ch, out_ch, kernel_size=k, stride=1, padding=k//2)
+        self.act    = nn.SiLU()
+
+    def forward(self, x, target_len: int):
+        B, _, L = x.shape
+        # 1x1 conv -> (B, out_ch*2, L)
+        h = self.expand(x)
+        # pixel shuffle 1D: (B, C*2, L) -> (B, C, 2L)
+        h = h.view(B, self.out_ch, 2, L).permute(0, 1, 3, 2).contiguous().view(B, self.out_ch, 2*L)
+        # при необходимости обрежем до требуемой длины (например, 2L-1)
+        if h.size(-1) != target_len:
+            if h.size(-1) < target_len:
+                raise ValueError(f"UpShuffle1D produced length {h.size(-1)}, target {target_len} (can't pad deterministically here).")
+            h = h[..., :target_len]
+        # сгладить артефакты после апсемплинга
+        h = self.refine(h)
+        return self.act(h)
+
+# ---------- Твой AE: детермин. reflect + UpShuffle в декодере ----------
+class ConvAE_ShuffleDet(nn.Module):
+    def __init__(self, in_ch=8, z_dim=32):
+        super().__init__()
+        # -------- Encoder (Conv1d + детермин. reflect) --------
+        self.enc = nn.Sequential(
+            DetReflectConv1d(in_ch, 32,  kernel_size=5, stride=2, padding=2),  # 301 -> 151
+            nn.SiLU(),
+            DetReflectConv1d(32,  64,   kernel_size=5, stride=2, padding=2),  # 151 -> 76
+            nn.SiLU(),
+            DetReflectConv1d(64,  128,  kernel_size=3, stride=1, padding=1),  # 76 -> 76
+            nn.SiLU(),
+            DetReflectConv1d(128, 256,  kernel_size=3, stride=2, padding=1),  # 76 -> 38
+            nn.SiLU(),
+            DetReflectConv1d(256, 256,  kernel_size=3, stride=1, padding=1),  # 38 -> 38
+            nn.SiLU(),
+            DetReflectConv1d(256, 512,  kernel_size=3, stride=2, padding=1),  # 38 -> 19
+            nn.SiLU(),
+            DetReflectConv1d(512, 512,  kernel_size=3, stride=1, padding=1),  # 19 -> 19
+            nn.SiLU(),
+        )
+
+        # -------- Latent --------
+        self.to_z   = nn.Linear(512 * 19, z_dim)
+        self.from_z = nn.Linear(z_dim, 512 * 19)
+
+        # -------- Decoder (без upsample_linear1d, всё детерминированно) --------
+        self.dec_pre = nn.Sequential(                                  # 19 -> 19
+            DetReflectConv1d(512, 512, kernel_size=3, stride=1, padding=1),
+            nn.SiLU(),
+        )
+        self.up1  = UpShuffle1D(512, 256, k=3)                         # 19  -> 38
+        self.ref1 = nn.Sequential(
+            DetReflectConv1d(256, 256, kernel_size=3, stride=1, padding=1), nn.SiLU()
+        )                                                               # 38 -> 38
+
+        self.up2  = UpShuffle1D(256, 128, k=3)                         # 38  -> 76
+        # как у тебя: лёгкое сжатие каналов после этого уровня
+        self.ref2 = nn.Sequential(
+            DetReflectConv1d(128, 64, kernel_size=3, stride=1, padding=1), nn.SiLU()
+        )                                                               # 76 -> 76 (каналы 64)
+
+        self.up3  = UpShuffle1D(64,  32, k=5)                          # 76  -> 151 (2*76-1)
+        self.up4  = UpShuffle1D(32,  32, k=5)                          # 151 -> 301 (2*151-1)
+
+        self.out  = DetReflectConv1d(32, in_ch, kernel_size=5, stride=1, padding=2)
+        self.out_act = nn.Sigmoid()  # оставил как было; для Re/Im в [-1,1] лучше nn.Tanh()
+
+    # -------- API --------
+    def encode(self, x):  # x: (B, 8, 301)
+        h = self.enc(x)                       # (B, 512, 19)
+        z = self.to_z(h.view(x.size(0), -1))  # (B, z_dim)
+        return z
+
+    def decode(self, z):  # z: (B, z_dim)
+        B = z.size(0)
+        h = self.from_z(z).view(B, 512, 19)   # (B, 512, 19)
+        h = self.dec_pre(h)                   # 19
+
+        h = self.up1(h,  target_len=38)       # 19 -> 38
+        h = self.ref1(h)                      # 38
+
+        h = self.up2(h,  target_len=76)       # 38 -> 76
+        h = self.ref2(h)                      # 76 (C=64)
+
+        h = self.up3(h,  target_len=151)      # 76 -> 151 (обрезка на 1)
+        h = self.up4(h,  target_len=301)      # 151 -> 301 (обрезка на 1)
+
+        x_hat = self.out(h)                   # (B, in_ch, 301)
+        return self.out_act(x_hat)
+
+    def forward(self, x):
+        z = self.encode(x)
+        x_hat = self.decode(z)
         return x_hat, z

@@ -239,10 +239,15 @@ def main_ae():
     codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
                                                  keys_for_analysis=[f"m_{r}_{c}" for r, c in
                                                                     work_model.orig_filter.coupling_matrix.links])
+    codec.y_channels = ['S1_1.db', 'S1_2.db', 'S2_1.db', 'S2_2.db']
     codec = codec
     work_model.setup(
-        model_name="cae",
-        model_cfg={"in_ch":len(codec.y_channels), "z_dim":work_model.orig_filter.order*5+4},
+        # model_name="cae",
+        # model_cfg={"in_ch":len(codec.y_channels), "z_dim":work_model.orig_filter.order*6},
+        model_name="imp_cae",
+        model_cfg={"in_ch":len(codec.y_channels), "z_dim":work_model.orig_filter.order*6},
+        # model_name="mlp",
+        # model_cfg={},
         dm_codec=codec
     )
 
