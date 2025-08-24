@@ -1,13 +1,68 @@
 # mwlab/nn/scalers.py
 """
-Набор скейлеров для тензоров PyTorch.
+Скейлеры для тензоров PyTorch.
 
-* StdScaler   ― стандартизация по среднему и стандартному отклонению;
-* MinMaxScaler ― линейное приведение к [min_val, max_val].
+Данный модуль реализует несколько вариантов нормализации / масштабирования данных,
+аналогичных трансформерам из scikit-learn, но с поддержкой:
 
-Все классы поддерживают выбор измерений для агрегации
-и корректно работают с любым device / dtype входных данных.
+* произвольного выбора осей для вычисления статистик,
+* корректной работы с любыми dtype / device,
+* хранения параметров в buffer (совместимость с .to(), state_dict и т. п.).
+
+Доступные классы
+----------------
+* StdScaler
+    Стандартизация по среднему и стандартному отклонению:
+        forward(x) = (x - mean) / std
+        inverse(z) = z * std + mean
+
+* MinMaxScaler
+    Линейное масштабирование данных в заданный диапазон [a, b]:
+        forward(x) = (x - data_min) / (data_max - data_min) * (b - a) + a
+        inverse(y) = (y - a) / (b - a) * (data_max - data_min) + data_min
+    Примечание: чувствителен к выбросам.
+
+
+* RobustScaler
+    Масштабирование, устойчивое к выбросам (аналог sklearn.RobustScaler).
+    Центрирование по медиане и деление на межквартильный размах (IQR):
+        forward(x) = (x - median) / IQR,  IQR = Q_high - Q_low
+        inverse(z) = z * IQR + median
+
+* QuantileMinMaxScaler
+    Робастное масштабирование в [a, b] по выбранным квантилям.
+    Вместо min/max берутся q_low и q_high (например 1% и 99%),
+    опционально возможен клиппинг хвостов:
+         forward(x) = (clip(x, q_low, q_high) - q_low) / (q_high - q_low) * (b - a) + a
+        inverse(y) = (y - a) / (b - a) * (q_high - q_low) + q_low
+    Подходит, когда нужен строгий диапазон [0, 1] при наличии выбросов.
+
+Общее
+-----
+- Все классы — torch.nn.Module с буферами статистик; поддерживают fit → forward → inverse чейнинг.
+- Параметр ``dim`` задаёт оси для агрегации статистики; ``None`` означает «не агрегируем».
+- Все редукции выполняются с ``keepdim=True`` и потому статистики broadcast-совместимы с входом.
+- Корректно работают с любыми ``device``/``dtype`` входных данных; используется ``eps`` для защиты от деления на ноль.
+- Параметры по умолчанию: ``dim=0``, ``eps=1e-12``; для MinMax/QuantileMinMax — ``feature_range=(0.0, 1.0)``,
+  для RobustScaler — ``quantile_range=(25.0, 75.0)``, для QuantileMinMax — обычно ``(1.0, 99.0)``.
+
+Пример работы dim
+-----------------
+Пусть размер тензора (batch, channels, freq_points), где:
+    - batch        — индекс отдельного примера (например, touchstone-файла),
+    - channels     — разные каналы (S11real, S21real, ...),
+    - freq_points  — точки частотной сетки.
+
+dim=0:
+    Аггрегируем по батчу. Статистики считаются отдельно для каждого канала и каждой частоты.
+    (32, 4, 256) → (4, 256)
+
+dim=(0, 2):
+    Аггрегируем по батчу и по частотам. Статистики остаются только по каналам.
+    (32, 4, 256) → (4, 1) или (4,)
+
 """
+
 from __future__ import annotations
 
 import torch
@@ -324,3 +379,127 @@ class RobustScaler(_Base):
         low = self.q_low * 100.0
         high = self.q_high * 100.0
         return f"dim={self.default_dim}, q_range=({low}%, {high}%), eps={self.eps}"
+
+
+# --------------------------------------------------------------------------- #
+#                               QuantileMinMaxScaler                                  #
+# --------------------------------------------------------------------------- #
+class QuantileMinMaxScaler(_Base):
+    """
+    Робастное масштабирование в [a, b] по квантилям.
+
+    Идея: low- и high-квантили исходных данных считаются опорными точками,
+    их линейно переводим в a и b (по умолчанию 0 и 1). Хвосты можно
+    опционально клиппировать, чтобы *гарантировать* диапазон [a, b].
+
+        forward(x) = clip(x, q_low, q_high) - если clip=True
+                     затем (x - q_low) / (q_high - q_low) * (b - a) + a
+        inverse(y) = (y - a) / (b - a) * (q_high - q_low) + q_low
+
+    Параметры
+    ----------
+    dim : int | Sequence[int] | None
+        Оси для агрегирования квантилей. None — без агрегации.
+    quantile_range : (float, float), default=(1.0, 99.0)
+        Нижний/верхний процентили в процентах (0–100], 0 ≤ low < high ≤ 100.
+    feature_range : (float, float), default=(0.0, 1.0)
+        Целевой диапазон (a, b), где b > a.
+    clip : bool, default=True
+        Если True, значения ниже/выше опорных квантилей клиппируются,
+        так что forward(x) ∈ [a, b] строго.
+    eps : float | None
+        Защита от деления на ноль.
+    """
+
+    def __init__(
+        self,
+        dim: Sequence[int] | int | None = 0,
+        quantile_range: Tuple[float, float] = (1.0, 99.0),
+        feature_range: Tuple[float, float] = (0.0, 1.0),
+        clip: bool = True,
+        eps: float | None = None,
+    ):
+        super().__init__(dim, eps)
+
+        # валидация квантилей
+        if (
+            not isinstance(quantile_range, (tuple, list))
+            or len(quantile_range) != 2
+            or not all(isinstance(q, (int, float)) for q in quantile_range)
+        ):
+            raise TypeError("quantile_range must be tuple/list of two floats")
+        q_low, q_high = map(float, quantile_range)
+        if not (0.0 <= q_low < q_high <= 100.0):
+            raise ValueError("quantile_range must satisfy 0 ≤ low < high ≤ 100")
+
+        self.q_low = q_low / 100.0
+        self.q_high = q_high / 100.0
+
+        # валидация целевого диапазона
+        if (
+            not isinstance(feature_range, (tuple, list))
+            or len(feature_range) != 2
+            or not all(isinstance(v, (int, float)) for v in feature_range)
+        ):
+            raise TypeError("feature_range must be a tuple/list of two floats")
+        a, b = map(float, feature_range)
+        if b <= a:
+            raise ValueError("feature_range must satisfy max > min")
+        self.min_val = a
+        self.max_val = b
+
+        self.clip = bool(clip)
+
+        # для сериализации
+        self._init_kwargs = {
+            "dim": dim,
+            "quantile_range": quantile_range,
+            "feature_range": feature_range,
+            "clip": clip,
+            "eps": eps,
+        }
+
+        # буферы (заполняются в fit)
+        self.register_buffer("data_min", torch.tensor(0.0))   # q_low
+        self.register_buffer("data_range", torch.tensor(1.0)) # q_high - q_low
+
+    @torch.no_grad()
+    def fit(self, data: torch.Tensor, dim: Sequence[int] | int | None = None):
+        dims = _norm_dim(dim) if dim is not None else self.default_dim
+
+        q_lo = self._reduce(
+            data,
+            lambda x, dim, keepdim: torch.quantile(x, self.q_low, dim=dim, keepdim=keepdim),
+            dims,
+        )
+        q_hi = self._reduce(
+            data,
+            lambda x, dim, keepdim: torch.quantile(x, self.q_high, dim=dim, keepdim=keepdim),
+            dims,
+        )
+
+        d_min = q_lo
+        d_range = (q_hi - q_lo).clamp_min(self.eps)
+
+        d_min, d_range = self._cast_like(d_min, data), self._cast_like(d_range, data)
+        _update_buffer(self, "data_min", d_min.detach())
+        _update_buffer(self, "data_range", d_range.detach())
+        return self
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_adj = x
+        if self.clip:
+            data_max = self.data_min + self.data_range
+            x_adj = torch.clamp(x_adj, min=self.data_min, max=data_max)
+        x_std = (x_adj - self.data_min) / self.data_range
+        return x_std * (self.max_val - self.min_val) + self.min_val
+
+    def inverse(self, y: torch.Tensor) -> torch.Tensor:
+        scale = max(self.max_val - self.min_val, self.eps)
+        y_std = (y - self.min_val) / scale
+        return y_std * self.data_range + self.data_min
+
+    def extra_repr(self) -> str:
+        low = self.q_low * 100.0
+        high = self.q_high * 100.0
+        return f"dim={self.default_dim}, q_range=({low}%, {high}%), range=({self.min_val}, {self.max_val}), clip={self.clip}, eps={self.eps}"
