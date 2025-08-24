@@ -121,6 +121,8 @@ def plot_sparams_compare(
 
     preds, trues = [], []
     for (x, y, meta), bp in zip(loader, batch_preds):
+        if pl_module.swap_xy:
+            x, y = y, x
         for k in range(len(bp)):
             preds.append(_to_ts(bp[k], dm.codec, meta[k]))
             trues.append(_to_ts(y[k],    dm.codec, meta[k]))
