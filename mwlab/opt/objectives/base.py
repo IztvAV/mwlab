@@ -26,14 +26,78 @@ mwlab.opt.objectives.base
 > писать тесты и код следующих уровней, не боясь сломать контракт,
 > — просто подменяем конкретный компонент позже.
 
-Пример:
-crit = BaseCriterion(
-    selector   = SMagSelector(1,1, band=(2e9,2.4e9), db=True),
-    aggregator = MaxAgg(),
+Примеры:
+--------
+from mwlab.opt.objectives.base import BaseCriterion
+from mwlab.opt.objectives.selectors import SMagSelector
+from mwlab.opt.objectives.aggregators import MaxAgg, MinAgg, MeanAgg, RippleAgg, StdAgg, UpIntAgg, LoIntAgg, RippleIntAgg
+from mwlab.opt.objectives.comparators import LEComparator, GEComparator, SoftLEComparator, HingeLEComparator
+
+# Критерий: максимальные обратные потери (|S11| в дБ) должны быть ≤ –22 дБ
+crit_rl = BaseCriterion(
+    selector   = SMagSelector(1, 1, band=(2.0, 2.4), db=True),
+    aggregator = MaxAgg(),                         # берём максимум
     comparator = LEComparator(limit=-22, unit="dB"),
-    weight = 10,
-    name="S11_inband"
+    name       = "S11_max"
 )
+
+# Критерий: минимальные проходные потери (|S21|) должны быть ≥ –1 дБ
+crit_il = BaseCriterion(
+    selector   = SMagSelector(2, 1, band=(2.0, 2.4), db=True),
+    aggregator = MinAgg(),                         # берём минимум
+    comparator = GEComparator(limit=-1.0, unit="dB"),
+    name       = "S21_min"
+)
+
+# Критерий: среднее ослабление в полосе должно быть ≤ –20 дБ
+crit_avg = BaseCriterion(
+    selector   = SMagSelector(3, 1, band=(3.0, 3.5), db=True),
+    aggregator = MeanAgg(),
+    comparator = LEComparator(limit=-20, unit="dB"),
+    name       = "S31_avg"
+)
+
+# Критерий: рябь (размах) в полосе ≤ 0.5 дБ
+crit_ripple = BaseCriterion(
+    selector   = SMagSelector(2, 1, band=(2.0, 2.4), db=True),
+    aggregator = RippleAgg(),
+    comparator = LEComparator(limit=0.5, unit="dB"),
+    name       = "S21_ripple"
+)
+
+# Критерий: стандартное отклонение ослабления ≤ 0.25 дБ
+crit_std = BaseCriterion(
+    selector   = SMagSelector(2, 1, band=(2.0, 2.4), db=True),
+    aggregator = StdAgg(),
+    comparator = LEComparator(limit=0.25, unit="dB"),
+    name       = "S21_std"
+)
+
+# Критерий: интеграл нарушений по |S11| ≤ –22 дБ
+crit_rl_area = BaseCriterion(
+    selector   = SMagSelector(1, 1, band=(2.0, 2.4), db=True),
+    aggregator = UpIntAgg(limit=-22, p=2, method="mean", normalize="bandwidth*limit"),
+    comparator = HingeLEComparator(limit=0.0, scale=1.0),  # сравнение с нулём
+    name       = "S11_area"
+)
+
+# Критерий: интеграл нарушений по |S21| ≥ –1 дБ
+crit_il_area = BaseCriterion(
+    selector   = SMagSelector(2, 1, band=(2.0, 2.4), db=True),
+    aggregator = LoIntAgg(limit=-1.0, p=2, method="trapz", normalize="bandwidth"),
+    comparator = SoftLEComparator(limit=0.0, margin=1.0),  # мягкий штраф
+    name       = "S21_area"
+)
+
+# Критерий: интегральная рябь пропускания в полосе ≤ 0.2 дБ
+crit_il_ripple = BaseCriterion(
+    selector   = SMagSelector(2, 1, band=(2.0, 2.4), db=True),
+    aggregator = RippleIntAgg(target="linear", deadzone=0.1, p=2,
+                              method="mean", normalize="bandwidth"),
+    comparator = HingeLEComparator(limit=0.0, scale=1.0),
+    name       = "S21_ripple_area"
+)
+
 """
 from __future__ import annotations
 

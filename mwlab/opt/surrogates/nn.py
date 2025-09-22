@@ -105,12 +105,17 @@ class NNSurrogate(BaseSurrogate):
         ModCls = _locate_class(payload["class"])
         # создаем экземпляр без побочных эффектов
         lm = ModCls.__new__(ModCls)  # type: ignore[call-arg]
-        ModCls.__init__(lm, model=nn.Identity())  # минимальный valid-init
+        try:
+            ModCls.__init__(lm, model=nn.Identity())
+        except TypeError:
+            # запасной безопасный init
+            ModCls.__init__(lm, model=nn.Identity(), swap_xy=False, auto_decode=False)
 
         lm.load_state_dict(payload["state_dict"])
         return cls(pl_module=lm)
 
     # ---------------------------------------------------------------- batch-API
+    @torch.no_grad()
     def batch_predict(
             self,
             xs: Sequence[Mapping[str, float]],
@@ -118,18 +123,12 @@ class NNSurrogate(BaseSurrogate):
             return_std: bool = False,
     ):
         if return_std:
-            raise NotImplementedError("NN surrogate не возвращает дисперсию.")
-
-        codec = getattr(self.model, "codec", None)
-        if codec is None:  # fallback на построчный режим
-            return [self.predict(x) for x in xs]
-
-        with torch.no_grad():
-            X = torch.stack([codec.encode_x(p) for p in xs]).to(self.model.device)
-            preds = self.model(X)
-            if self.model.scaler_out is not None:
-                preds = self.model._apply_inverse(self.model.scaler_out, preds)
-            return [codec.decode_s(row) for row in preds]
+            raise NotImplementedError("NN surrogate has no σ.")
+        # 1) быстрый путь, если модуль его реализует
+        if hasattr(self.model, "predict_s_batch"):
+            return self.model.predict_s_batch(xs)
+        # 2) иначе — по одному (корректно, но медленнее)
+        return [self.predict(x) for x in xs]
 
     # ----------------------------------------------- оптимизированный passes_spec
     def passes_spec(self, xs, spec):
