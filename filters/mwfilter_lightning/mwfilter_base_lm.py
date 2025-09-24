@@ -207,10 +207,10 @@ class MWFilterBaseLMWithMetricsAE(MWFilterBaseLMWithMetrics):
         # preds_backward = torch.flip(preds_backward, dims=(-1,))
         if self.scaler_in is not None:
             x = self.scaler_in(x)
-        loss = self.loss_fn(preds_forward, x) + anti_checker_correct(x, preds_forward, w=0.2)
-        if self.scaler_in is not None:
-            x = self.scaler_in.inverse(x)
-            preds_forward = self.scaler_in.inverse(preds_forward)
+        loss = self.loss_fn(preds_forward, x)
+        # if self.scaler_in is not None:
+        #     x = self.scaler_in.inverse(x)
+        #     preds_forward = self.scaler_in.inverse(preds_forward)
             # preds_backward = self.scaler_in.inverse(preds_backward)
         # s_x = sparams_to_complex(x)
         # s_preds_forward = sparams_to_complex(preds_forward)
@@ -276,10 +276,10 @@ class MWFilterBaseLMWithMetricsAE(MWFilterBaseLMWithMetrics):
     def plot_origin_vs_prediction(self, origin_fil: MWFilter, pred_fil: MWFilter):
         plt.figure()
         origin_fil.plot_s_db(m=0, n=0, label='S11 origin')
-        origin_fil.plot_s_db(m=0, n=1, label='S12 origin')
-        origin_fil.plot_s_db(m=1, n=0, label='S21 origin')
-        origin_fil.plot_s_db(m=1, n=1, label='S22 origin')
+        origin_fil.plot_s_db(m=0, n=4, label='S12 origin')
+        origin_fil.plot_s_db(m=4, n=0, label='S21 origin')
+        origin_fil.plot_s_db(m=4, n=4, label='S22 origin')
         pred_fil.plot_s_db(m=0, n=0, label='S11 pred', ls=':')
-        pred_fil.plot_s_db(m=0, n=1, label='S12 pred', ls=':')
-        pred_fil.plot_s_db(m=1, n=0, label='S21 pred', ls=':')
-        pred_fil.plot_s_db(m=1, n=1, label='S22 pred', ls=':')
+        pred_fil.plot_s_db(m=0, n=4, label='S12 pred', ls=':')
+        pred_fil.plot_s_db(m=4, n=0, label='S21 pred', ls=':')
+        pred_fil.plot_s_db(m=4, n=4, label='S22 pred', ls=':')
