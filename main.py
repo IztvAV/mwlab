@@ -8,8 +8,9 @@ from torch.nn import MSELoss, L1Loss
 
 from common import check_metrics
 from filters.mwfilter_optim.base import FastMN2toSParamCalculation
+from mwlab.io.backends import RAMBackend
 from mwlab.nn.scalers import MinMaxScaler, StdScaler
-from mwlab import TouchstoneDataset, TouchstoneLDataModule, TouchstoneDatasetAnalyzer
+from mwlab import TouchstoneDataset, TouchstoneLDataModule, TouchstoneDatasetAnalyzer, TouchstoneData
 
 from filters import CMTheoreticalDatasetGenerator, CMTheoreticalDatasetGeneratorSamplers, SamplerTypes, MWFilter, CouplingMatrix
 from filters.codecs import MWFilterTouchstoneCodec
@@ -226,57 +227,67 @@ def fine_tune_model(inference_model: nn.Module, target_input: MWFilter, meta: di
 
 def main_ae():
     sampler_configs = {
-        "pss_origin": PSShift(phi11=0, phi21=0, theta11=0, theta21=0),
-        "pss_shifts_delta": PSShift(phi11=0.00000001, phi21=0.00000001, theta11=0.00000001, theta21=0.00000001),
+        "pss_origin": PSShift(phi11=0.547, phi21=-1.0, theta11=0.1685, theta21=0.17),
+        "pss_shifts_delta": PSShift(phi11=0.2, phi21=0.2, theta11=0.05, theta21=0.05),
         "cm_shifts_delta": CMShifts(self_coupling=1.5, mainline_coupling=0.1, cross_coupling=5e-3,
                                     parasitic_coupling=5e-3),
         "samplers_size": configs.BASE_DATASET_SIZE,
     }
-    work_model = common.AEWorkModel(configs.ENV_DATASET_PATH, sampler_configs, SamplerTypes.SAMPLER_SOBOL)
+
+    # work_model = common.AEWorkModel(configs.ENV_DATASET_PATH, sampler_configs, SamplerTypes.SAMPLER_SOBOL)
+    work_model = common.AEWorkModel("filters/FilterData/B1440-IMUX/datasets_data/CH4", sampler_configs, SamplerTypes.SAMPLER_SOBOL)
     # common.plot_distribution(work_model.ds, num_params=len(work_model.ds_gen.origin_filter.coupling_matrix.links))
     # plt.show()
 
     codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
                                                  keys_for_analysis=[f"m_{r}_{c}" for r, c in
                                                                     work_model.orig_filter.coupling_matrix.links])
-    codec.y_channels = ['S1_1.db', 'S1_2.db', 'S2_1.db', 'S2_2.db']
+    # codec.y_channels = ['S1_1.db', 'S1_2.db', 'S2_1.db', 'S2_2.db']  # для фильтра
+    codec.y_channels = ['S5_5.db', 'S5_1.db', 'S1_5.db', 'S1_1.db']  # для mux
     codec = codec
     work_model.setup(
-        # model_name="cae",
-        # model_cfg={"in_ch":len(codec.y_channels), "z_dim":work_model.orig_filter.order*6},
         model_name="imp_cae",
-        model_cfg={"in_ch":len(codec.y_channels), "z_dim":work_model.orig_filter.order*6},
-        # model_name="mlp",
-        # model_cfg={},
+        model_cfg={"in_ch":len(codec.y_channels), "z_dim":64},
         dm_codec=codec
     )
 
-    lit_model = work_model.train(
-        optimizer_cfg={"name": "AdamW", "lr": 0.0005371, "weight_decay": 1e-2},
-        scheduler_cfg={"name": "StepLR", "step_size": 24, "gamma": 0.01},
-        loss_fn=L1Loss()
-    )
+    inference_model = work_model.inference("saved_models/B1440-BPFC4/best-epoch=29-train_loss=0.00000-val_loss=0.00000-val_r2=0.99871-val_mse=0.00000-val_mae=0.00074-batch_size=8-base_dataset_size=100000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
+    work_model.model = inference_model.model
+    # lit_model = work_model.train(
+    #     optimizer_cfg={"name": "AdamW", "lr": 0.000223332, "weight_decay": 1e-2},
+    #     scheduler_cfg={"name": "StepLR", "step_size": 12, "gamma": 0.27},
+    #     loss_fn=CustomLosses("log_cosh")
+    # )
 
     # Загружаем лучшую модель
-    inference_model = work_model.inference(lit_model.trainer.checkpoint_callback.best_model_path)
-    # inference_model = work_model.inference("saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=24-train_loss=0.00163-val_loss=0.00146-val_r2=0.99352-val_mse=0.00002-val_mae=0.00146-batch_size=32-base_dataset_size=1000000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
+    # inference_model = work_model.inference(lit_model.trainer.checkpoint_callback.best_model_path)
+    inference_model = work_model.inference("saved_models/B1440-BPFC4/best-epoch=29-train_loss=0.00001-val_loss=0.00002-val_r2=0.98524-val_mse=0.00003-val_mae=0.00230-batch_size=8-base_dataset_size=100000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
 
     check_metrics(trainer=work_model.trainer, model=inference_model, dm=work_model.dm)
 
     # Предсказываем фильтр из тестового датасета
     orig_fil, pred_fil = inference_model.predict(work_model.dm, idx=0)
     inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
-    plt.figure()
-    plt.plot(orig_fil.f, np.real(orig_fil.s[:, 0, 0]), orig_fil.f, np.real(pred_fil.s[:, 0, 0]),
-             orig_fil.f, np.imag(orig_fil.s[:, 0, 0]), orig_fil.f, np.imag(pred_fil.s[:, 0, 0]))
-    plt.legend(["real S11 orig", "real S11 pred", "imag S11 orig", "imag S11 pred"])
-    plt.title("S11")
 
-    plt.figure()
-    plt.plot(orig_fil.f, np.real(orig_fil.s[:, 1, 0]), orig_fil.f, np.real(pred_fil.s[:, 1, 0]),
-             orig_fil.f, np.imag(orig_fil.s[:, 1, 0]), orig_fil.f, np.imag(pred_fil.s[:, 1, 0]))
-    plt.legend(["real S21 orig", "real S21 pred", "imag S21 orig", "imag S21 pred"])
-    plt.title("S21")
+
+    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/modeling",
+    #                         s_tf=TComposite(
+    #                             [S_Crop(f_start=work_model.orig_filter.f[0], f_stop=work_model.orig_filter.f[-1]),
+    #                              S_Resample(len(work_model.orig_filter.f))]))
+    # for i in range(len(tds)):
+    #     orig_fil = tds[i][1]
+    #     pred_prms = inference_model.predict_x(orig_fil)
+    #     pred_fil = work_model.dm.codec.decode_s(pred_prms, work_model.meta)
+    #     inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
+    # tds = TouchstoneDataset("filters/FilterData/B1440-IMUX/datasets_data/modeling",
+    #                         s_tf=TComposite(
+    #                             [S_Crop(f_start=work_model.orig_filter.f[0], f_stop=work_model.orig_filter.f[-1]),
+    #                              S_Resample(len(work_model.orig_filter.f))]))
+    # backend = RAMBackend()
+    # for i in tqdm(range(len(tds)), desc=f"Генерация датасета для мультиплексора"):
+    #     backend.append(TouchstoneData(tds[i][1]))
+    # backend.dump_pickle(f"filters/FilterData/B1440-IMUX/datasets_data/Dataset.pkl")
+
 
 
 def main_extract_matrix():
@@ -317,18 +328,18 @@ def main_extract_matrix():
     #     dm_codec=codec
     # )
     work_model.setup(
-        model_name="cae",
+        model_name="simple_opt",
         model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
         dm_codec=codec
     )
 
-    lit_model = work_model.train(
-        # optimizer_cfg={"name": "AdamW", "lr": 0.0009400000000000001, "weight_decay": 1e-5},
-        # scheduler_cfg={"name": "StepLR", "step_size": 28, "gamma": 0.09},
-        optimizer_cfg={"name": "AdamW", "lr": 0.0005371, "weight_decay": 1e-5},
-        scheduler_cfg={"name": "StepLR", "step_size": 24, "gamma": 0.01},
-        loss_fn=CustomLosses("mse_with_l1", weight_decay=1, weights=None)
-        )
+    # lit_model = work_model.train(
+    #     # optimizer_cfg={"name": "AdamW", "lr": 0.0009400000000000001, "weight_decay": 1e-5},
+    #     # scheduler_cfg={"name": "StepLR", "step_size": 28, "gamma": 0.09},
+    #     optimizer_cfg={"name": "AdamW", "lr": 0.0005371, "weight_decay": 1e-5},
+    #     scheduler_cfg={"name": "StepLR", "step_size": 24, "gamma": 0.01},
+    #     loss_fn=CustomLosses("mse_with_l1", weight_decay=1, weights=None)
+    #     )
 
     # Загружаем лучшую модель
     # checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=12-val_loss=0.01266-train_loss=0.01224.ckpt",
@@ -337,8 +348,8 @@ def main_extract_matrix():
     # inference_model = work_model.inference("saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=29-train_loss=0.04166-val_loss=0.04450-val_r2=0.92560-val_mse=0.00588-val_mae=0.03862-batch_size=32-base_dataset_size=1500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
     # inference_model = work_model.inference("saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=29-train_loss=0.03546-val_loss=0.03841-val_r2=0.94190-val_mse=0.00459-val_mae=0.03381-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
     # inference_model = work_model.inference("saved_models\\EAMU4T1-BPFC2\\best-epoch=34-train_loss=0.02388-val_loss=0.02641-val_r2=0.96637-val_mse=0.00265-val_mae=0.02376-batch_size=32-base_dataset_size=600000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    # inference_model = work_model.inference("saved_models\\EAMU4T1-BPFC2\\best-epoch=25-train_loss=0.02530-val_loss=0.02793-val_r2=0.96251-val_mse=0.00296-val_mae=0.02496-batch_size=32-base_dataset_size=1000000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    inference_model = work_model.inference(lit_model.trainer.checkpoint_callback.best_model_path)
+    inference_model = work_model.inference("saved_models\\ERV-KuIMUXT1-BPFC1\\best-epoch=25-train_loss=0.01518-val_loss=0.01534-val_r2=0.89565-val_mse=0.00116-val_mae=0.01418-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_STD.ckpt")
+    # inference_model = work_model.inference(lit_model.trainer.checkpoint_callback.best_model_path)
 
     # work_model_widenet = common.WorkModel(configs.ENV_DATASET_PATH, configs.BASE_DATASET_SIZE+100000, SamplerTypes.SAMPLER_SOBOL)
     # work_model_widenet.setup(
@@ -382,13 +393,13 @@ def main_extract_matrix():
     # optim_matrix.plot_matrix(title="Optimized tuned matrix for inverted model")
 
 
-    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/modeling",
+    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/modeling/detuned",
                             s_tf=TComposite(
                                 [S_Crop(f_start=work_model.orig_filter.f[0], f_stop=work_model.orig_filter.f[-1]),
                                  S_Resample(len(work_model.orig_filter.f))]))
-    for i in range(1):
+    for i in range(len(tds)):
         # i = random.randint(0, len(tds))
-        orig_fil = tds[2][1]
+        orig_fil = tds[i][1]
         # start_time = time.time()
         pred_prms = inference_model.predict_x(orig_fil)
         # stop_time = time.time()
@@ -467,5 +478,5 @@ def plot_pl_csv_wide(csv_path, outdir="artifacts_opt3"):
 if __name__ == "__main__":
     # csv_path = "lightning_logs/cae_csv/version_71/metrics.csv"
     # plot_pl_csv_wide(csv_path)
-    main_ae()
+    main_extract_matrix()
     plt.show()

@@ -220,6 +220,129 @@ class MinMaxScaler(_Base):
         return f"dim={self.default_dim}, range=({self.min_val}, {self.max_val}), eps={self.eps}"
 
 
+# --------------------------------------------------------------------------- #
+#                               QuantileMinMaxScaler                                  #
+# --------------------------------------------------------------------------- #
+class QuantileMinMaxScaler(_Base):
+    """
+    Робастное масштабирование в [a, b] по квантилям.
+
+    Идея: low- и high-квантили исходных данных считаются опорными точками,
+    их линейно переводим в a и b (по умолчанию 0 и 1). Хвосты можно
+    опционально клиппировать, чтобы *гарантировать* диапазон [a, b].
+
+        forward(x) = clip(x, q_low, q_high) - если clip=True
+                     затем (x - q_low) / (q_high - q_low) * (b - a) + a
+        inverse(y) = (y - a) / (b - a) * (q_high - q_low) + q_low
+
+    Параметры
+    ----------
+    dim : int | Sequence[int] | None
+        Оси для агрегирования квантилей. None — без агрегации.
+    quantile_range : (float, float), default=(1.0, 99.0)
+        Нижний/верхний процентили в процентах (0–100], 0 ≤ low < high ≤ 100.
+    feature_range : (float, float), default=(0.0, 1.0)
+        Целевой диапазон (a, b), где b > a.
+    clip : bool, default=True
+        Если True, значения ниже/выше опорных квантилей клиппируются,
+        так что forward(x) ∈ [a, b] строго.
+    eps : float | None
+        Защита от деления на ноль.
+    """
+
+    def __init__(
+        self,
+        dim: Sequence[int] | int | None = 0,
+        quantile_range: Tuple[float, float] = (1.0, 99.0),
+        feature_range: Tuple[float, float] = (0.0, 1.0),
+        clip: bool = True,
+        eps: float | None = None,
+    ):
+        super().__init__(dim, eps)
+
+        # валидация квантилей
+        if (
+            not isinstance(quantile_range, (tuple, list))
+            or len(quantile_range) != 2
+            or not all(isinstance(q, (int, float)) for q in quantile_range)
+        ):
+            raise TypeError("quantile_range must be tuple/list of two floats")
+        q_low, q_high = map(float, quantile_range)
+        if not (0.0 <= q_low < q_high <= 100.0):
+            raise ValueError("quantile_range must satisfy 0 ≤ low < high ≤ 100")
+
+        self.q_low = q_low / 100.0
+        self.q_high = q_high / 100.0
+
+        # валидация целевого диапазона
+        if (
+            not isinstance(feature_range, (tuple, list))
+            or len(feature_range) != 2
+            or not all(isinstance(v, (int, float)) for v in feature_range)
+        ):
+            raise TypeError("feature_range must be a tuple/list of two floats")
+        a, b = map(float, feature_range)
+        if b <= a:
+            raise ValueError("feature_range must satisfy max > min")
+        self.min_val = a
+        self.max_val = b
+
+        self.clip = bool(clip)
+
+        # для сериализации
+        self._init_kwargs = {
+            "dim": dim,
+            "quantile_range": quantile_range,
+            "feature_range": feature_range,
+            "clip": clip,
+            "eps": eps,
+        }
+
+        # буферы (заполняются в fit)
+        self.register_buffer("data_min", torch.tensor(0.0))   # q_low
+        self.register_buffer("data_range", torch.tensor(1.0)) # q_high - q_low
+
+    @torch.no_grad()
+    def fit(self, data: torch.Tensor, dim: Sequence[int] | int | None = None):
+        dims = _norm_dim(dim) if dim is not None else self.default_dim
+
+        q_lo = self._reduce(
+            data,
+            lambda x, dim, keepdim: torch.quantile(x, self.q_low, dim=dim, keepdim=keepdim),
+            dims,
+        )
+        q_hi = self._reduce(
+            data,
+            lambda x, dim, keepdim: torch.quantile(x, self.q_high, dim=dim, keepdim=keepdim),
+            dims,
+        )
+
+        d_min = q_lo
+        d_range = (q_hi - q_lo).clamp_min(self.eps)
+
+        d_min, d_range = self._cast_like(d_min, data), self._cast_like(d_range, data)
+        _update_buffer(self, "data_min", d_min.detach())
+        _update_buffer(self, "data_range", d_range.detach())
+        return self
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_adj = x
+        if self.clip:
+            data_max = self.data_min + self.data_range
+            x_adj = torch.clamp(x_adj, min=self.data_min, max=data_max)
+        x_std = (x_adj - self.data_min) / self.data_range
+        return x_std * (self.max_val - self.min_val) + self.min_val
+
+    def inverse(self, y: torch.Tensor) -> torch.Tensor:
+        scale = max(self.max_val - self.min_val, self.eps)
+        y_std = (y - self.min_val) / scale
+        return y_std * self.data_range + self.data_min
+
+    def extra_repr(self) -> str:
+        low = self.q_low * 100.0
+        high = self.q_high * 100.0
+        return f"dim={self.default_dim}, q_range=({low}%, {high}%), range=({self.min_val}, {self.max_val}), clip={self.clip}, eps={self.eps}"
+
 # class FromUniformToNormal(_Base):
 #     def __init__(self, dim: Sequence[int] | int | None = 0, eps: float | None = None, *, unbiased: bool = False,
 #                  mean: float = 0.0, std: float = 1.0, feature_range: Tuple[float, float] = (0.0, 1.0)):

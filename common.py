@@ -10,6 +10,7 @@ from filters.mwfilter_lightning.mwfilter_base_lm import MWFilterBaseLMWithMetric
 from models import CorrectionNet
 from mwlab import TouchstoneDataset, TouchstoneDatasetAnalyzer, TouchstoneLDataModule
 from mwlab.nn import MinMaxScaler
+from mwlab.nn.scalers import QuantileMinMaxScaler
 from mwlab.transforms import TComposite
 from mwlab.transforms.s_transforms import S_Crop, S_Resample
 
@@ -442,6 +443,10 @@ class AEWorkModel(WorkModel):
             return model
         elif name=="imp_cae":
             model = models.ConvAE_ShuffleDet(**kwargs)
+            # model = models.ConvAE_ResSE(**kwargs)
+            return model
+        elif name=="2dcae":
+            model = models.LitAE(**kwargs)
             return model
         else:
             ValueError(f"Unknown model name: {name}")
@@ -466,7 +471,8 @@ class AEWorkModel(WorkModel):
             val_ratio=0.2,  # Доля валидационного набора
             test_ratio=0.05,  # Доля тестового набора
             cache_size=0,
-            scaler_in=MinMaxScaler(dim=(0, 2), feature_range=(0, 1)),  # Скейлер для входных данных
+            # scaler_in=MinMaxScaler(dim=(0, 2), feature_range=(0, 1)),  # Скейлер для входных данных
+            scaler_in=QuantileMinMaxScaler(dim=(0, 2), quantile_range=(0.1, 99.9), feature_range=(-0.5, 0.5), clip=True),
             scaler_out=MinMaxScaler(dim=0, feature_range=(-0.5, 0.5)),  # Скейлер для выходных данных
             swap_xy=True,
             num_workers=0,
