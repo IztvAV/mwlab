@@ -400,7 +400,7 @@ class WorkModel:
         # Возьмем для примера первый touchstone-файл из тестового набора данных
         test_tds = self.dm.get_dataset(split="test", meta=True)
         # Поскольку swap_xy=True, то датасет меняет местами пары (y, x)
-        _, _, self.meta = test_tds[0]  # Используем первый файл набора данных]
+        _, _, self.meta = test_tds[0]  # Используем первый файл набора данных
 
 
     def train(self, optimizer_cfg: dict, scheduler_cfg: dict, loss_fn):
@@ -418,3 +418,13 @@ class WorkModel:
             model=self.model
         )
         return inference_model
+
+    def info(self):
+        if self.codec is None:
+            raise ValueError("Перед запросом информации необходимо вызвать метод setup")
+        info = (f"Текущая модель: {self.model_name}\n"
+               f"Частотный диапазон: {self.orig_filter.f[0]}-{self.orig_filter.f[-1]}\n"
+               f"Каналы X: {self.codec.x_keys}. Количество: {len(self.codec.x_keys)}\n"
+               f"Каналы Y: {self.codec.y_channels}. Количесво: {len(self.codec.y_channels)}\n")
+        return info
+
