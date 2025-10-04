@@ -96,13 +96,8 @@ class NNSurrogate(BaseSurrogate):
         #from importlib import import_module
 
         payload = torch.load(path, map_location="cpu")
-
-        #module_path, cls_name = payload["class"].split(":")
-        #ModCls = getattr(import_module(module_path), cls_name)
-        #lm = ModCls.__new__(ModCls)     # type: ignore[call-arg]
-        #lm.__init__(model=None)         # dummy init; потом state_dict
-
         ModCls = _locate_class(payload["class"])
+
         # создаем экземпляр без побочных эффектов
         lm = ModCls.__new__(ModCls)  # type: ignore[call-arg]
         try:
@@ -112,6 +107,10 @@ class NNSurrogate(BaseSurrogate):
             ModCls.__init__(lm, model=nn.Identity(), swap_xy=False, auto_decode=False)
 
         lm.load_state_dict(payload["state_dict"])
+        # явная проверка соответствия «прямая»/«обратная»
+        if getattr(lm, "swap_xy", False):
+            raise ValueError("Checkpoint contains swap_xy=True; use InverseNNSurrogate.load(...)")
+
         return cls(pl_module=lm)
 
     # ---------------------------------------------------------------- batch-API
@@ -147,6 +146,13 @@ class NNSurrogate(BaseSurrogate):
           4. Если `fast_is_ok` нет, декодируем каждую строку в
              `rf.Network` через `codec.decode_s` и вызываем `is_ok`.
         """
+        # -------- utils ----------------------------------------------
+        def _device_of(module: torch.nn.Module) -> torch.device:
+            try:
+                return next(module.parameters()).device
+            except StopIteration:
+                return torch.device("cpu")
+
         # -------- одиночная точка ------------------------------------
         if isinstance(xs, Mapping):
             return super().passes_spec(xs, spec)
@@ -157,8 +163,9 @@ class NNSurrogate(BaseSurrogate):
 
         # -------- векторный encode X ---------------------------------
         with torch.no_grad():
+            dev = getattr(self.model, "device", _device_of(self.model))
             X = torch.stack([codec.encode_x(p) for p in xs]) \
-                    .to(self.model.device)       # (B,Dx)
+                    .to(dev)                     # (B,Dx)
             Y = self.model(X)                    # (B,C,F)  или (B,*)
             if self.model.scaler_out is not None:
                 Y = self.model._apply_inverse(self.model.scaler_out, Y)
