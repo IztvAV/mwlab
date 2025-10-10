@@ -56,6 +56,7 @@ class PSShift:
 class CMTheoreticalDatasetGeneratorSamplers:
     cms: Sampler
     pss: Sampler
+    qs: Sampler
 
     @classmethod
     def create_samplers(cls, origin_filter: MWFilter, samplers_type: SamplerTypes, samplers_size: int,
@@ -81,6 +82,16 @@ class CMTheoreticalDatasetGeneratorSamplers:
             stop=phase_shifts_max,
             num=len(cms_sampler))
 
+        qs_sampler_type = copy.deepcopy(samplers_type)
+        qs_sampler_type.one_param = False
+        qs_sampler = Sampler.for_type(
+            **samplers_kwargs,
+            type=samplers_type,
+            start=origin_filter.Q*0.6,
+            stop=origin_filter.Q*1.4,
+            num=len(cms_sampler)
+        )
+
         # cm_sampler_space = np.zeros(shape=(len(cms_factors), *origin_filter.coupling_matrix.matrix.shape),
         #                             dtype=float)
         # for cm_factors, idx in tuple(zip(cms_factors, range(len(cms_factors)))):
@@ -88,16 +99,19 @@ class CMTheoreticalDatasetGeneratorSamplers:
         #                                                         origin_filter.order + 2)
         return cls(
             cms=cms_sampler,
-            pss=pss_sampler
+            pss=pss_sampler,
+            qs=qs_sampler,
         )
 
     @classmethod
     def concat(cls, samplers: tuple):
         cms = Sampler.concat([cm.cms for cm in samplers])
         pss = Sampler.concat([ps.pss for ps in samplers])
+        qs = Sampler.concat([qs.qs for qs in samplers])
         return cls(
             cms=cms,
-            pss=pss
+            pss=pss,
+            qs=qs
         )
 
     @staticmethod
@@ -238,12 +252,14 @@ class CMTheoreticalDatasetGenerator:
             if torch.isnan(new_matrix).any() or torch.isinf(new_matrix).any():
                 raise ValueError("⚠️ Input to model contains NaN or Inf")
             ps_shifts = samplers.pss[idx]
+            # Q = samplers.qs[idx].item()
+            Q = self._origin_filter.Q
             s_params = MWFilter.response_from_coupling_matrix(M=new_matrix, f0=self._origin_filter.f0,
-                                                              FBW=self._origin_filter.fbw, Q=self._origin_filter.Q,
+                                                              FBW=self._origin_filter.fbw, Q=Q,
                                                               frange=self._origin_filter.f / 1e6, PSs=ps_shifts)
 
             new_filter = MWFilter(f0=self._origin_filter.f0, order=self._origin_filter.order, bw=self._origin_filter.bw,
-                                  Q=self._origin_filter.Q, matrix=new_matrix, frequency=self._origin_filter.f,
+                                  Q=Q, matrix=new_matrix, frequency=self._origin_filter.f,
                                   s=s_params, z0=50)
             ts = new_filter.to_touchstone_data()
             params = torch.tensor(list(ts.params.values()), dtype=torch.float32)

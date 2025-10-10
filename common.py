@@ -55,7 +55,7 @@ def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_p
         "pss_origin": PSShift(phi11=0.547, phi21=-1.0, theta11=0.01685, theta21=0.017),
         "pss_shifts_delta": PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
         # "cm_shifts_delta": CMShifts(self_coupling=1.8, mainline_coupling=0.3, cross_coupling=9e-2, parasitic_coupling=5e-3),
-        "cm_shifts_delta": CMShifts(self_coupling=0.5, mainline_coupling=0.1, cross_coupling=5e-3, parasitic_coupling=5e-3),
+        "cm_shifts_delta": CMShifts(self_coupling=1.8, mainline_coupling=0.3, cross_coupling=5e-2, parasitic_coupling=5e-3),
         "samplers_size": dataset_size,
     }
     samplers_all_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
@@ -64,17 +64,22 @@ def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_p
                                                                                     **sampler_configs)
     samplers_all_params_shuffle_cms_cols = CMTheoreticalDatasetGeneratorSamplers(
         cms=samplers_all_params.cms.shuffle(ratio=1, dim=1),
-        pss=samplers_all_params.pss)
+        pss=samplers_all_params.pss,
+        qs=samplers_all_params.qs
+    )
     samplers_all_params_shuffle_pss_cols = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_all_params.cms,
                                                                                      pss=samplers_all_params.pss.shuffle(
-                                                                                         ratio=1, dim=1))
+                                                                                         ratio=1, dim=1),
+                                                                                 qs=samplers_all_params.qs)
     samplers_all_params_flip_sign_cms_cols = CMTheoreticalDatasetGeneratorSamplers(
         cms=samplers_all_params.cms.flip_signs(ratio=1, dim=0),
-        pss=samplers_all_params.pss
+        pss=samplers_all_params.pss,
+        qs=samplers_all_params.qs
     )
     samplers_all_params_shuffle_all_cols = CMTheoreticalDatasetGeneratorSamplers(
         cms=samplers_all_params.cms.shuffle(ratio=1, dim=1),
-        pss=samplers_all_params.pss.shuffle(ratio=1, dim=1)
+        pss=samplers_all_params.pss.shuffle(ratio=1, dim=1),
+        qs=samplers_all_params.qs.shuffle(ratio=1, dim=1)
     )
 
     sampler_configs["samplers_size"] = int(dataset_size / 100)
@@ -88,6 +93,7 @@ def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_p
         )
         total_samplers.cms._type = sampler_type
         total_samplers.pss._type = sampler_type
+        total_samplers.qs._type = sampler_type
     else:
         # total_samplers = CMTheoreticalDatasetGeneratorSamplers.concat(
         #     (samplers_all_params, samplers_all_params_shuffle_pss_cols)
@@ -95,10 +101,13 @@ def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_p
         total_samplers = samplers_all_params
         total_samplers.cms._type = sampler_type
         total_samplers.pss._type = sampler_type
+        total_samplers.qs._type = sampler_type
     if torch.isnan(total_samplers.cms.space).any() or torch.isinf(total_samplers.cms.space).any():
         raise ValueError("⚠️ (cms) Input to model contains NaN or Inf")
     if torch.isnan(total_samplers.pss.space).any() or torch.isinf(total_samplers.pss.space).any():
         raise ValueError("⚠️ (pss) Input to model contains NaN or Inf")
+    if torch.isnan(total_samplers.qs.space).any() or torch.isinf(total_samplers.qs.space).any():
+        raise ValueError("⚠️ (qs) Input to model contains NaN or Inf")
     return total_samplers
 
 
@@ -355,7 +364,7 @@ class WorkModel:
                                       )
         trainer = L.Trainer(
             deterministic=True,
-            max_epochs=26,  # Максимальное количество эпох обучения
+            max_epochs=100,  # Максимальное количество эпох обучения
             accelerator="auto",  # Автоматический выбор устройства (CPU/GPU)
             log_every_n_steps=100,  # Частота логирования в процессе обучения
             callbacks=[stoping, checkpoint]

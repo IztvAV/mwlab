@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pandas as pd
 from sklearn.ensemble import GradientBoostingRegressor, HistGradientBoostingRegressor
+
+from common import WorkModel
 from filters.mwfilter_optim.base import FastMN2toSParamCalculation
 from mwlab.nn.scalers import MinMaxScaler, StdScaler
 from mwlab import TouchstoneDataset, TouchstoneLDataModule, TouchstoneDatasetAnalyzer
@@ -38,7 +40,7 @@ from mwlab.transforms.s_transforms import S_Crop, S_Resample
 import skrf as rf
 
 
-work_model = None
+work_model: WorkModel|None = None
 inference_model = None
 
 
@@ -82,3 +84,14 @@ def model_info():
         return info
     except Exception as e:
         raise ValueError(f"На сервере возникла ошибка: {e}") from e
+
+
+def calc_s_params(M:np.array, f0:float, bw:float, Q:float, frange:list or np.array):
+    fbw = bw/f0
+    S = MWFilter.response_from_coupling_matrix(M=M, f0=f0, FBW=fbw, Q=Q, frange=frange)
+    S11 = S[:, 0, 0]
+    S22 = S[:, 1, 1]
+    S12 = S[:, 0, 1]
+    S21 = S[:, 1, 0]
+    return S11, S12, S21, S22
+
