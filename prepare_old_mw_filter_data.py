@@ -30,7 +30,7 @@ def save_phase_to_s2p_single_comment(phi11=0.547, phi21=-1.0, theta11=0.01685, t
     return phase_dict
 
 
-FILTER_NAME = "EAMU4T1-BPFC2"
+FILTER_NAME = "EAMU4-KuIMUXT2-BPFC2"
 
 
 def main():
@@ -39,9 +39,9 @@ def main():
     parser.add_argument("-fr", "--freq_resp", type=str, default=os.path.join(os.getcwd(), "filters", "origins", f"{FILTER_NAME}", f"{FILTER_NAME}.s2p"),
                         help="Путь к .s2p файлу с частотными характеристиками фильтра")
     parser.add_argument("-m", "--matrix", type=str, default=os.path.join(os.getcwd(), "filters", "origins", f"{FILTER_NAME}", "cst_matrix_with_parasitic_couplings.txt"), help="Путь к файлу .txt с матрицей связи фильтра")
-    parser.add_argument("-f0", "--center_freq", type=str, default="11544.8", help="Центральная частота фильтра в МГц")
-    parser.add_argument("-bw", "--bandwidth", type=str, default="65.1", help="Ширина полосы пропускания фильтра в МГц")
-    parser.add_argument("-q", "--quality_factor", type=str, default="6100", help="Значение добротности")
+    parser.add_argument("-f0", "--center_freq", type=str, default="11543.4", help="Центральная частота фильтра в МГц")
+    parser.add_argument("-bw", "--bandwidth", type=str, default="65", help="Ширина полосы пропускания фильтра в МГц")
+    parser.add_argument("-q", "--quality_factor", type=str, default="6000", help="Значение добротности")
     parser.add_argument("-p", "--path_to_save", type=str, default=os.path.join(os.getcwd(), "filters", "origins", f"{FILTER_NAME}"), help="Путь для сохранения измененного файла")
 
     args = parser.parse_args()

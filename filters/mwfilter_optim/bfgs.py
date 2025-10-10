@@ -95,7 +95,13 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
     def cost_with_grad(x_np, *args):
         """Функция стоимости + градиент для scipy"""
         fast_calc, orig_filter, s11_origin_db, s21_origin_db, s22_origin_db, links, matrix_order = args
-        x = torch.tensor(x_np, dtype=torch.float32, requires_grad=True)
+        Q = torch.tensor(x_np[-1], dtype=torch.float32, requires_grad=True)
+        x = torch.tensor(x_np[:-1], dtype=torch.float32, requires_grad=True)
+
+        fast_calc = FastMN2toSParamCalculation(matrix_order=matrix_order,
+                                               wlist=pred_filter.f_norm,
+                                               Q=Q,
+                                               fbw=pred_filter.fbw)
 
         M = CouplingMatrix.from_factors(x, links, matrix_order)
         _, s11_pred, s21_pred, s22_pred = fast_calc.RespM2(M, with_s22=True)
@@ -119,8 +125,8 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
                 1.0*torch.nn.functional.mse_loss(s21_pred_db, s21_origin_db) +
                 1.0*torch.nn.functional.mse_loss(s22_pred_db, s22_origin_db)
         )
-        # reg = torch.nn.functional.l1_loss(s11_pred_db, s22_pred_db)
-        # loss += reg
+        reg = torch.nn.functional.l1_loss(s11_pred_db, s22_pred_db)
+        loss += reg
         loss = torch.sqrt(loss)
 
 
@@ -139,7 +145,7 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
                                            Q=pred_filter.Q,
                                            fbw=pred_filter.fbw)
     fast_calc.RespM2 = torch.compile(fast_calc.RespM2, backend="eager")
-    freq_weights = torch.tensor([min(abs(1/f), 0.95) for f in pred_filter.f_norm], dtype=torch.float32)
+    freq_weights = torch.tensor([min(abs(1/f), 0.90) for f in pred_filter.f_norm], dtype=torch.float32)
 
     s11_origin = orig_filter.s[:, 0, 0]
     s21_origin = orig_filter.s[:, 1, 0]
@@ -165,8 +171,8 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
     lambda_values = np.linspace(0.05, 1.0, 20)  # Например, num_steps = 10
     # importance = sensivity.run(orig_filter)
     importance = 1
-    r0, _ = cost_with_grad(x0, fast_calc, orig_filter, s11_origin_db, s21_origin_db, s22_origin_db, links, matrix_order)
-    print("Initial cost value:", r0)
+    # r0, _ = cost_with_grad(x0, fast_calc, orig_filter, s11_origin_db, s21_origin_db, s22_origin_db, links, matrix_order)
+    # print("Initial cost value:", r0)
 
     # Миксуем S-данные: от нейросети к оригинальным
     s11_target = s11_origin_db
@@ -191,50 +197,49 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
     #        (7, 7), (7, 8), (8, 8), (8, 9), (9, 10), (10, 10), (10, 11), (11, 11), (11, 12), (12, 12), (12, 13)]
     # imp = [(1, 1), (2, 11), (3, 3), (3, 4), (4, 4), (4, 5), (5, 5), (5, 6), (6, 6), (7, 7), (8, 8), (10, 10)]
     # imp = [(2, 2), (3, 4), (4, 4), (4, 5), (5, 5), (5, 6), (6, 6), (6, 7), (7, 7), (7, 8), (8, 8), (8, 9), (9, 9), (10, 10), (11, 11), (12, 12), (12, 13)]
-    for couplings in cross_couplings+self_couplings+main_couplings:
-    # for couplings in test:
-        # Индексы связей
-        indices = torch.tensor(couplings, dtype=torch.long)  # (L, 2)
-        # i_idx, j_idx = indices[:, 0], indices[:, 1]
-        i_idx, j_idx = indices[0], indices[1]
-        x_current =  optim_matrix[i_idx, j_idx].numpy()
-        # bounds = [(min(1.5*xi, 0.01*xi), max(1.5*xi, 0.01*xi)) for xi in x_current]
-        bounds = [(min(1.5*x_current, 0.01*x_current), max(1.5*x_current, 0.01*x_current))]
-        # bounds = [(-2, 2) for xi in x_current]
-
-        result = minimize(
-            fun=cost_for_partial_links,
-            x0=x_current,
-            method='L-BFGS-B',
-            jac=True,
-            bounds=bounds,
-            args=(fast_calc, orig_filter, s11_target, s21_target, s22_target, couplings, matrix_order, optim_matrix),
-            options={'disp': True, 'maxiter': 100000, 'ftol': 1e-9, 'gtol': 1e-6}
-        )
-        print(f"Cost after optim: {result.fun}")
-
-        optim_matrix[i_idx, j_idx] = torch.tensor(result.x, dtype=torch.float32)
-        optim_matrix[j_idx, i_idx] = torch.tensor(result.x, dtype=torch.float32)
-        results.update({result.fun: optim_matrix})
-        if result.fun < 0.5:
-            break
-
-    print(f"Cost after homotopy L-BFGS-B: {result.fun}")
-
-    stop_time = time.time()
-    print(f"Optimize time: {stop_time - start_time:.3f} sec")
+    # for couplings in cross_couplings+self_couplings+main_couplings+cross_couplings+self_couplings+main_couplings:
+    # # for couplings in test:
+    #     # Индексы связей
+    #     indices = torch.tensor(couplings, dtype=torch.long)  # (L, 2)
+    #     # i_idx, j_idx = indices[:, 0], indices[:, 1]
+    #     i_idx, j_idx = indices[0], indices[1]
+    #     x_current =  optim_matrix[i_idx, j_idx].numpy()
+    #     # bounds = [(min(1.5*xi, 0.01*xi), max(1.5*xi, 0.01*xi)) for xi in x_current]
+    #     bounds = [(min(1.5*x_current, 0.01*x_current), max(1.5*x_current, 0.01*x_current))]
+    #     # bounds = [(-2, 2) for xi in x_current]
+    #
+    #     result = minimize(
+    #         fun=cost_for_partial_links,
+    #         x0=x_current,
+    #         method='L-BFGS-B',
+    #         jac=True,
+    #         bounds=bounds,
+    #         args=(fast_calc, orig_filter, s11_target, s21_target, s22_target, couplings, matrix_order, optim_matrix),
+    #         options={'disp': True, 'maxiter': 100000, 'ftol': 1e-9, 'gtol': 1e-6}
+    #     )
+    #     print(f"Cost after optim: {result.fun}")
+    #
+    #     optim_matrix[i_idx, j_idx] = torch.tensor(result.x, dtype=torch.float32)
+    #     optim_matrix[j_idx, i_idx] = torch.tensor(result.x, dtype=torch.float32)
+    #     results.update({result.fun: optim_matrix})
+    #     if result.fun < 0.5:
+    #         break
+    #
+    # print(f"Cost after homotopy L-BFGS-B: {result.fun}")
 
     # Постобработка результата
-    optim_matrix = CouplingMatrix(list(results.items())[-1][-1])
+    # optim_matrix = CouplingMatrix(list(results.items())[-1][-1])
     # optim_matrix = optim_matrix.matrix
-    x_current = optim_matrix.factors
-    # x_current = pred_filter.coupling_matrix.factors
+    # x_current = optim_matrix.factors
+    x_current = pred_filter.coupling_matrix.factors
 
     Mmin, Mmax = create_bounds(
         CouplingMatrix(CouplingMatrix.from_factors(torch.tensor(x_current, dtype=torch.float64),
                                                    pred_filter.coupling_matrix.links,
                                                    pred_filter.coupling_matrix.matrix_order)))
     bounds = [(min(m_min, m_max), max(m_min, m_max)) for m_min, m_max in tuple(zip(Mmin.factors, Mmax.factors))]
+    x_current = torch.concat((pred_filter.coupling_matrix.factors, torch.tensor([pred_filter.Q])))
+    bounds.append((pred_filter.Q*0.8, pred_filter.Q*1.2))
     result = minimize(
         fun=cost_with_grad,
         x0=x_current,
@@ -242,15 +247,19 @@ def optimize_cm(pred_filter: DatasetMWFilter, orig_filter: DatasetMWFilter):
         jac=True,
         bounds=bounds,
         args=(fast_calc, orig_filter, s11_target, s21_target, s22_target, links, matrix_order),
-        options={'disp': True, 'maxiter': 100000, 'ftol': 1e-9, 'gtol': 1e-6}
+        options={'disp': True, 'maxiter': 10000, 'ftol': 1e-9, 'gtol': 1e-6}
     )
     optim_matrix = CouplingMatrix.from_factors(
-        torch.tensor(result.x, dtype=torch.float32),
+        torch.tensor(result.x[:-1], dtype=torch.float32),
         links,
         matrix_order
     )
+    pred_filter._Q = result.x[-1]
     results.update({result.fun: optim_matrix})
     optim_matrix = results[sorted(results)[0]]
+
+    stop_time = time.time()
+    print(f"Optimize time: {stop_time - start_time:.3f} sec")
 
     # for lambda_ in lambda_values:
     #     print(f"Current lambda={lambda_}")
