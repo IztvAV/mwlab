@@ -43,13 +43,13 @@ class CMShifts:
 
 @dataclass
 class PSShift:
-    phi11: float
-    phi21: float
-    theta11: float
-    theta21: float
+    a11: float
+    a22: float
+    b11: float
+    b22: float
 
     def array(self):
-        return np.array([self.phi11, self.phi21, self.theta11, self.theta21])
+        return np.array([self.a11, self.a22, self.b11, self.b22])
 
 
 @dataclass
@@ -57,6 +57,8 @@ class CMTheoreticalDatasetGeneratorSamplers:
     cms: Sampler
     pss: Sampler
     qs: Sampler
+    f0: Sampler
+    bw: Sampler
 
     @classmethod
     def create_samplers(cls, origin_filter: MWFilter, samplers_type: SamplerTypes, samplers_size: int,
@@ -77,7 +79,7 @@ class CMTheoreticalDatasetGeneratorSamplers:
         pss_sampler_type.one_param = False
         pss_sampler = Sampler.for_type(
             **samplers_kwargs,
-            type=samplers_type,
+            type=SamplerTypes.SAMPLER_SOBOL, # Для теста, нужно проверить какую фазу выдаст в этом случае
             start=phase_shifts_min,
             stop=phase_shifts_max,
             num=len(cms_sampler))
@@ -87,8 +89,28 @@ class CMTheoreticalDatasetGeneratorSamplers:
         qs_sampler = Sampler.for_type(
             **samplers_kwargs,
             type=samplers_type,
-            start=origin_filter.Q*0.6,
-            stop=origin_filter.Q*1.4,
+            start=origin_filter.Q*0.8,
+            stop=origin_filter.Q*1.2,
+            num=len(cms_sampler)
+        )
+
+        f0_sampler_type = copy.deepcopy(samplers_type)
+        f0_sampler_type.one_param = False
+        f0_sampler = Sampler.for_type(
+            **samplers_kwargs,
+            type=samplers_type,
+            start=origin_filter.f0-0.0005,
+            stop=origin_filter.f0+0.0005,
+            num=len(cms_sampler)
+        )
+
+        bw_sampler_type = copy.deepcopy(samplers_type)
+        bw_sampler_type.one_param = False
+        bw_sampler = Sampler.for_type(
+            **samplers_kwargs,
+            type=samplers_type,
+            start=origin_filter.bw-0.05,
+            stop=origin_filter.bw+0.05,
             num=len(cms_sampler)
         )
 
@@ -101,6 +123,8 @@ class CMTheoreticalDatasetGeneratorSamplers:
             cms=cms_sampler,
             pss=pss_sampler,
             qs=qs_sampler,
+            f0=f0_sampler,
+            bw=bw_sampler
         )
 
     @classmethod
@@ -252,16 +276,20 @@ class CMTheoreticalDatasetGenerator:
             if torch.isnan(new_matrix).any() or torch.isinf(new_matrix).any():
                 raise ValueError("⚠️ Input to model contains NaN or Inf")
             ps_shifts = samplers.pss[idx]
-            # Q = samplers.qs[idx].item()
-            Q = self._origin_filter.Q
-            s_params = MWFilter.response_from_coupling_matrix(M=new_matrix, f0=self._origin_filter.f0,
-                                                              FBW=self._origin_filter.fbw, Q=Q,
+            Q = samplers.qs[idx].item()
+            f0 = samplers.f0[idx].item()
+            bw = samplers.bw[idx].item()
+            fbw = bw/f0
+            # Q = self._origin_filter.Q
+            s_params = MWFilter.response_from_coupling_matrix(M=new_matrix, f0=f0,
+                                                              FBW=fbw, Q=Q,
                                                               frange=self._origin_filter.f / 1e6, PSs=ps_shifts)
 
-            new_filter = MWFilter(f0=self._origin_filter.f0, order=self._origin_filter.order, bw=self._origin_filter.bw,
+            new_filter = MWFilter(f0=f0, order=self._origin_filter.order, bw=bw,
                                   Q=Q, matrix=new_matrix, frequency=self._origin_filter.f,
                                   s=s_params, z0=50)
-            ts = new_filter.to_touchstone_data()
+            ts = new_filter.to_touchstone_data(ps_shifts=ps_shifts)
+            # ts.params.update(dict(zip(["a11", "a22", "b11", "b22"], ps_shifts)))
             params = torch.tensor(list(ts.params.values()), dtype=torch.float32)
             if torch.isnan(params).any() or torch.isinf(params).any():
                 raise ValueError("⚠️ Params contains NaN or Inf")

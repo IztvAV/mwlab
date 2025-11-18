@@ -7,7 +7,7 @@ from torch import nn
 from filters.codecs import MWFilterTouchstoneCodec
 from filters.mwfilter_lightning import MWFilterBaseLMWithMetrics
 from models import CorrectionNet
-from mwlab import TouchstoneDataset, TouchstoneDatasetAnalyzer, TouchstoneLDataModule
+from mwlab import TouchstoneDataset, TouchstoneDatasetAnalyzer, TouchstoneLDataModule, TouchstoneCodec
 from mwlab.nn import MinMaxScaler
 from mwlab.transforms import TComposite
 from mwlab.transforms.s_transforms import S_Crop, S_Resample
@@ -36,11 +36,14 @@ def create_origin_filter(path_orig_filter: str, f_start=None, f_stop=None, f_uni
     f0 = origin_filter.f0
     bw = origin_filter.bw
     if f_start is None:
-        f_start = f0 - 2 * bw
+        # f_start = f0 - 1 * bw + bw/4
+        f_start = configs.F_START_MHZ
     if f_stop is None:
-        f_stop = f0 + 2 * bw
+        # f_stop = f0 + 1 * bw - bw/4
+        f_stop = configs.F_STOP_MHZ
     if f_unit is None:
         f_unit = "MHz"
+    print(f"f0={f0}, bw={bw}, f_start={f_start}, f_stop={f_stop}")
     y_transform = TComposite([
         S_Crop(f_start=f_start, f_stop=f_stop, unit=f_unit),
         S_Resample(resample_scale)
@@ -52,10 +55,11 @@ def create_origin_filter(path_orig_filter: str, f_start=None, f_stop=None, f_uni
 
 def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_param: bool=False, dataset_size=configs.BASE_DATASET_SIZE):
     sampler_configs = {
-        "pss_origin": PSShift(phi11=0.547, phi21=-1.0, theta11=0.01685, theta21=0.017),
-        "pss_shifts_delta": PSShift(phi11=0.02, phi21=0.02, theta11=0.005, theta21=0.005),
+        "pss_origin": PSShift(a11=0.0, a22=0.0, b11=0, b22=0),
+        "pss_shifts_delta": PSShift(a11=0.1, a22=0.1, b11=0.3, b22=0.3),
         # "cm_shifts_delta": CMShifts(self_coupling=1.8, mainline_coupling=0.3, cross_coupling=9e-2, parasitic_coupling=5e-3),
-        "cm_shifts_delta": CMShifts(self_coupling=1.8, mainline_coupling=0.3, cross_coupling=5e-2, parasitic_coupling=5e-3),
+        # "cm_shifts_delta": CMShifts(self_coupling=2.0, mainline_coupling=0.3, cross_coupling=5e-2, parasitic_coupling=5e-3),
+        "cm_shifts_delta": CMShifts(self_coupling=0.1, mainline_coupling=0.05, cross_coupling=1e-3, parasitic_coupling=0),
         "samplers_size": dataset_size,
     }
     samplers_all_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
@@ -65,22 +69,25 @@ def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_p
     samplers_all_params_shuffle_cms_cols = CMTheoreticalDatasetGeneratorSamplers(
         cms=samplers_all_params.cms.shuffle(ratio=1, dim=1),
         pss=samplers_all_params.pss,
-        qs=samplers_all_params.qs
+        qs=samplers_all_params.qs,
+        f0=samplers_all_params.f0,
+        bw=samplers_all_params.bw
     )
-    samplers_all_params_shuffle_pss_cols = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_all_params.cms,
-                                                                                     pss=samplers_all_params.pss.shuffle(
-                                                                                         ratio=1, dim=1),
-                                                                                 qs=samplers_all_params.qs)
-    samplers_all_params_flip_sign_cms_cols = CMTheoreticalDatasetGeneratorSamplers(
-        cms=samplers_all_params.cms.flip_signs(ratio=1, dim=0),
-        pss=samplers_all_params.pss,
-        qs=samplers_all_params.qs
-    )
-    samplers_all_params_shuffle_all_cols = CMTheoreticalDatasetGeneratorSamplers(
-        cms=samplers_all_params.cms.shuffle(ratio=1, dim=1),
-        pss=samplers_all_params.pss.shuffle(ratio=1, dim=1),
-        qs=samplers_all_params.qs.shuffle(ratio=1, dim=1)
-    )
+    # samplers_all_params_shuffle_pss_cols = CMTheoreticalDatasetGeneratorSamplers(cms=samplers_all_params.cms,
+    #                                                                                  pss=samplers_all_params.pss.shuffle(
+    #                                                                                      ratio=1, dim=1),
+    #                                                                              qs=samplers_all_params.qs,
+    #                                                                              f0=samplers_all_params.f0)
+    # samplers_all_params_flip_sign_cms_cols = CMTheoreticalDatasetGeneratorSamplers(
+    #     cms=samplers_all_params.cms.flip_signs(ratio=1, dim=0),
+    #     pss=samplers_all_params.pss,
+    #     qs=samplers_all_params.qs
+    # )
+    # samplers_all_params_shuffle_all_cols = CMTheoreticalDatasetGeneratorSamplers(
+    #     cms=samplers_all_params.cms.shuffle(ratio=1, dim=1),
+    #     pss=samplers_all_params.pss.shuffle(ratio=1, dim=1),
+    #     qs=samplers_all_params.qs
+    # )
 
     sampler_configs["samplers_size"] = int(dataset_size / 100)
     samplers_with_one_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
@@ -94,6 +101,8 @@ def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_p
         total_samplers.cms._type = sampler_type
         total_samplers.pss._type = sampler_type
         total_samplers.qs._type = sampler_type
+        total_samplers.f0._type = sampler_type
+        total_samplers.bw._type = sampler_type
     else:
         # total_samplers = CMTheoreticalDatasetGeneratorSamplers.concat(
         #     (samplers_all_params, samplers_all_params_shuffle_pss_cols)
@@ -101,13 +110,13 @@ def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_p
         total_samplers = samplers_all_params
         total_samplers.cms._type = sampler_type
         total_samplers.pss._type = sampler_type
-        total_samplers.qs._type = sampler_type
+        # total_samplers.qs._type = sampler_type
     if torch.isnan(total_samplers.cms.space).any() or torch.isinf(total_samplers.cms.space).any():
         raise ValueError("⚠️ (cms) Input to model contains NaN or Inf")
     if torch.isnan(total_samplers.pss.space).any() or torch.isinf(total_samplers.pss.space).any():
         raise ValueError("⚠️ (pss) Input to model contains NaN or Inf")
-    if torch.isnan(total_samplers.qs.space).any() or torch.isinf(total_samplers.qs.space).any():
-        raise ValueError("⚠️ (qs) Input to model contains NaN or Inf")
+    # if torch.isnan(total_samplers.qs.space).any() or torch.isinf(total_samplers.qs.space).any():
+    #     raise ValueError("⚠️ (qs) Input to model contains NaN or Inf")
     return total_samplers
 
 
@@ -272,11 +281,12 @@ def get_model(name: str="resnet_with_correction", **kwargs):
         raise ValueError(f"Unknown model name: {name}")
 
 
-def train_model(model: nn.Module, dm: TouchstoneLDataModule, trainer: L.Trainer,
+def train_model(model: nn.Module, work_model, dm: TouchstoneLDataModule, trainer: L.Trainer,
                 loss_fn,
                 optimizer_cfg:dict={"name": "AdamW", "lr": 0.0005370623202982373, "weight_decay": 1e-5},
                 scheduler_cfg:dict={"name": "StepLR", "step_size": 21, "gamma": 0.01}):
     lit_model = MWFilterBaseLMWithMetrics(
+        work_model=work_model,
         model=model,  # Наша нейросетевая модель
         swap_xy=True,
         scaler_in=dm.scaler_in,  # Скейлер для входных данных
@@ -364,7 +374,7 @@ class WorkModel:
                                       )
         trainer = L.Trainer(
             deterministic=True,
-            max_epochs=100,  # Максимальное количество эпох обучения
+            max_epochs=30,  # Максимальное количество эпох обучения
             accelerator="auto",  # Автоматический выбор устройства (CPU/GPU)
             log_every_n_steps=100,  # Частота логирования в процессе обучения
             callbacks=[stoping, checkpoint]
@@ -389,7 +399,7 @@ class WorkModel:
             codec=dm_codec,  # Кодек для преобразования TouchstoneData → (x, y)
             batch_size=configs.BATCH_SIZE,  # Размер батча
             val_ratio=0.2,  # Доля валидационного набора
-            test_ratio=0.05,  # Доля тестового набора
+            test_ratio=0.01,  # Доля тестового набора
             cache_size=0,
             scaler_in=MinMaxScaler(dim=(0, 2), feature_range=(0, 1)),  # Скейлер для входных данных
             scaler_out=MinMaxScaler(dim=0, feature_range=(-0.5, 0.5)),  # Скейлер для выходных данных
@@ -416,17 +426,76 @@ class WorkModel:
         tb_logger = TensorBoardLogger(save_dir="lightning_logs", name=f"{self.model_name}")
         csv_logger = CSVLogger(save_dir="lightning_logs", name=f"{self.model_name}_csv")
         self.trainer.loggers = [tb_logger, csv_logger]
-        lit_model = train_model(model=self.model, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, dm=self.dm,
+        lit_model = train_model(model=self.model, work_model=self, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, dm=self.dm,
                     trainer=self.trainer, loss_fn=loss_fn)
         print(f"Лучшая модель сохранена в: {self.trainer.checkpoint_callback.best_model_path}")
         return lit_model
 
     def inference(self, path_to_ckpt: str):
         inference_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
+            work_model=self,
             checkpoint_path=path_to_ckpt,
             model=self.model
         )
         return inference_model
+
+    def predict(self, inf_model: nn.Module, dm: TouchstoneLDataModule, idx: int, with_scalers: bool=True):
+        if idx == -1:  # значит предсказываем всем датасете
+            predictions = [self.predict_for(inf_model, dm, i, with_scalers) for i in range(len(dm.get_dataset(split="test", meta=True)))]
+        else:
+            predictions = self.predict_for(inf_model, dm, idx, with_scalers)
+        return predictions
+
+    def predict_for(self, inf_model: nn.Module, dm: TouchstoneLDataModule, idx: int, with_scalers=True) -> tuple[MWFilter, MWFilter]:
+        # Возьмем для примера первый touchstone-файл из тестового набора данных
+        test_tds = dm.get_dataset(split="test", meta=True)
+        # Поскольку swap_xy=True, то датасет меняет местами пары (y, x)
+        y_t, x_t, meta = test_tds[idx]  # Используем первый файл набора данных]
+
+        # Декодируем данные
+        orig_prms = dm.codec.decode_x(x_t)  # Создаем словарь параметров
+        net = dm.codec.decode_s(y_t, meta)  # Создаем объект skrf.Network
+
+        # Предсказанные S-параметры
+        pred_prms = inf_model.predict_x(net)
+        if not with_scalers:
+            pred_prms_vals = dm.scaler_out(torch.tensor(list(pred_prms.values())))
+            orig_prms_vals = dm.scaler_out(torch.tensor(list(orig_prms.values())))
+            pred_prms = dict(zip(pred_prms.keys(), list(torch.squeeze(pred_prms_vals, dim=0).numpy())))
+            orig_prms = dict(zip(orig_prms.keys(), list(torch.squeeze(orig_prms_vals, dim=0).numpy())))
+
+        print(f"Исходные параметры: {orig_prms}")
+        print(f"Предсказанные параметры: {pred_prms}")
+
+        orig_fil = MWFilter.from_touchstone_dataset_item(({**meta['params'], **orig_prms}, net))
+        pred_fil = self.create_filter_from_prediction(orig_fil, self.orig_filter, pred_prms, self.codec)
+        return orig_fil, pred_fil
+
+    @staticmethod
+    def create_filter_from_prediction(orig_fil: MWFilter, work_model_orig_fil: MWFilter, pred_prms: dict, codec: TouchstoneCodec) -> MWFilter:
+        # Q = meta['params']['Q']
+        if pred_prms.get('Q') is None:
+            Q = work_model_orig_fil.Q
+        else:
+            Q = pred_prms['Q']
+        if pred_prms.get('f0') is None:
+            f0 = work_model_orig_fil.f0
+        else:
+            f0 = pred_prms['f0']
+        if pred_prms.get('bw') is None:
+            bw = work_model_orig_fil.bw
+        else:
+            bw = pred_prms['bw']
+
+        fbw = bw/f0
+
+        pred_matrix = MWFilter.matrix_from_touchstone_data_parameters(pred_prms, matrix_order=work_model_orig_fil.coupling_matrix.matrix_order)
+        s_pred = MWFilter.response_from_coupling_matrix(f0=f0, FBW=fbw, frange=orig_fil.f / 1e6,
+                                                        Q=Q, M=pred_matrix)
+        pred_fil = MWFilter(order=work_model_orig_fil.coupling_matrix.matrix_order-2, bw=bw, f0=f0,
+                            Q=Q,
+                            matrix=pred_matrix, frequency=orig_fil.f, s=s_pred, z0=orig_fil.z0)
+        return pred_fil
 
     def info(self):
         if self.codec is None:

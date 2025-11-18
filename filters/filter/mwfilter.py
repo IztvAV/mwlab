@@ -29,10 +29,11 @@ class MWFilter(rf.Network):
         return freq
 
     @staticmethod
-    def matrix_from_touchstone_data_parameters(params: dict, N=None) -> torch.Tensor:
-        if N is None:
+    def matrix_from_touchstone_data_parameters(params: dict, matrix_order=None) -> torch.Tensor:
+        if matrix_order is None:
             N = int(params.get("N"))
-        M = torch.zeros((N + 2, N + 2), dtype=torch.float32)
+            matrix_order = N+2
+        M = torch.zeros((matrix_order, matrix_order), dtype=torch.float32)
         for k, v in params.items():
             if k.startswith("m_"):
                 _, i, j = k.split("_")
@@ -41,14 +42,17 @@ class MWFilter(rf.Network):
                 M[j, i] = torch.tensor(v, dtype=torch.float32)  # symmetric
         return M
 
-    def to_touchstone_data(self, path=None) -> mwlab.TouchstoneData:
+    def to_touchstone_data(self, path=None, ps_shifts=None) -> mwlab.TouchstoneData:
         params = {"f0": self.f0, "bw": self.bw, "Q": self.Q, "N": self.order}
+        if not ps_shifts is None:
+            params.update(dict(zip(["a11", "a22", "b11", "b22"], ps_shifts.cpu().numpy())))
         M = self.coupling_matrix.matrix.cpu().numpy() if torch.is_tensor(
             self.coupling_matrix.matrix) else self.coupling_matrix.matrix
 
         for i in range(M.shape[0]):
             for j in range(i, M.shape[1]):
                 val = M[i, j]
+                if val == 0: continue
                 params.update({f"m_{i}_{j}": val})
 
         td = mwlab.TouchstoneData(network=self, params=params, path=path)
@@ -114,8 +118,8 @@ class MWFilter(rf.Network):
         super().write_touchstone(filename)
 
     @staticmethod
-    def to_db(s: torch.Tensor) -> torch.Tensor:
-        return 20 * torch.log10(torch.abs(s))
+    def to_db(s: torch.Tensor, eps=1e-8) -> torch.Tensor:
+        return 20 * torch.log10(torch.abs(s) + eps)
 
     @property
     def s_db(self) -> torch.Tensor:
@@ -285,17 +289,20 @@ class MWFilter(rf.Network):
         S11 = 1 + 2j * Rs * A00
         S22 = 1 + 2j * Rl * ANN
         S21 = -2j * torch.sqrt(torch.tensor(Rs * Rl, dtype=torch.float32, device=device)) * AN0
+        S12 = S21
 
         if PSs is not None:
-            phi11, phi21, theta11, theta21 = PSs
-            phi11, phi21, theta11, theta21 = map(
+            a11, a22, b11, b22 = PSs
+            a11, a22, b11, b22 = map(
                 lambda x: torch.tensor(x, dtype=torch.float32, device=device),
-                (phi11, phi21, theta11, theta21)
+                (a11, a22, b11, b22)
             )
-            phase11 = torch.exp(-1j * 2 * (phi11 + lam * theta11))
-            phase21 = torch.exp(-1j * 2 * (phi21 + lam * theta21))
+            phase11 = torch.exp(-1j * 2 * (a11 + lam * b11))
+            phase22 = torch.exp(-1j * 2 * (a22 + lam * b22))
+            phase21 = torch.exp(-1j * (a11 + a22 + lam*(b11 + b22)))
+            phase12 = torch.exp(-1j * (a11 + a22 + lam*(b11 + b22)))
             S11 *= phase11
-            S22 *= phase11
+            S22 *= phase22
             S21 *= phase21
 
         # Assemble output S (B, 2, 2)

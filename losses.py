@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import torchmetrics
 
 from filters import CouplingMatrix, MWFilter
+from common import WorkModel
 
 
 class CustomLosses(nn.Module):
@@ -17,20 +18,17 @@ class CustomLosses(nn.Module):
         if self.loss_name == "mse":
             return F.mse_loss(y_pred, y_true)
         elif self.loss_name == "reg_with_s_parameters":
-            orig_fil = self.params["orig_fil"]
-            scaler_in = self.params["dm"].scaler_in
-            scaler_out = self.params["dm"].scaler_out
+            work_model: WorkModel = self.params["work_model"]
+            scaler_in = work_model.dm.scaler_in
+            scaler_out = work_model.dm.scaler_out
             fast_calc = self.params["fast_calc"]
-            if scaler_out is not None:
-                m_pred = CouplingMatrix.from_factors(scaler_out.inverse(y_pred), orig_fil.coupling_matrix.links,
-                                                     orig_fil.coupling_matrix.matrix_order)
-                m_true = CouplingMatrix.from_factors(scaler_out.inverse(y_true), orig_fil.coupling_matrix.links,
-                                                     orig_fil.coupling_matrix.matrix_order)
-            else:
-                m_pred = CouplingMatrix.from_factors(y_pred, orig_fil.coupling_matrix.links,
-                                                     orig_fil.coupling_matrix.matrix_order)
-                m_true = CouplingMatrix.from_factors(y_true, orig_fil.coupling_matrix.links,
-                                                     orig_fil.coupling_matrix.matrix_order)
+            pred_prms = work_model.codec.decode_x(scaler_out.inverse(y_pred))
+            orig_prms = work_model.codec.decode_x(scaler_out.inverse(y_true))
+
+            matrix_keys = [f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links]
+            m_true = orig_prms[matrix_keys]
+            m_pred = orig_prms[matrix_keys]
+
             _, s11_pred, s21_pred = fast_calc.BatchedRespM2(m_pred)
             _, s11_true, s21_true = fast_calc.BatchedRespM2(m_true)
             loss = F.mse_loss(y_pred, y_true) + F.l1_loss(y_pred, y_true) + self.params["weight_decay"]*(F.l1_loss(s11_true.real, s11_pred.real) + F.l1_loss(s11_true.imag, s11_pred.imag)
