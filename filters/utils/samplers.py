@@ -80,8 +80,8 @@ class Sampler:
         start = torch.as_tensor(start, device=device)
         stop = torch.as_tensor(stop, device=device)
 
-        if len(start) != len(stop):
-            raise ValueError("Start and stop must have same length")
+        # if len(start) != len(stop):
+        #     raise ValueError("Start and stop must have same length")
 
         # Calculate mean and std
         mu_tensor = (start + stop) / 2 + mu * (stop - start) / 2
@@ -218,7 +218,7 @@ class Sampler:
         start = torch.as_tensor(start, dtype=torch.float32, device=device)
         stop = torch.as_tensor(stop, dtype=torch.float32, device=device)
         assert start.shape == stop.shape, "start и stop должны совпадать по размеру"
-        if torch.any(start >= stop):
+        if torch.any(start > stop):
             raise ValueError("start[i] должен быть меньше stop[i]")
         d = start.numel()
 
