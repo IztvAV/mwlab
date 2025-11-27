@@ -42,6 +42,7 @@ inference_model = None
 corr_model = None
 corr_fast_calc = None
 corr_optim = None
+phase_extractor: phase.PhaseLoadingExtractor or None = None
 
 
 class CorrectionNet(nn.Module):
@@ -68,9 +69,9 @@ def load_model(fil_name: str="EAMU4T1-BPFC2"):
         work_model = common.WorkModel(configs.ENV_DATASET_PATH, configs.BASE_DATASET_SIZE, SamplerTypes.SAMPLER_SOBOL)
         codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
                                                      keys_for_analysis=[f"m_{r}_{c}" for r, c in
-                                                                        work_model.orig_filter.coupling_matrix.links] + [
-                                                                           "Q"] + ["f0"] + ["bw"] + ["a11"] + [
-                                                                           "a22"] + ["b11"] + ["b22"])
+                                                                        work_model.orig_filter.coupling_matrix.links] +
+                                                                       ["Q"] + ["f0"] + ["bw"] + ["a11"] +
+                                                                       ["a22"] + ["b11"] + ["b22"])
         global corr_fast_calc
         corr_fast_calc = FastMN2toSParamCalculation(matrix_order=work_model.orig_filter.coupling_matrix.matrix_order,
                                                     wlist=work_model.orig_filter.f_norm,
@@ -87,8 +88,11 @@ def load_model(fil_name: str="EAMU4T1-BPFC2"):
             model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
             dm_codec=codec
         )
-        global inference_model
-        inference_model = work_model.inference(f"D:\\Burlakov\\pyprojects\\mwlab\\saved_models\\EAMU4-KuIMUXT2-BPFC2\\best-epoch=27-train_loss=0.08527-val_loss=0.07506-val_r2=0.99731-val_mse=0.00021-val_mae=0.00531-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
+        global inference_model, phase_extractor
+        # inference_model = work_model.inference(f"D:\\Burlakov\\pyprojects\\mwlab\\saved_models\\EAMU4-KuIMUXT2-BPFC2\\best-epoch=27-train_loss=0.08527-val_loss=0.07506-val_r2=0.99731-val_mse=0.00021-val_mae=0.00531-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
+        inference_model = work_model.inference(
+            "D:/Burlakov/pyprojects/mwlab/saved_models/EAMU4-KuIMUXT2-BPFC4/best-epoch=26-train_loss=0.08889-val_loss=0.08248-val_r2=0.99727-val_mse=0.00020-val_mae=0.00647-batch_size=32-base_dataset_size=300000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
+        phase_extractor = phase.PhaseLoadingExtractor(inference_model, work_model, work_model.orig_filter)
     except Exception as e:
         raise ValueError(f"На сервере возникла ошибка: {e}") from e
 
@@ -100,24 +104,29 @@ def predict(fil: rf.Network):
         s_resample = S_Resample(301)
         fil = s_resample(fil)
         orig_fil_to_nn = copy.deepcopy(fil)
-        res, S_def = phase.fit_phase_edges_curvefit(
-            w, orig_fil_to_nn,
-            # q=0.35,
-            center_points=(-1.53, 1.53),
-            correct_freq_dependence=True,
-            fit_on_extrapolated=True,
-            plot=False
-        )
-        orig_fil_to_nn.s = S_def
-        pred_prms = inference_model.predict_x(orig_fil_to_nn)
+        # res, S_def = phase.fit_phase_edges_curvefit(
+        #     w, orig_fil_to_nn,
+        #     # q=0.35,
+        #     center_points=(-1.53, 1.53),
+        #     correct_freq_dependence=True,
+        #     fit_on_extrapolated=True,
+        #     plot=False
+        # )
+        # orig_fil_to_nn.s = S_def
+
+        res = phase_extractor.extract_all(orig_fil_to_nn, w_norm=w)
+        ntw_de = res['ntw_deembedded']
+
+        pred_prms = inference_model.predict_x(ntw_de)
         print(f"Предсказанные параметры: {pred_prms}")
         pred_fil = work_model.create_filter_from_prediction(orig_fil_to_nn, work_model.orig_filter, pred_prms,
                                                             work_model.codec)
+
         ps_shifts = [pred_prms["a11"], pred_prms["a22"], pred_prms["b11"], pred_prms["b22"]]
-        a11_final = res['S11']['phi_c'] + pred_prms["a11"]
-        a22_final = res['S22']['phi_c'] + pred_prms["a22"]
-        b11_final = pred_prms["b11"] + res['S11']['phi_b']
-        b22_final = pred_prms["b22"] + res['S22']['phi_b']
+        a11_final = res['phi1_c'] + pred_prms["a11"]
+        a22_final = res['phi2_c'] + pred_prms["a22"]
+        b11_final = pred_prms["b11"] + 0.5*res['b11_opt']
+        b22_final = pred_prms["b22"] + 0.5*res['b22_opt']
         print(
             f"Финальный фазовый сдвиг, после корректировки ИИ: a11={a11_final:.6f} рад ({np.degrees(a11_final):.2f}°), a22={a22_final:.6f} рад ({np.degrees(a22_final):.2f}°)"
             f" b11 = {b11_final:.6f} рад ({np.degrees(b11_final):.2f}°), b22 = {b22_final:.6f} рад ({np.degrees(b22_final):.2f}°)")
@@ -142,7 +151,13 @@ def predict(fil: rf.Network):
         # optim_matrix = optimize_cm(pred_fil, fil, pred_fil.f_norm)
         # print(f"Оптимизированные параметры: {optim_matrix.factors}")
         S = calc_s_params(optim_matrix.matrix.numpy(), pred_fil.f0, pred_fil.bw, pred_fil.Q, fil.f/1e6)
+        a11_final, a22_final, b11_final, b22_final = phase_opt
+        S[:, 0, 0] *= np.array(torch.exp(-1j * 2 * (a11_final + w * b11_final)), dtype=np.complex64)
+        S[:, 0, 1] *= np.array(-torch.exp(-1j * (a11_final + a22_final + w * (b11_final + b22_final))), dtype=np.complex64)
+        S[:, 1, 0] *= np.array(-torch.exp(-1j * (a11_final + a22_final + w * (b11_final + b22_final))), dtype=np.complex64)
+        S[:, 1, 1] *= np.array(torch.exp(-1j * 2 * (a22_final + w * b22_final)), dtype=np.complex64)
         return S, optim_matrix.matrix.numpy()
+        # return pred_fil.coupling_matrix.matrix.numpy()
     except Exception as e:
         raise ValueError(f"На сервере возникла ошибка: {e}") from e
 

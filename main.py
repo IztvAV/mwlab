@@ -8,9 +8,9 @@ import numpy as np
 
 import cauchy_method
 import phase
-
+import skrf as rf
 import pandas as pd
-
+# from utils import make_network
 from cm_extract_api import inference_model
 from filters.mwfilter_optim.base import FastMN2toSParamCalculation
 from mwlab import TouchstoneDataset, TouchstoneLDataModule, TouchstoneDatasetAnalyzer, TouchstoneData
@@ -23,7 +23,7 @@ from filters.datasets.theoretical_dataset_generator import CMShifts, PSShift
 
 import matplotlib.pyplot as plt
 import lightning as L
-
+from scipy.optimize import minimize
 from torch import nn
 import models
 import torch
@@ -420,229 +420,146 @@ def inherence_correct():
     n = len(tds)
     print(f"MEAN over {n} iters: L={total_L / n:.6f}, fit={total_fit / n:.6f}, time/iter={total_time / n:.2f}s")
 
+def make_phase_objective(ntw_orig, inference_model, work_model, reference_filter, w_norm):
+    """
+    Возвращает функцию objective(params), в которой:
+      - S_raw и f кэшированы
+      - есть один постоянный ntw_de, в котором мы только обновляем .s
+    """
+    f = ntw_orig.f
+    S_raw = ntw_orig.s  # (N,2,2), без копии – и так достаточно
+
+    # Разложим один раз
+    S11_raw_full = S_raw[:, 0, 0]
+    S21_raw_full = S_raw[:, 0, 1]
+    S22_raw_full = S_raw[:, 1, 1]
+
+    # Один reusable Network для подачи в нейросеть
+    ntw_de = ntw_orig.copy()
+    ntw_de.name = "De-embedded_for_NN"
+
+    w_norm = np.asarray(w_norm, dtype=np.float64)
+
+    def objective(params, verbose=False):
+        b11_opt, b22_opt = params
+
+        # 1) DE-EMBED кандидата (снимаем фазу)
+        S11_de, S21_de, S22_de = phase.apply_phase_all(
+            S11_raw_full, S21_raw_full, S22_raw_full,
+            w_norm,
+            a11=0.0, b11=-b11_opt,
+            a22=0.0, b22=-b22_opt,
+        )
+
+        # Собираем новый S в один массив (без создания нового Network)
+        S_new = np.empty_like(S_raw)
+        S_new[:, 0, 0] = S11_de
+        S_new[:, 0, 1] = S21_de
+        S_new[:, 1, 0] = S21_de
+        S_new[:, 1, 1] = S22_de
+
+        ntw_de.s = S_new
+
+        # 2) NN → CM + своя фазовая нагрузка
+        pred_params = inference_model.predict_x(ntw_de)
+
+        pred_filter = work_model.create_filter_from_prediction(
+            ntw_de, reference_filter, pred_params, work_model.codec
+        )
+        S_pred = pred_filter.s
+        S11_ideal = S_pred[:, 0, 0]
+        S21_ideal = S_pred[:, 0, 1]
+        S22_ideal = S_pred[:, 1, 1]
+
+        # 3) Фаза от сети
+        a11_nn = float(pred_params.get("a11", 0.0))
+        b11_nn = float(pred_params.get("b11", 0.0))
+        a22_nn = float(pred_params.get("a22", 0.0))
+        b22_nn = float(pred_params.get("b22", 0.0))
+
+        # 4) Суммарная фаза
+        a11_total = a11_nn
+        a22_total = a22_nn
+        b11_total = b11_opt + b11_nn
+        b22_total = b22_opt + b22_nn
+
+        # 5) Вешаем суммарную фазу на идеальный отклик
+        S11_final, S21_final, S22_final = phase.apply_phase_all(
+            S11_ideal, S21_ideal, S22_ideal,
+            w_norm,
+            a11=a11_total, b11=b11_total,
+            a22=a22_total, b22=b22_total,
+        )
+
+        # 6) Ошибка по комплексным S
+        loss = (
+            np.mean(np.abs(S11_final - S11_raw_full)) +
+            np.mean(np.abs(S21_final - S21_raw_full)) +
+            np.mean(np.abs(S22_final - S22_raw_full))
+        )
+
+        if verbose:
+            print(
+                f"[b11_opt={b11_opt:.4f}, b22_opt={b22_opt:.4f}] "
+                f"b11_nn={b11_nn:.4f}, b22_nn={b22_nn:.4f}, "
+                f"loss={loss:.6f}"
+            )
+
+        return loss
+
+    return objective
 
 
-import numpy as np
-import matplotlib.pyplot as plt
+def coarse_grid_search(obj, b_min=-np.pi, b_max=np.pi, n_grid=25):
+    b_vals = np.linspace(b_min, b_max, n_grid)
 
-# ---------- вспомогательные ----------
-def _poly_design_no_affine(w, deg=4):
-    w = np.asarray(w, float)
-    if deg < 2:
-        return np.zeros((w.size, 0), float)
-    wc = (w - w.mean()) / (np.max(np.abs(w - w.mean())) + 1e-12)
-    cols = [wc**k for k in range(2, deg+1)]
-    return np.column_stack(cols)
+    best_loss = np.inf
+    best_b11 = None
+    best_b22 = None
 
-def _unwrap_phase(z):
-    return np.unwrap(np.angle(z))
+    for b11 in b_vals:
+        for b22 in b_vals:
+            loss = obj((b11, b22))
+            if loss < best_loss:
+                best_loss = loss
+                best_b11, best_b22 = b11, b22
 
-def _center_series(y, w, center_at):
-    if center_at is None:
-        return y
-    if center_at == 'mid':
-        idx = len(w)//2
+    print(f"[GRID] best_loss={best_loss:.6f} at b11_opt={best_b11:.4f}, b22_opt={best_b22:.4f}")
+    return np.array([best_b11, best_b22])
+
+
+def refine_local(x0, obj):
+    res = minimize(
+        lambda x: obj(x),
+        x0,
+        method='Nelder-Mead',
+        options={'maxiter': 100, 'xatol': 1e-4, 'fatol': 1e-4}
+    )
+    print(f"[NELDER-MEAD] x_opt={res.x}, loss={res.fun:.6f}, success={res.success}")
+    return res
+
+
+_last_x0 = np.array([0.0, 0.0])
+
+def optimize_phase_loading(ntw_orig, inference_model, work_model, reference_filter, w_norm,
+                           use_grid=False):
+    global _last_x0
+    start_time = time.time()
+
+    w_norm = np.asarray(w_norm, dtype=np.float64)
+    obj = make_phase_objective(ntw_orig, inference_model, work_model, reference_filter, w_norm)
+
+    if use_grid:
+        x0 = coarse_grid_search(obj, b_min=-np.pi, b_max=np.pi, n_grid=25)
     else:
-        idx = int(np.argmin(np.abs(w - float(center_at))))
-    return y - y[idx]
+        x0 = _last_x0  # тёплый старт из прошлого оптимума
 
-# ---------- Оценка фаз + построение аппроксимации и метрик ----------
-def phase_fit_quality(w, Sii, deg=4, center_at='mid', name='Sii'):
-    """
-    Строит МНК-аппроксимацию фазы Sii: φ ≈ -2(a + b w) + sum_{k>=2} c_k w^k
-    Возвращает словарь с (a,b,coeffs,phi_fit,metrics) и рисует фазу/остатки.
-    """
-    w = np.asarray(w, float).ravel()
-    phi = _unwrap_phase(Sii)                                 # рад
-    F = w.size
-    X_ab = np.column_stack([np.ones(F), w])                  # [F,2] для (-2a, -2b)
-    X_hi = _poly_design_no_affine(w, deg=deg)                # [F,deg-1]
-    X    = np.column_stack([X_ab, X_hi])                     # полный дизайн
-    beta, *_ = np.linalg.lstsq(X, phi, rcond=None)           # МНК
-    a = -0.5*beta[0]; b = -0.5*beta[1]
-    coeffs = beta[2:]                                        # кв. и выше
-    phi_fit = X @ beta                                       # рад
+    res = refine_local(x0, obj)
+    _last_x0 = res.x.copy()
 
-    # метрики в градусах
-    err = (phi - phi_fit)                      # рад
-    err_deg = np.degrees(err)
-    mae = float(np.mean(np.abs(err_deg)))
-    rmse = float(np.sqrt(np.mean(err_deg**2)))
-    # R^2 по рад
-    ss_res = float(np.sum(err**2))
-    ss_tot = float(np.sum((phi - np.mean(phi))**2)) + 1e-12
-    r2 = 1.0 - ss_res/ss_tot
-
-    # плот «фаза+аппроксимация» и «остатки»
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 6), dpi=120, sharex=True)
-    phi_c     = _center_series(phi, w, center_at)
-    phi_fit_c = _center_series(phi_fit, w, center_at)
-    ax1.plot(w, np.degrees(phi_c), label='фаза (unwrapped)', lw=1.6)
-    ax1.plot(w, np.degrees(phi_fit_c), '--', label=f'аппроксимация (deg={deg})', lw=1.6)
-    ax1.set_ylabel('φ (°)')
-    ax1.set_title(f'{name}: фаза vs аппроксимация  |  MAE={mae:.2f}°, RMSE={rmse:.2f}°, R²={r2:.4f}')
-    ax1.grid(True, alpha=0.25)
-    ax1.legend()
-
-    ax2.plot(w, err_deg, lw=1.2)
-    ax2.axhline(0, color='k', alpha=0.3)
-    ax2.set_xlabel('Нормированная частота ω')
-    ax2.set_ylabel('Остаток φ (°)')
-    ax2.set_title(f'{name}: остатки аппроксимации')
-    ax2.grid(True, alpha=0.25)
-    fig.tight_layout()
-
-    return {
-        'a': a, 'b': b, 'coeffs': coeffs, 'phi_fit': phi_fit,
-        'metrics': {'MAE_deg': mae, 'RMSE_deg': rmse, 'R2': r2}
-    }
-
-# ---------- прежние функции деэмбединга (без весов) ----------
-def estimate_port_phase_poly(w, S11, S22, deg=4):
-    w = np.asarray(w, float).ravel()
-    phi11 = _unwrap_phase(S11)
-    phi22 = _unwrap_phase(S22)
-    F = w.size
-    X_ab = np.column_stack([np.ones(F), w])
-    X_hi = _poly_design_no_affine(w, deg=deg)
-
-    def fit_one(phi):
-        X = np.column_stack([X_ab, X_hi])
-        beta, *_ = np.linalg.lstsq(X, phi, rcond=None)
-        return (-0.5*beta[0], -0.5*beta[1])  # (a,b)
-
-    a1, b1 = fit_one(phi11)
-    a2, b2 = fit_one(phi22)
-    return a1, a2, b1, b2
-
-def apply_deembedding(w, S, a1, a2, b1, b2):
-    w = np.asarray(w, float).ravel()
-    phi1 = a1 + b1*w
-    phi2 = a2 + b2*w
-    f11 = np.exp(1j*2*phi1)
-    f22 = np.exp(1j*2*phi2)
-    f21 = np.exp(1j*(phi1+phi2))
-    Sout = S.copy()
-    Sout[:,0,0] *= f11
-    Sout[:,1,1] *= f22
-    Sout[:,0,1] *= f21
-    Sout[:,1,0] *= f21
-    return Sout
-
-# ---------- обновление: добавляем сравнение аппроксимации внутрь общего пайплайна ----------
-def plot_deembedding_phases(w, S_meas, deg=4,
-                            center_at=None,
-                            show_unwrapped=True,     # <— НОВОЕ: вкл/выкл unwrapped-фигуры
-                            show_group_delay=True,
-                            show_wrapped=False,
-                            show_real_imag=True,
-                            show_fit_quality=True):
-    """
-    w      : [F] нормированная частота ω
-    S_meas : [F,2,2] complex — исходные S-параметры
-    deg    : степень полинома для «внутренней» формы (>=2)
-    center_at : None | 'mid' | float(ω) — вычитание константы фазы (для наглядности)
-    show_unwrapped   : рисовать ли unwrapped-фазы S11/S21/S22 (до/после)
-    show_group_delay : рисовать τ для S21 (норм.) = -dφ/dω
-    show_wrapped     : дополнительно показать wrapped-фазы
-    show_real_imag   : показать графики Re/Im до/после
-    show_fit_quality : показать качество полиномиальной аппроксимации фаз S11/S22
-    Возвращает: (a1, a2, b1, b2, S_def, fit_info)
-      fit_info = {'S11': {...}, 'S22': {...}} если show_fit_quality=True, иначе {}
-    """
-    S_meas = np.asarray(S_meas)
-    w = np.asarray(w, float).ravel()
-    assert S_meas.shape[-2:] == (2,2), "Ожидается S:[F,2,2]"
-
-    # --- извлечь фазы, при необходимости показать качество подгонки ---
-    S11 = S_meas[:,0,0]
-    S22 = S_meas[:,1,1]
-
-    fit_info = {}
-    if show_fit_quality:
-        fit11 = phase_fit_quality(w, S11, deg=deg, center_at=center_at, name='S11')
-        fit22 = phase_fit_quality(w, S22, deg=deg, center_at=center_at, name='S22')
-        fit_info['S11'] = fit11
-        fit_info['S22'] = fit22
-        a1, b1 = fit11['a'], fit11['b']
-        a2, b2 = fit22['a'], fit22['b']
-    else:
-        a1, a2, b1, b2 = estimate_port_phase_poly(w, S11, S22, deg=deg)
-
-    # --- деэмбеддинг ---
-    S_def = apply_deembedding(w, S_meas, a1, a2, b1, b2)
-
-    # --- утилиты отображения ---
-    def _center_series(y):
-        if center_at is None:
-            return y
-        if center_at == 'mid':
-            idx = len(w)//2
-        else:
-            idx = int(np.argmin(np.abs(w - float(center_at))))
-        return y - y[idx]
-
-    def _unwrap_phase_arr(z):
-        return np.unwrap(np.angle(z))
-
-    # --- (опционально) unwrapped фазы: S11, S21, S22 ---
-    if show_unwrapped:
-        def _plot_phase(ax, z_before, z_after, title):
-            ph_b = _center_series(_unwrap_phase_arr(z_before))
-            ph_a = _center_series(_unwrap_phase_arr(z_after))
-            ax.plot(w, np.degrees(ph_b), label='до', lw=1.6)
-            ax.plot(w, np.degrees(ph_a), '--', label='после', lw=1.6)
-            ax.set_ylabel('φ (°)'); ax.set_title(title); ax.grid(True, alpha=0.25)
-
-        fig, axes = plt.subplots(3, 1, figsize=(9, 8), dpi=120, sharex=True)
-        _plot_phase(axes[0], S_meas[:,0,0], S_def[:,0,0], 'Фаза S11 (unwrapped)')
-        _plot_phase(axes[1], S_meas[:,0,1], S_def[:,0,1], 'Фаза S21 (unwrapped)')
-        _plot_phase(axes[2], S_meas[:,1,1], S_def[:,1,1], 'Фаза S22 (unwrapped)')
-        axes[-1].set_xlabel('Нормированная частота ω'); axes[0].legend()
-        fig.suptitle('До/после деэмбединга фазы', y=0.98); fig.tight_layout()
-
-    # --- (опц.) group delay (норм.) для S21 ---
-    if show_group_delay:
-        phi_b = _unwrap_phase_arr(S_meas[:,0,1]); phi_a = _unwrap_phase_arr(S_def[:,0,1])
-        tau_b = -np.gradient(phi_b, w);           tau_a = -np.gradient(phi_a, w)
-        fig2, ax2 = plt.subplots(figsize=(9, 4), dpi=120)
-        ax2.plot(w, tau_b, label='до', lw=1.6)
-        ax2.plot(w, tau_a, '--', label='после', lw=1.6)
-        ax2.set_xlabel('Нормированная частота ω'); ax2.set_ylabel('Групповая задержка (норм.)')
-        ax2.set_title('Групповая задержка S21 (до/после)')
-        ax2.grid(True, alpha=0.25); ax2.legend(); fig2.tight_layout()
-
-    # --- (опц.) wrapped фазы ---
-    if show_wrapped:
-        def _wr(z):
-            ph = np.angle(z)
-            if center_at is not None:
-                idx = len(w)//2 if center_at == 'mid' else int(np.argmin(np.abs(w - float(center_at))))
-                ph = np.angle(np.exp(1j*(ph - ph[idx])))
-            return np.degrees(ph)
-        fig3, axes3 = plt.subplots(3, 1, figsize=(9, 8), dpi=120, sharex=True)
-        axes3[0].plot(w, _wr(S_meas[:,0,0]), label='до'); axes3[0].plot(w, _wr(S_def[:,0,0]), '--', label='после'); axes3[0].set_title('S11 (wrapped)')
-        axes3[1].plot(w, _wr(S_meas[:,0,1]), label='до'); axes3[1].plot(w, _wr(S_def[:,0,1]), '--', label='после'); axes3[1].set_title('S21 (wrapped)')
-        axes3[2].plot(w, _wr(S_meas[:,1,1]), label='до'); axes3[2].plot(w, _wr(S_def[:,1,1]), '--', label='после'); axes3[2].set_xlabel('Нормированная частота ω'); axes3[2].set_title('S22 (wrapped)')
-        axes3[0].legend(); fig3.tight_layout()
-
-    # --- (опц.) Re/Im до/после ---
-    if show_real_imag:
-        fig4, axes4 = plt.subplots(3, 2, figsize=(11, 8), dpi=120, sharex=True)
-        names = [('S11', (0,0)), ('S21', (0,1)), ('S22', (1,1))]
-        for r, (nm, ij) in enumerate(names):
-            zb = S_meas[:, ij[0], ij[1]]; za = S_def[:, ij[0], ij[1]]
-            ax = axes4[r, 0]; ax.plot(w, zb.real, label='до', lw=1.6); ax.plot(w, za.real, '--', label='после', lw=1.6)
-            ax.set_ylabel(f'{nm} — Re'); ax.grid(True, alpha=0.25);
-            if r == 0: ax.set_title('Действительная часть')
-            ax = axes4[r, 1]; ax.plot(w, zb.imag, label='до', lw=1.6); ax.plot(w, za.imag, '--', label='после', lw=1.6)
-            ax.grid(True, alpha=0.25);
-            if r == 0: ax.set_title('Мнимая часть')
-        axes4[-1, 0].set_xlabel('Нормированная частота ω'); axes4[-1, 1].set_xlabel('Нормированная частота ω')
-        axes4[0, 0].legend(loc='best'); fig4.suptitle('Re/Im S-параметров: до и после деэмбединга', y=0.98); fig4.tight_layout()
-
-    return a1, a2, b1, b2, S_def, fit_info
-
+    stop_time = time.time()
+    print(f"Optimize phase loading time: {stop_time - start_time:.3f} sec")
+    return res
 
 
 def main():
@@ -672,8 +589,13 @@ def main():
     # )
     # fig.suptitle("Статистика по синтетике S11 (дБ)")
     #
+
     tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted",
                             s_tf=S_Resample(301))
+
+    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband",
+    #                         s_tf=S_Resample(301))
+
     # meas_analyzer = TouchstoneDatasetAnalyzer(tds)
     # fig = meas_analyzer.plot_s_stats(
     #     port_out=2, port_in=1, metric='db', stats=['mean', 'std', 'min', 'max']
@@ -760,7 +682,7 @@ def main():
     # inference_model = work_model.inference("saved_models\\EAMU4T1-BPFC2\\best-epoch=25-train_loss=0.02530-val_loss=0.02793-val_r2=0.96251-val_mse=0.00296-val_mae=0.02496-batch_size=32-base_dataset_size=1000000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
     # inference_model = work_model.inference("saved_models\\ERV-KuIMUXT1-BPFC1\\best-epoch=78-train_loss=0.01672-val_loss=0.02663-val_r2=0.96754-val_mse=0.00258-val_mae=0.02406-batch_size=32-base_dataset_size=100000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
     # inference_model = work_model.inference("saved_models\\ERV-KuIMUXT1-BPFC1\\best-epoch=25-train_loss=0.01518-val_loss=0.01534-val_r2=0.89565-val_mse=0.00116-val_mae=0.01418-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_STD.ckpt")
-    inference_model = work_model.inference("saved_models/EAMU4-KuIMUXT2-BPFC4/best-epoch=28-train_loss=0.08384-val_loss=0.06965-val_r2=0.99855-val_mse=0.00011-val_mae=0.00464-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
+    inference_model = work_model.inference("saved_models/EAMU4-KuIMUXT2-BPFC4/best-epoch=26-train_loss=0.08889-val_loss=0.08248-val_r2=0.99727-val_mse=0.00020-val_mae=0.00647-batch_size=32-base_dataset_size=300000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
     # inference_model = work_model.inference("saved_models/EAMU4-KuIMUXT2-BPFC2/best-epoch=27-train_loss=0.08527-val_loss=0.07506-val_r2=0.99731-val_mse=0.00021-val_mae=0.00531-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
     # inference_model = work_model.inference(lit_model.trainer.checkpoint_callback.best_model_path)
 
@@ -839,87 +761,128 @@ def main():
     # optim_matrix.plot_matrix(title="Optimized tuned matrix for inverted model")
 
 
-    for i in range(0, len(tds)):
-        # i = random.randint(0, len(tds))
+    cst_tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/cst",
+                            s_tf=S_Resample(301))
+    # TODO: РЕФАКТОРИНГ МЕТОДОВ WORK_MODEL!!!!!
+    phase_extractor = phase.PhaseLoadingExtractor(inference_model, work_model, work_model.orig_filter)
+    for i in range(4, 7):
         w = work_model.orig_filter.f_norm
         orig_fil = tds[i][1]
+        cst_fil = cst_tds[i][1]
+
+        b11 = 2.5
+        b22 = 0.1
+        orig_fil.s[:, 0, 0] *= np.array(torch.exp(-1j*(w*b11)), dtype=np.complex64)
+        orig_fil.s[:, 0, 1] *= np.array(torch.exp(-1j*0.5*(w*(b11+b22))), dtype=np.complex64)
+        orig_fil.s[:, 1, 0] *= np.array(torch.exp(-1j*0.5*(w*(b11+b22))), dtype=np.complex64)
+        orig_fil.s[:, 1, 1] *= np.array(torch.exp(-1j*(w*b22)), dtype=np.complex64)
+
         orig_fil_to_nn = copy.deepcopy(orig_fil)
-        w_ext, s11_ext, s21_ext = cauchy_method.extract_coeffs(freq=orig_fil.f / 1e6, Q=work_model.orig_filter.Q, f0=work_model.orig_filter.f0,
-                                     s11=orig_fil_to_nn.s[:, 0, 0], s21=-orig_fil_to_nn.s[:, 1, 0],
-                                     N=work_model.orig_filter.order,
-                                     nz=8, bw=work_model.orig_filter.bw)
-        # n_points = len(w_ext)
-        # s_new = np.zeros((n_points, 2, 2), dtype=complex)
-        #
-        # s_new[:, 0, 0] = s11_ext
-        # s_new[:, 1, 0] = s21_ext
-        # s_new[:, 0, 1] = s21_ext  # если считаешь сеть взаимной
-        # s_new[:, 1, 1] = s11_ext  # либо возьми из аппроксимации/старой сети
-        #
-        # w = w_ext
-        # orig_fil_to_nn.s = s_new
-        # orig_fil_to_nn.f = MWFilter.nfreq_to_freq(w, work_model.orig_filter.f0, work_model.orig_filter.bw)*1e6
 
-        eps_mu = 1/3e8
-        phase.estimate_phi0_dl_wrapped_from_vectors(
-            f_hz=orig_fil_to_nn.f,
-            S_vec=orig_fil_to_nn.s[:,1,1],
-            w_norm=w,
-            w0=1.42,
-            eps_mu=eps_mu
+
+        # plt.figure()
+        # gvz = np.gradient(np.angle(orig_fil.s[:, 0, 0]), w)
+        # plt.plot(w, gvz)
+        # # plt.plot(w, min(gvz[0], gvz[-1])*np.ones_like(w))
+        # # plt.title("ГВЗ S11")
+        # plt.title(f"{tds.backend.paths[i].parts[-1]}. Значения на краях: {gvz[0]:.3f}, {gvz[-1]:.3f}")
+        # print(f"For gvz: {gvz[0]:.3f}, {gvz[-1]:.3f}")
+
+        phase_shifts, S_def = phase.fit_phase_edges_curvefit(
+            w, orig_fil_to_nn,
+            center_points=None,
+            plot=False,
+            verbose=False
         )
-        # phi0_11, dl_11, phi_corr_11, S11_corr = phase.estimate_phi0_dl_wrapped_from_vectors(
-        #     1.42, orig_fil_to_nn.f, orig_fil_to_nn.s[:, 0, 0], eps_mu, label='S11', plot=True
-        # )
-        # 
-        # phi0_22, dl_22, phi_corr_22, S22_corr = phase.estimate_phi0_dl_wrapped_from_vectors(
-        #     1.42, orig_fil_to_nn.f, orig_fil_to_nn.s[:, 1, 1], eps_mu, label='S22', plot=True
-        # )
-
-        # res, S_def = phase.fit_phase_edges_curvefit(
-        #     w, orig_fil_to_nn,
-        #     # q=0.35,
-        #     # center_points=(-1.42, 1.42),
-        #     center_points=(-3, 3),
-        #     correct_freq_dependence=True,
-        #     fit_on_extrapolated=True,
-        #     plot=True
-        # )
-        # orig_fil_to_nn.s = S_def
-
+        orig_fil_to_nn.s = S_def
+        orig_fil_to_nn_copy = copy.deepcopy(orig_fil_to_nn)
+        phase_loadings = optimize_phase_loading(
+            ntw_orig=orig_fil_to_nn_copy,
+            inference_model=inference_model,
+            work_model=work_model,
+            reference_filter=work_model.orig_filter,
+            w_norm=work_model.orig_filter.f_norm
+        )
+        print("Оптимальные фазовые параметры:", phase_loadings.x)
+        b11, b22 = phase_loadings.x
+        # b11 = 0.054
+        # b22 = 0.052
+        orig_fil_to_nn_copy.s[:, 0, 0] *= np.array(torch.exp(1j * (w * b11)), dtype=np.complex64)
+        orig_fil_to_nn_copy.s[:, 0, 1] *= np.array(torch.exp(1j * 0.5 * (w * (b11 + b22))), dtype=np.complex64)
+        orig_fil_to_nn_copy.s[:, 1, 0] *= np.array(torch.exp(1j * 0.5 * (w * (b11 + b22))), dtype=np.complex64)
+        orig_fil_to_nn_copy.s[:, 1, 1] *= np.array(torch.exp(1j * (w * b22)), dtype=np.complex64)
+        ntw_de = orig_fil_to_nn_copy
+        # res = phase_extractor.extract_all(orig_fil_to_nn, w_norm=w)
+        # ntw_de = res['ntw_deembedded']
 
         # # # start_time = time.time()
-        # pred_prms = inference_model.predict_x(orig_fil_to_nn)
+        pred_prms = inference_model.predict_x(ntw_de)
         # # stop_time = time.time()
         # # print(f"Predict time: {stop_time - start_time:.3f} sec")
-        # print(f"Предсказанные параметры: {pred_prms}")
-        # pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms, work_model.codec)
-        # ps_shifts = [pred_prms["a11"], pred_prms["a22"], pred_prms["b11"], pred_prms["b22"]]
-        # a11_final = res['S11']['phi_c']+pred_prms["a11"]
-        # a22_final = res['S22']['phi_c']+pred_prms["a22"]
-        # b11_final = pred_prms["b11"]+res['S11']['phi_b']
-        # b22_final = pred_prms["b22"]+res['S22']['phi_b']
-        # print(f"Финальный фазовый сдвиг, после корректировки ИИ: a11={a11_final:.6f} рад ({np.degrees(a11_final):.2f}°), a22={a22_final:.6f} рад ({np.degrees(a22_final):.2f}°)"
-        #       f" b11 = {b11_final:.6f} рад ({np.degrees(b11_final):.2f}°), b22 = {b22_final:.6f} рад ({np.degrees(b22_final):.2f}°)")
-        # pred_fil.s[:, 0, 0] *= np.array(torch.exp(-1j*2*(a11_final + w*b11_final)), dtype=np.complex64)
-        # pred_fil.s[:, 0, 1] *= np.array(-torch.exp(-1j*(a11_final+a22_final + w*(b11_final+b22_final))), dtype=np.complex64)
-        # pred_fil.s[:, 1, 0] *= np.array(-torch.exp(-1j*(a11_final+a22_final + w*(b11_final+b22_final))), dtype=np.complex64)
-        # pred_fil.s[:, 1, 1] *= np.array(torch.exp(-1j*2*(a22_final + w*b22_final)), dtype=np.complex64)
+        print(f"Предсказанные параметры: {pred_prms}")
+        pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms, work_model.codec)
 
         # plt.figure()
-        # orig_fil.plot_s_re(m=0, n=0, label='S11 Re origin')
-        # pred_fil.plot_s_re(m=0, n=0, label='S11 Re predict', ls=':')
-        # orig_fil.plot_s_im(m=0, n=0, label='S11 Im origin')
-        # pred_fil.plot_s_im(m=0, n=0, label='S11 Im predict', ls='--')
-        # plt.title(tds.backend.paths[i].parts[-1])
+        # plt.plot(f_new, MWFilter.to_db(torch.tensor(s11_ext, dtype=torch.complex64)), label='S11 dB extr')
+        # cst_fil.plot_s_db(m=0, n=0, label='S11 dB CST')
+        # orig_fil.plot_s_db(m=0, n=0, label='S11 dB origin', ls='--')
+        #
+        # plt.figure()
+        # plt.plot(f_new, MWFilter.to_db(torch.tensor(s22_ext, dtype=torch.complex64)), label='S22 dB extr')
+        # cst_fil.plot_s_db(m=1, n=1, label='S22 dB CST')
+        # orig_fil.plot_s_db(m=1, n=1, label='S22 dB origin', ls='--')
+        # # ntw_de.plot_s_re(m=0, n=0, label='S11 Re corr', ls=':')
+
+
+        plt.figure()
+        cst_fil.plot_s_re(m=0, n=0, label='S11 Re CST')
+        cst_fil.plot_s_im(m=0, n=0, label='S11 Im CST')
+        # orig_fil.plot_s_re(m=0, n=0, label='S11 Re origin', ls='--')
+        ntw_de.plot_s_re(m=0, n=0, label='S11 Re corr', ls=':')
+        ntw_de.plot_s_im(m=0, n=0, label='S11 Im corr', ls=':')
+        # plt.plot(f_new, np.real(S11_ext), linestyle=':', label='S11 Re extr')
+
+        plt.figure()
+        cst_fil.plot_s_deg(m=0, n=0, label='S11 phase CST')
+        # orig_fil.plot_s_deg(m=0, n=0, label='S11 phase origin', ls='--')
+        ntw_de.plot_s_deg(m=0, n=0, label='S11 phase corr', ls=':')
+        # ntw_de.plot_s_im(m=0, n=0, label='S11 Im corr')
+        # plt.plot(f_new, np.degrees(np.angle(S11_ext)), linestyle=':', label='S11 phase extr')
+        # cst_fil.plot_s_im(m=0, n=0, label='S11 Im CST', ls='--')
 
         # plt.figure()
-        # orig_fil.plot_s_deg(m=0, n=0, label='Phase S11 origin')
-        # pred_fil.plot_s_deg(m=0, n=0, label='Phase S11 predict')
-        # plt.title(tds.backend.paths[i].parts[-1])
-        # inference_model.plot_origin_vs_prediction(orig_fil, pred_fil, title=tds.backend.paths[i].parts[-1])
-        # optim_matrix = optimize_cm(pred_fil, orig_fil)
-        # print(f"Оптимизированные параметры: {optim_matrix.factors}. Добротность: {pred_fil.Q}. Фаза:")
+        # orig_fil_to_nn_copy.plot_s_re(m=1, n=1, label='S22 Re corr')
+        # pred_fil.plot_s_re(m=1, n=1, label='S22 Re predict', ls=':')
+        # orig_fil_to_nn_copy.plot_s_im(m=1, n=1, label='S22 Im corr')
+        # pred_fil.plot_s_im(m=1, n=1, label='S22 Im predict', ls='--')
+
+        ps_shifts = [pred_prms["a11"], pred_prms["a22"], pred_prms["b11"], pred_prms["b22"]]
+        a11_final = phase_shifts['S11']['phi_c']+pred_prms["a11"]
+        a22_final = phase_shifts['S22']['phi_c']+pred_prms["a22"]
+        b11_final = phase_loadings.x[0]*0.5+pred_prms["b11"]
+        b22_final = phase_loadings.x[1]*0.5+pred_prms["b22"]
+        print(f"Финальный фазовый сдвиг, после корректировки ИИ: a11={a11_final:.6f} рад ({np.degrees(a11_final):.2f}°), a22={a22_final:.6f} рад ({np.degrees(a22_final):.2f}°)"
+              f" b11 = {b11_final:.6f} рад ({np.degrees(b11_final):.2f}°), b22 = {b22_final:.6f} рад ({np.degrees(b22_final):.2f}°)")
+        pred_fil.s[:, 0, 0] *= np.array(torch.exp(-1j*2*(a11_final + w*b11_final)), dtype=np.complex64)
+        pred_fil.s[:, 0, 1] *= np.array(-torch.exp(-1j*(a11_final+a22_final + w*(b11_final+b22_final))), dtype=np.complex64)
+        pred_fil.s[:, 1, 0] *= np.array(-torch.exp(-1j*(a11_final+a22_final + w*(b11_final+b22_final))), dtype=np.complex64)
+        pred_fil.s[:, 1, 1] *= np.array(torch.exp(-1j*2*(a22_final + w*b22_final)), dtype=np.complex64)
+
+        plt.figure(figsize=(4, 3))
+        orig_fil.plot_s_re(m=0, n=0, label='S11 Re origin')
+        pred_fil.plot_s_re(m=0, n=0, label='S11 Re predict', ls=':')
+        orig_fil.plot_s_im(m=0, n=0, label='S11 Im origin')
+        pred_fil.plot_s_im(m=0, n=0, label='S11 Im predict', ls='--')
+        plt.title(tds.backend.paths[i].parts[-1])
+
+        plt.figure(figsize=(4, 3))
+        orig_fil.plot_s_deg(m=0, n=0, label='Phase S11 origin')
+        pred_fil.plot_s_deg(m=0, n=0, label='Phase S11 predict')
+        plt.title(tds.backend.paths[i].parts[-1])
+
+        inference_model.plot_origin_vs_prediction(orig_fil, pred_fil, title=tds.backend.paths[i].parts[-1])
+        optim_matrix, Q_opt, phase_opt = optimize_cm(pred_fil, orig_fil, phase_init=(0, 0, 0, 0))
+        print(f"Оптимизированные параметры: {optim_matrix.factors}. Добротность: {Q_opt}. Фаза: {phase_opt}")
         # optim_matrix, Q, phase_opt = optimize_cm(pred_fil, orig_fil, phase_init=(a11_final, a22_final, b11_final, b22_final))
         # plt.title(tds.backend.paths[i].parts[-1])
         # print(f"Оптимизированные параметры: {optim_matrix.factors}. Добротность: {pred_fil.Q}. Фаза: {np.degrees(phase_opt)}")

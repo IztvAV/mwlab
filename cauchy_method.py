@@ -64,8 +64,8 @@ def extract_coeffs(freq, s11, s21, f0, bw, Q, N, nz):
     b = b / b[-1]
 
     # MATLAB: if mod(N-nz,2)==0, a2 = a2 * 1i
-    if (N - nz) % 2 == 0:
-        a2 = a2 * 1j
+    # if (N - nz) % 2 == 0:
+    #     a2 = a2 * 1j
 
     # Оценка S11_ и S21_
     S11_ = (Vn @ a1) / (Vn @ b)
@@ -79,34 +79,42 @@ def extract_coeffs(freq, s11, s21, f0, bw, Q, N, nz):
     norm = matlab_max(S11_)/matlab_max(s11)
 
     a1 /= norm
-    a2 /= norm
 
     S21_ = (Vnz @ a2) / (Vn @ b)
+    norm = matlab_max(S21_)/matlab_max(s21)
+    a2 /= norm
+
     eps = matlab_max(abs(S21_)) / matlab_max(abs(s21))
+    eps = 1
 
     # MATLAB: if N == nz, eps_r = eps / sqrt(eps^2 - 1)
     eps_r = 1
     if N == nz:
         eps_r = eps / np.sqrt(eps**2 - 1)
 
-    s_apx = 1.0 / (fbw * Q) + 1j * np.linspace(-4.0, 4.0, 1001)
+    s_apx = 1.0 / (fbw * Q) + 1j * np.linspace(-3, 3, 1001)
     # s_apx = s
 
     s11_ext = np.polyval(a1, s_apx)/(np.polyval(b, s_apx))
     s21_ext = np.polyval(a2, s_apx)/(eps*np.polyval(b, s_apx))
     plt.figure()
-    plt.plot(np.imag(s), to_db(s11), np.imag(s), to_db(s21))
-    plt.plot(np.imag(s_apx), to_db(s11_ext), np.imag(s_apx), to_db(s21_ext))
+    plt.plot(np.imag(s), to_db(s11))
+    plt.plot(np.imag(s), to_db(s21))
+    plt.plot(np.imag(s_apx), to_db(s11_ext), '--')
+    plt.plot(np.imag(s_apx), to_db(s21_ext), '--')
     plt.title("Extracted S-parameters")
     plt.legend(["S11 Origin", "S21 Origin", "S11 Recover", "S21 Recover"])
-    # plt.figure()
-    # plt.title("ReIm parts of S21")
-    # plt.plot(np.imag(s_apx), np.imag(s21_ext), np.imag(s), np.imag(s21))
-    # plt.figure()
-    # plt.title("ReIm parts of S11")
-    # plt.plot(np.imag(s_apx), np.imag(s11_ext), np.imag(s), np.imag(s11))
-    # plt.figure()
-    # plt.title("Phase of S11")
-    # plt.plot(np.imag(s_apx), np.angle(s11_ext), np.imag(s), np.angle(s11))
+    plt.figure()
+    plt.title("ReIm parts of S21")
+    plt.plot(np.imag(s_apx), np.imag(s21_ext), np.imag(s), np.imag(s21))
+    plt.figure()
+    plt.title("ReIm parts of S11")
+    plt.plot(np.imag(s_apx), np.imag(s11_ext), np.imag(s), np.imag(s11), np.imag(s_apx), np.real(s11_ext), np.imag(s), np.real(s11))
+    plt.figure()
+    plt.plot(np.imag(s_apx), np.gradient(np.angle(s11_ext), np.imag(s_apx)), np.imag(s), np.gradient(np.angle(s11), np.imag(s)))
+    plt.title("Group delay")
+    plt.figure()
+    plt.title("Phase of S11")
+    plt.plot(np.imag(s_apx), np.angle(s11_ext), np.imag(s), np.angle(s11))
     # return a1, a2, b, eps, eps_r
     return np.imag(s_apx), s11_ext, s21_ext
