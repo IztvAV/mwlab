@@ -56,7 +56,7 @@ def create_origin_filter(path_orig_filter: str, f_start=None, f_stop=None, f_uni
 def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_param: bool=False, dataset_size=configs.BASE_DATASET_SIZE):
     sampler_configs = {
         "pss_origin": PSShift(a11=0.0, a22=0.0, b11=0, b22=0),
-        "pss_shifts_delta": PSShift(a11=0.1, a22=0.1, b11=0.3, b22=0.3),
+        "pss_shifts_delta": PSShift(a11=0.1, a22=0.1, b11=0.1, b22=0.1),
         # "cm_shifts_delta": CMShifts(self_coupling=1.8, mainline_coupling=0.3, cross_coupling=9e-2, parasitic_coupling=5e-3),
         # "cm_shifts_delta": CMShifts(self_coupling=2.0, mainline_coupling=0.3, cross_coupling=5e-2, parasitic_coupling=5e-3),
         "cm_shifts_delta": CMShifts(self_coupling=0.1, mainline_coupling=0.05, cross_coupling=1e-3, parasitic_coupling=0),
