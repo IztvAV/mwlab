@@ -874,25 +874,28 @@ def optimize_cm(pred_filter: DatasetMWFilter,
         fast_calc.update_Q(q_t)
 
     def improved_bounds(cm: CouplingMatrix,
-                        abs_floor_main: float = 0.10,
-                        abs_floor_cross: float = 0.01,
+                        abs_floor_main: float = 0.05,
+                        abs_floor_cross: float = 0.001,
                         abs_floor_diag: float = 0.05,
-                        rel_main: float = 2.0,
+                        rel_main: float = 0.05,
                         rel_cross: float = 3.0,
-                        rel_diag: float = 2.5):
+                        rel_diag: float = 1.5):
         M = cm.matrix.clone().detach().float()
         Bmin = torch.zeros_like(M); Bmax = torch.zeros_like(M)
         for (i, j) in cm.links:
             v = float(M[i, j])
-            if i == j:        width = max(abs_floor_diag,  rel_diag  * abs(v))
-            elif j == i + 1:  width = max(abs_floor_main,  rel_main  * abs(v))
-            else:             width = max(abs_floor_cross, rel_cross * abs(v))
+            # if i == j:        width = max(abs_floor_diag,  rel_diag  * abs(v))
+            # elif j == i + 1:  width = max(abs_floor_main,  rel_main  * abs(v))
+            # else:             width = max(abs_floor_cross, rel_cross * abs(v))
+            if i == j:        width = rel_diag  * abs(v)
+            elif j == i + 1:  width = rel_main  * abs(v)
+            else:             width = rel_cross * abs(v)
             Bmin[i, j] = v - width;  Bmax[i, j] = v + width
             Bmin[j, i] = Bmin[i, j]; Bmax[j, i] = Bmax[i, j]
         return CouplingMatrix(Bmin), CouplingMatrix(Bmax)
 
     # веса компонентов лосса/отчёта
-    W_MAG, W_REIM, W_PHASE = 1.0, 0.0, 0.0
+    W_MAG, W_REIM, W_PHASE = 1.0, 0.5, 0.5
 
     # ---------- prepare ----------
     print("Start optimize (L-BFGS-B) with phases")
