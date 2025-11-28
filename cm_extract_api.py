@@ -157,7 +157,7 @@ def predict(fil: rf.Network):
         S[:, 1, 0] *= np.array(-torch.exp(-1j * (a11_final + a22_final + w * (b11_final + b22_final))), dtype=np.complex64)
         S[:, 1, 1] *= np.array(torch.exp(-1j * 2 * (a22_final + w * b22_final)), dtype=np.complex64)
         return S, optim_matrix.matrix.numpy()
-        # return pred_fil.coupling_matrix.matrix.numpy()
+        # return pred_fil.s, pred_fil.coupling_matrix.matrix.numpy()
     except Exception as e:
         raise ValueError(f"На сервере возникла ошибка: {e}") from e
 

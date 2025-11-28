@@ -892,7 +892,7 @@ def optimize_cm(pred_filter: DatasetMWFilter,
         return CouplingMatrix(Bmin), CouplingMatrix(Bmax)
 
     # веса компонентов лосса/отчёта
-    W_MAG, W_REIM, W_PHASE = 1.0, 0.5, 0.5
+    W_MAG, W_REIM, W_PHASE = 1.0, 0.0, 0.0
 
     # ---------- prepare ----------
     print("Start optimize (L-BFGS-B) with phases")
