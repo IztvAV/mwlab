@@ -878,8 +878,8 @@ def optimize_cm(pred_filter: DatasetMWFilter,
                         abs_floor_cross: float = 0.001,
                         abs_floor_diag: float = 0.05,
                         rel_main: float = 0.05,
-                        rel_cross: float = 3.0,
-                        rel_diag: float = 1.5):
+                        rel_cross: float = 0.1,
+                        rel_diag: float = 0.1):
         M = cm.matrix.clone().detach().float()
         Bmin = torch.zeros_like(M); Bmax = torch.zeros_like(M)
         for (i, j) in cm.links:
