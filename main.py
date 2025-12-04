@@ -29,7 +29,7 @@ import models
 import torch
 from filters.mwfilter_optim.bfgs import optimize_cm
 from losses import CustomLosses
-import configs
+import configs as cfg
 import common
 import torch.nn.functional as F
 from mwlab.transforms import TComposite
@@ -133,10 +133,8 @@ class SimpleCorrNet(nn.Module):
 
 
 def online_correct():
+    configs = cfg.Configs.init_as_default("default.yml")
     work_model = common.WorkModel(configs.ENV_DATASET_PATH, configs.BASE_DATASET_SIZE, SamplerTypes.SAMPLER_SOBOL)
-    # sensivity.run(work_model.orig_filter)
-    # common.plot_distribution(work_model.ds, num_params=len(work_model.ds_gen.origin_filter.coupling_matrix.links))
-    # plt.show()
 
     codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
                                                  # keys_for_analysis=[f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links]+["Q"])
@@ -290,6 +288,7 @@ def online_correct():
 
 
 def inherence_correct():
+    configs = cfg.Configs.init_as_default("default.yml")
     work_model = common.WorkModel(configs.ENV_DATASET_PATH, configs.BASE_DATASET_SIZE, SamplerTypes.SAMPLER_SOBOL)
     codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
                                                  # keys_for_analysis=[f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links]+["Q"])
@@ -420,149 +419,9 @@ def inherence_correct():
     n = len(tds)
     print(f"MEAN over {n} iters: L={total_L / n:.6f}, fit={total_fit / n:.6f}, time/iter={total_time / n:.2f}s")
 
-def make_phase_objective(ntw_orig, inference_model, work_model, reference_filter, w_norm):
-    """
-    Возвращает функцию objective(params), в которой:
-      - S_raw и f кэшированы
-      - есть один постоянный ntw_de, в котором мы только обновляем .s
-    """
-    f = ntw_orig.f
-    S_raw = ntw_orig.s  # (N,2,2), без копии – и так достаточно
-
-    # Разложим один раз
-    S11_raw_full = S_raw[:, 0, 0]
-    S21_raw_full = S_raw[:, 0, 1]
-    S22_raw_full = S_raw[:, 1, 1]
-
-    # Один reusable Network для подачи в нейросеть
-    ntw_de = ntw_orig.copy()
-    ntw_de.name = "De-embedded_for_NN"
-
-    w_norm = np.asarray(w_norm, dtype=np.float64)
-
-    def objective(params, verbose=False):
-        b11_opt, b22_opt = params
-
-        # 1) DE-EMBED кандидата (снимаем фазу)
-        S11_de, S21_de, S22_de = phase.apply_phase_all(
-            S11_raw_full, S21_raw_full, S22_raw_full,
-            w_norm,
-            a11=0.0, b11=-b11_opt,
-            a22=0.0, b22=-b22_opt,
-        )
-
-        # Собираем новый S в один массив (без создания нового Network)
-        S_new = np.empty_like(S_raw)
-        S_new[:, 0, 0] = S11_de
-        S_new[:, 0, 1] = S21_de
-        S_new[:, 1, 0] = S21_de
-        S_new[:, 1, 1] = S22_de
-
-        ntw_de.s = S_new
-
-        # 2) NN → CM + своя фазовая нагрузка
-        pred_params = inference_model.predict_x(ntw_de)
-
-        pred_filter = work_model.create_filter_from_prediction(
-            ntw_de, reference_filter, pred_params, work_model.codec
-        )
-        S_pred = pred_filter.s
-        S11_ideal = S_pred[:, 0, 0]
-        S21_ideal = S_pred[:, 0, 1]
-        S22_ideal = S_pred[:, 1, 1]
-
-        # 3) Фаза от сети
-        a11_nn = float(pred_params.get("a11", 0.0))
-        b11_nn = float(pred_params.get("b11", 0.0))
-        a22_nn = float(pred_params.get("a22", 0.0))
-        b22_nn = float(pred_params.get("b22", 0.0))
-
-        # 4) Суммарная фаза
-        a11_total = a11_nn
-        a22_total = a22_nn
-        b11_total = b11_opt + b11_nn
-        b22_total = b22_opt + b22_nn
-
-        # 5) Вешаем суммарную фазу на идеальный отклик
-        S11_final, S21_final, S22_final = phase.apply_phase_all(
-            S11_ideal, S21_ideal, S22_ideal,
-            w_norm,
-            a11=a11_total, b11=b11_total,
-            a22=a22_total, b22=b22_total,
-        )
-
-        # 6) Ошибка по комплексным S
-        loss = (
-            np.mean(np.abs(S11_final - S11_raw_full)) +
-            np.mean(np.abs(S21_final - S21_raw_full)) +
-            np.mean(np.abs(S22_final - S22_raw_full))
-        )
-
-        if verbose:
-            print(
-                f"[b11_opt={b11_opt:.4f}, b22_opt={b22_opt:.4f}] "
-                f"b11_nn={b11_nn:.4f}, b22_nn={b22_nn:.4f}, "
-                f"loss={loss:.6f}"
-            )
-
-        return loss
-
-    return objective
-
-
-def coarse_grid_search(obj, b_min=-np.pi, b_max=np.pi, n_grid=25):
-    b_vals = np.linspace(b_min, b_max, n_grid)
-
-    best_loss = np.inf
-    best_b11 = None
-    best_b22 = None
-
-    for b11 in b_vals:
-        for b22 in b_vals:
-            loss = obj((b11, b22))
-            if loss < best_loss:
-                best_loss = loss
-                best_b11, best_b22 = b11, b22
-
-    print(f"[GRID] best_loss={best_loss:.6f} at b11_opt={best_b11:.4f}, b22_opt={best_b22:.4f}")
-    return np.array([best_b11, best_b22])
-
-
-def refine_local(x0, obj):
-    res = minimize(
-        lambda x: obj(x),
-        x0,
-        method='Nelder-Mead',
-        options={'maxiter': 100, 'xatol': 1e-4, 'fatol': 1e-4}
-    )
-    print(f"[NELDER-MEAD] x_opt={res.x}, loss={res.fun:.6f}, success={res.success}")
-    return res
-
-
-_last_x0 = np.array([0.0, 0.0])
-
-def optimize_phase_loading(ntw_orig, inference_model, work_model, reference_filter, w_norm,
-                           use_grid=False):
-    global _last_x0
-    start_time = time.time()
-
-    w_norm = np.asarray(w_norm, dtype=np.float64)
-    obj = make_phase_objective(ntw_orig, inference_model, work_model, reference_filter, w_norm)
-
-    if use_grid:
-        x0 = coarse_grid_search(obj, b_min=-np.pi, b_max=np.pi, n_grid=25)
-    else:
-        x0 = _last_x0  # тёплый старт из прошлого оптимума
-
-    res = refine_local(x0, obj)
-    _last_x0 = res.x.copy()
-
-    stop_time = time.time()
-    print(f"Optimize phase loading time: {stop_time - start_time:.3f} sec")
-    return res
-
 
 def main():
+    configs = cfg.Configs.init_as_default("default.yml")
     work_model = common.WorkModel(configs.ENV_DATASET_PATH, configs.BASE_DATASET_SIZE, SamplerTypes.SAMPLER_SOBOL)
     # common.plot_distribution(work_model.ds, num_params=len(work_model.ds_gen.origin_filter.coupling_matrix.links))
     # plt.show()

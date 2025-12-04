@@ -1,0 +1,7 @@
+version: 1  # версия формата пакета
+
+meta:
+  author: "Ilya Burlakov"
+
+paths:
+  manifest: "filters/FilterData/EAMU4-KuIMUXT2-BPFC2/manifest.yml"

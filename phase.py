@@ -8,7 +8,6 @@ import torch
 from numpy.polynomial.polynomial import polyfit
 import skrf as rf
 import common
-import configs
 from filters import SamplerTypes, MWFilter, CouplingMatrix
 from filters.codecs import MWFilterTouchstoneCodec
 from mwlab import TouchstoneDataset

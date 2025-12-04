@@ -1,0 +1,26 @@
+version: 1  # версия формата пакета
+
+meta:
+  author: "Ilya Burlakov"
+
+filter:
+  name:         "EAMU4-KuIMUXT2-BPFC2"
+  f_start_mhz:  11489.7
+  f_stop_mhz:   11590.7
+
+paths:
+  datasets_data: "datasets_data"
+  origins_data: "origins_data"
+  tune_data: "tune_data"
+  saved_models: "saved_models"
+
+dataset:
+  sampler_type: "sobol"   # sobol, lhs, std
+  size: 1000
+
+model:
+  checkpoint: "best-epoch=27-train_loss=0.08527-val_loss=0.07506-val_r2=0.99731-val_mse=0.00021-val_mae=0.00531-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt"
+
+inference:
+  batch_size: 32
+  device: "auto"            # можно "auto"

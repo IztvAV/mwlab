@@ -30,17 +30,13 @@ def plot_distribution(ds: TouchstoneDataset, num_params: int, batch: int = 6):
         analyzer.plot_param_distributions(varying[batch * i:batch * (i + 1)])
 
 
-def create_origin_filter(path_orig_filter: str, f_start=None, f_stop=None, f_unit=None, resample_scale=301):
-    tds = TouchstoneDataset(source=path_orig_filter)
+def create_origin_filter(configs: configs.Configs, f_unit=None, resample_scale=301):
+    tds = TouchstoneDataset(source=configs.ENV_ORIGIN_DATA_PATH)
     origin_filter = MWFilter.from_touchstone_dataset_item(tds[0])
     f0 = origin_filter.f0
     bw = origin_filter.bw
-    if f_start is None:
-        # f_start = f0 - 1 * bw + bw/4
-        f_start = configs.F_START_MHZ
-    if f_stop is None:
-        # f_stop = f0 + 1 * bw - bw/4
-        f_stop = configs.F_STOP_MHZ
+    f_start = configs.F_START_MHZ
+    f_stop = configs.F_STOP_MHZ
     if f_unit is None:
         f_unit = "MHz"
     print(f"f0={f0}, bw={bw}, f_start={f_start}, f_stop={f_stop}")
@@ -48,12 +44,12 @@ def create_origin_filter(path_orig_filter: str, f_start=None, f_stop=None, f_uni
         S_Crop(f_start=f_start, f_stop=f_stop, unit=f_unit),
         S_Resample(resample_scale)
     ])
-    tds_transformed = TouchstoneDataset(source=path_orig_filter, s_tf=y_transform)
+    tds_transformed = TouchstoneDataset(source=configs.ENV_ORIGIN_DATA_PATH, s_tf=y_transform)
     origin_filter = MWFilter.from_touchstone_dataset_item(tds_transformed[0])
     return origin_filter
 
 
-def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, with_one_param: bool=False, dataset_size=configs.BASE_DATASET_SIZE):
+def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, dataset_size, with_one_param: bool=False):
     sampler_configs = {
         "pss_origin": PSShift(a11=0.0, a22=0.0, b11=0, b22=0),
         "pss_shifts_delta": PSShift(a11=0.1, a22=0.1, b11=0.1, b22=0.1),
@@ -327,18 +323,16 @@ class MySafeCheckpoint(ModelCheckpoint):
 
 
 class WorkModel:
-    CHECKPOINT_DIRPATH = "saved_models/" + configs.FILTER_NAME
     BEST_MODEL_FILENAME_SUFFIX = "-batch_size={batch_size}-base_dataset_size={base_dataset_size}-sampler={sampler_type}"
-    def __init__(self, ds_path, ds_size, sampler_type=SamplerTypes.SAMPLER_SOBOL):
+    def __init__(self, configs: configs.Configs, sampler_type=SamplerTypes.SAMPLER_SOBOL):
         L.seed_everything(0)
         print("Создаем фильтр")
-        self.orig_filter = create_origin_filter(configs.ENV_ORIGIN_DATA_PATH, resample_scale=301)
+        self.orig_filter = create_origin_filter(configs, resample_scale=301)
         print("Создаем сэмплеры")
-        self.ds_size = ds_size
-        self.ds_path = ds_path
-        self.samplers = create_sampler(self.orig_filter, sampler_type, dataset_size=ds_size)
+        self.configs = configs
+        self.samplers = create_sampler(self.orig_filter, sampler_type, dataset_size=configs.BASE_DATASET_SIZE)
         self.ds_gen = CMTheoreticalDatasetGenerator(
-            path_to_save_dataset=os.path.join(ds_path, self.samplers.cms.type.name, f"{len(self.samplers.cms)}"),
+            path_to_save_dataset=os.path.join(self.configs.ENV_DATASET_PATH, self.samplers.cms.type.name, f"{len(self.samplers.cms)}"),
             backend_type='ram',
             orig_filter=self.orig_filter,
             filename="Dataset",
@@ -359,11 +353,11 @@ class WorkModel:
     def _configure_trainer(self):
         stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_mae", patience=31, mode="min", min_delta=0.00001)
         checkpoint = MySafeCheckpoint(monitor="val_mae",
-                                      dirpath="saved_models/" + configs.FILTER_NAME,
+                                      dirpath=self.configs.ENV_SAVED_MODELS_PATH,
                                       filename="best-{epoch}-{train_loss:.5f}-{val_loss:.5f}-{val_r2:.5f}-{val_mse:.5f}-"
                                                                   "{val_mae:.5f}" + self.BEST_MODEL_FILENAME_SUFFIX.format(
-                                                             batch_size=configs.BATCH_SIZE,
-                                                             base_dataset_size=self.ds_size,
+                                                             batch_size=self.configs.BATCH_SIZE,
+                                                             base_dataset_size=self.configs.BASE_DATASET_SIZE,
                                                              sampler_type=self.samplers.cms.type
                                                          ),
                                       mode="min",
@@ -397,7 +391,7 @@ class WorkModel:
         self.dm = TouchstoneLDataModule(
             source=self.ds_gen.backend,  # Путь к датасету
             codec=dm_codec,  # Кодек для преобразования TouchstoneData → (x, y)
-            batch_size=configs.BATCH_SIZE,  # Размер батча
+            batch_size=self.configs.BATCH_SIZE,  # Размер батча
             val_ratio=0.2,  # Доля валидационного набора
             test_ratio=0.01,  # Доля тестового набора
             cache_size=0,

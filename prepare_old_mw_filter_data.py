@@ -2,7 +2,6 @@ import argparse
 import os
 import skrf as rf
 
-import configs
 from filters.filter import couplilng_matrix as cm
 import copy
 from filters.filter.mwfilter import MWFilter
@@ -34,6 +33,7 @@ def save_phase_to_s2p_single_comment(a11=0, a22=0, b11=0, b22=0):
 
 
 FILTER_NAME = "EAMU4-KuIMUXT2-BPFC2"
+MANIFEST_PATH = os.path.join("filters", "FilterData", FILTER_NAME)
 
 
 def main():
@@ -64,7 +64,7 @@ def main():
     print(f"Path to save file: {path_to_save}")
     new_td.network.write_touchstone(filename=path_to_save)
     new_td.save(path_to_save)
-    path_to_save = os.path.join(configs.ENV_ORIGIN_DATA_PATH, f"{FILTER_NAME}_modify.s2p")
+    path_to_save = os.path.join(MANIFEST_PATH, "origins_data", f"{FILTER_NAME}_modify.s2p")
     print(f"Path to save file: {path_to_save}")
     new_td.network.write_touchstone(path_to_save)
     new_td.save(path_to_save)
