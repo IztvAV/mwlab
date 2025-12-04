@@ -26,7 +26,7 @@ import models
 import torch
 from filters.mwfilter_optim.bfgs import optimize_cm
 from losses import CustomLosses
-import configs
+import configs as cfg
 import common
 
 import numpy as np
@@ -35,6 +35,7 @@ from mwlab.transforms.s_transforms import S_Crop, S_Resample
 import skrf as rf
 import torch.nn.functional as F
 import phase
+from dataclasses import dataclass
 
 
 work_model: WorkModel|None = None
@@ -62,11 +63,16 @@ class CorrectionNet(nn.Module):
         return matrix_pred + delta
 
 
-def load_model(fil_name: str="EAMU4T1-BPFC2"):
+
+def load_model(manifest_path: str|os.PathLike|None=None):
     """ Пока в таком формате. В дальнейшем надо будет стандартизировать названия моделей """
     try:
         global work_model
-        work_model = common.WorkModel(configs.ENV_DATASET_PATH, configs.BASE_DATASET_SIZE, SamplerTypes.SAMPLER_SOBOL)
+        if manifest_path is None:
+            configs = cfg.Configs.init_as_default("D:\\Burlakov\\pyprojects\\mwlab\\default.yml")
+        else:
+            configs = cfg.Configs(manifest_path)
+        work_model = common.WorkModel(configs, SamplerTypes.SAMPLER_SOBOL)
         codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
                                                      keys_for_analysis=[f"m_{r}_{c}" for r, c in
                                                                         work_model.orig_filter.coupling_matrix.links] +
@@ -89,9 +95,10 @@ def load_model(fil_name: str="EAMU4T1-BPFC2"):
             dm_codec=codec
         )
         global inference_model, phase_extractor
+        inference_model = work_model.inference(configs.MODEL_CHECKPOINT_PATH)
         # inference_model = work_model.inference(f"D:\\Burlakov\\pyprojects\\mwlab\\saved_models\\EAMU4-KuIMUXT2-BPFC2\\best-epoch=27-train_loss=0.08527-val_loss=0.07506-val_r2=0.99731-val_mse=0.00021-val_mae=0.00531-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-        inference_model = work_model.inference(
-            "D:/Burlakov/pyprojects/mwlab/saved_models/EAMU4-KuIMUXT2-BPFC4/best-epoch=26-train_loss=0.08889-val_loss=0.08248-val_r2=0.99727-val_mse=0.00020-val_mae=0.00647-batch_size=32-base_dataset_size=300000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
+        # inference_model = work_model.inference(
+        #     "D:/Burlakov/pyprojects/mwlab/saved_models/EAMU4-KuIMUXT2-BPFC4/best-epoch=26-train_loss=0.08889-val_loss=0.08248-val_r2=0.99727-val_mse=0.00020-val_mae=0.00647-batch_size=32-base_dataset_size=300000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
         phase_extractor = phase.PhaseLoadingExtractor(inference_model, work_model, work_model.orig_filter)
     except Exception as e:
         raise ValueError(f"На сервере возникла ошибка: {e}") from e

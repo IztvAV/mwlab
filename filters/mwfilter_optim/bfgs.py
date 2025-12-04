@@ -877,9 +877,9 @@ def optimize_cm(pred_filter: DatasetMWFilter,
                         abs_floor_main: float = 0.05,
                         abs_floor_cross: float = 0.001,
                         abs_floor_diag: float = 0.05,
-                        rel_main: float = 0.05,
+                        rel_main: float = 0.1,
                         rel_cross: float = 0.1,
-                        rel_diag: float = 0.1):
+                        rel_diag: float = 0.5):
         M = cm.matrix.clone().detach().float()
         Bmin = torch.zeros_like(M); Bmax = torch.zeros_like(M)
         for (i, j) in cm.links:
@@ -887,9 +887,9 @@ def optimize_cm(pred_filter: DatasetMWFilter,
             # if i == j:        width = max(abs_floor_diag,  rel_diag  * abs(v))
             # elif j == i + 1:  width = max(abs_floor_main,  rel_main  * abs(v))
             # else:             width = max(abs_floor_cross, rel_cross * abs(v))
-            if i == j:        width = rel_diag  * abs(v)
-            elif j == i + 1:  width = rel_main  * abs(v)
-            else:             width = rel_cross * abs(v)
+            if i == j:        width = rel_diag  * max(abs(v), 1e-6)
+            elif j == i + 1:  width = rel_main  * max(abs(v), 1e-6)
+            else:             width = rel_cross * max(abs(v), 1e-6)
             Bmin[i, j] = v - width;  Bmax[i, j] = v + width
             Bmin[j, i] = Bmin[i, j]; Bmax[j, i] = Bmax[i, j]
         return CouplingMatrix(Bmin), CouplingMatrix(Bmax)
