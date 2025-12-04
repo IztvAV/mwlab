@@ -15,7 +15,7 @@ from mwlab.transforms.s_transforms import S_Crop, S_Resample
 from filters import CMTheoreticalDatasetGeneratorSamplers, SamplerTypes, MWFilter, CouplingMatrix
 from filters.datasets.theoretical_dataset_generator import CMShifts, PSShift, CMTheoreticalDatasetGenerator
 import models
-import configs
+import configs as cfg
 import lightning as L
 from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
 
@@ -30,7 +30,7 @@ def plot_distribution(ds: TouchstoneDataset, num_params: int, batch: int = 6):
         analyzer.plot_param_distributions(varying[batch * i:batch * (i + 1)])
 
 
-def create_origin_filter(configs: configs.Configs, f_unit=None, resample_scale=301):
+def create_origin_filter(configs: cfg.Configs, f_unit=None, resample_scale=301):
     tds = TouchstoneDataset(source=configs.ENV_ORIGIN_DATA_PATH)
     origin_filter = MWFilter.from_touchstone_dataset_item(tds[0])
     f0 = origin_filter.f0
@@ -49,15 +49,26 @@ def create_origin_filter(configs: configs.Configs, f_unit=None, resample_scale=3
     return origin_filter
 
 
-def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, dataset_size, with_one_param: bool=False):
+def create_sampler(orig_filter: MWFilter, configs: cfg.Configs, with_one_param: bool=False):
     sampler_configs = {
-        "pss_origin": PSShift(a11=0.0, a22=0.0, b11=0, b22=0),
-        "pss_shifts_delta": PSShift(a11=0.1, a22=0.1, b11=0.1, b22=0.1),
+        "pss_origin": configs.APP_CONFIG.dataset.pss_origin,
+        "pss_shifts_delta": configs.APP_CONFIG.dataset.pss_sampler_delta,
         # "cm_shifts_delta": CMShifts(self_coupling=1.8, mainline_coupling=0.3, cross_coupling=9e-2, parasitic_coupling=5e-3),
         # "cm_shifts_delta": CMShifts(self_coupling=2.0, mainline_coupling=0.3, cross_coupling=5e-2, parasitic_coupling=5e-3),
-        "cm_shifts_delta": CMShifts(self_coupling=0.1, mainline_coupling=0.05, cross_coupling=1e-3, parasitic_coupling=0),
-        "samplers_size": dataset_size,
+        "cm_shifts_delta": configs.APP_CONFIG.dataset.matrix_sampler_delta,
+        "samplers_size": configs.APP_CONFIG.dataset.size,
     }
+
+    print(f"Current sampler is: {configs.APP_CONFIG.dataset.sampler_type}")
+    if configs.APP_CONFIG.dataset.sampler_type == "sobol":
+        sampler_type = SamplerTypes.SAMPLER_SOBOL
+    elif configs.APP_CONFIG.dataset.sampler_type == "lhs":
+        sampler_type = SamplerTypes.SAMPLER_LATIN_HYPERCUBE
+    elif configs.APP_CONFIG.dataset.sampler_type == "std":
+        sampler_type = SamplerTypes.SAMPLER_STD
+    else:
+        raise ValueError(f"Unsupported sampler type: {configs.APP_CONFIG.dataset.sampler_type}")
+
     samplers_all_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
                                                                                     samplers_type=sampler_type(
                                                                                         one_param=False),
@@ -85,7 +96,7 @@ def create_sampler(orig_filter: MWFilter, sampler_type: SamplerTypes, dataset_si
     #     qs=samplers_all_params.qs
     # )
 
-    sampler_configs["samplers_size"] = int(dataset_size / 100)
+    sampler_configs["samplers_size"] = int(configs.APP_CONFIG.dataset.size / 100)
     samplers_with_one_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
                                                                                          samplers_type=sampler_type(
                                                                                              one_param=True),
@@ -323,14 +334,14 @@ class MySafeCheckpoint(ModelCheckpoint):
 
 
 class WorkModel:
-    BEST_MODEL_FILENAME_SUFFIX = "-batch_size={batch_size}-base_dataset_size={base_dataset_size}-sampler={sampler_type}"
-    def __init__(self, configs: configs.Configs, sampler_type=SamplerTypes.SAMPLER_SOBOL):
+    BEST_MODEL_FILENAME_SUFFIX = "-batch_size={batch_size}-base_dataset_size={base_dataset_size}-sampler={sampler_type}-cm_shifts={self_couplings};{mainline_couplings};{cross_couplings}-ps_origin={a11_o};{a22_o};{b11_o};{b22_o}-ps_shifts={a11_s};{a22_s};{b11_s};{b22_s}"
+    def __init__(self, configs: cfg.Configs, sampler_type=SamplerTypes.SAMPLER_SOBOL):
         L.seed_everything(0)
         print("Создаем фильтр")
         self.orig_filter = create_origin_filter(configs, resample_scale=301)
         print("Создаем сэмплеры")
         self.configs = configs
-        self.samplers = create_sampler(self.orig_filter, sampler_type, dataset_size=configs.BASE_DATASET_SIZE)
+        self.samplers = create_sampler(self.orig_filter, configs)
         self.ds_gen = CMTheoreticalDatasetGenerator(
             path_to_save_dataset=os.path.join(self.configs.ENV_DATASET_PATH, self.samplers.cms.type.name, f"{len(self.samplers.cms)}"),
             backend_type='ram',
@@ -358,7 +369,18 @@ class WorkModel:
                                                                   "{val_mae:.5f}" + self.BEST_MODEL_FILENAME_SUFFIX.format(
                                                              batch_size=self.configs.BATCH_SIZE,
                                                              base_dataset_size=self.configs.BASE_DATASET_SIZE,
-                                                             sampler_type=self.samplers.cms.type
+                                                             sampler_type=self.samplers.cms.type,
+                                                             self_couplings=self.configs.APP_CONFIG.dataset.matrix_sampler_delta.self_coupling,
+                                                             mainline_couplings=self.configs.APP_CONFIG.dataset.matrix_sampler_delta.mainline_coupling,
+                                                             cross_couplings=self.configs.APP_CONFIG.dataset.matrix_sampler_delta.cross_coupling,
+                                                             a11_o=self.configs.APP_CONFIG.dataset.pss_origin.a11,
+                                                             a22_o=self.configs.APP_CONFIG.dataset.pss_origin.a22,
+                                                             b11_o=self.configs.APP_CONFIG.dataset.pss_origin.b11,
+                                                             b22_o=self.configs.APP_CONFIG.dataset.pss_origin.b22,
+                                                             a11_s=self.configs.APP_CONFIG.dataset.pss_sampler_delta.a11,
+                                                             a22_s=self.configs.APP_CONFIG.dataset.pss_sampler_delta.a22,
+                                                             b11_s=self.configs.APP_CONFIG.dataset.pss_sampler_delta.b11,
+                                                             b22_s=self.configs.APP_CONFIG.dataset.pss_sampler_delta.b22,
                                                          ),
                                       mode="min",
                                       save_top_k=1,  # Сохраняем только одну лучшую
