@@ -422,7 +422,7 @@ def inherence_correct():
 
 def main():
     configs = cfg.Configs.init_as_default("default.yml")
-    work_model = common.WorkModel(configs.ENV_DATASET_PATH, configs.BASE_DATASET_SIZE, SamplerTypes.SAMPLER_SOBOL)
+    work_model = common.WorkModel(configs, SamplerTypes.SAMPLER_SOBOL)
     # common.plot_distribution(work_model.ds, num_params=len(work_model.ds_gen.origin_filter.coupling_matrix.links))
     # plt.show()
 
@@ -449,9 +449,6 @@ def main():
     # fig.suptitle("Статистика по синтетике S11 (дБ)")
     #
 
-    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted",
-                            s_tf=S_Resample(301))
-
     # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband",
     #                         s_tf=S_Resample(301))
 
@@ -465,13 +462,13 @@ def main():
     # )
     # fig.suptitle("Статистика по измерениям S11 (дБ)")
 
-    # lit_model = work_model.train(
-    #     optimizer_cfg={"name": "AdamW", "lr": 0.0009400000000000001, "weight_decay": 1e-5},
-    #     scheduler_cfg={"name": "StepLR", "step_size": 25, "gamma": 0.09},
-    #     # optimizer_cfg={"name": "AdamW", "lr": 0.0005371, "weight_decay": 1e-5},
-    #     # scheduler_cfg={"name": "StepLR", "step_size": 30, "gamma": 0.01},
-    #     loss_fn=CustomLosses("sqrt_mse_with_l1", weight_decay=1, weights=None)
-    #     )
+    lit_model = work_model.train(
+        optimizer_cfg={"name": "AdamW", "lr": 0.0009400000000000001, "weight_decay": 1e-5},
+        scheduler_cfg={"name": "StepLR", "step_size": 25, "gamma": 0.09},
+        # optimizer_cfg={"name": "AdamW", "lr": 0.0005371, "weight_decay": 1e-5},
+        # scheduler_cfg={"name": "StepLR", "step_size": 30, "gamma": 0.01},
+        loss_fn=CustomLosses("sqrt_mse_with_l1", weight_decay=1, weights=None)
+        )
 
     # work_model_inference_extractor = common.WorkModel(configs.ENV_DATASET_PATH, 50000, SamplerTypes.SAMPLER_SOBOL)
     # work_model_inference_extractor.setup(
@@ -541,9 +538,9 @@ def main():
     # inference_model = work_model.inference("saved_models\\EAMU4T1-BPFC2\\best-epoch=25-train_loss=0.02530-val_loss=0.02793-val_r2=0.96251-val_mse=0.00296-val_mae=0.02496-batch_size=32-base_dataset_size=1000000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
     # inference_model = work_model.inference("saved_models\\ERV-KuIMUXT1-BPFC1\\best-epoch=78-train_loss=0.01672-val_loss=0.02663-val_r2=0.96754-val_mse=0.00258-val_mae=0.02406-batch_size=32-base_dataset_size=100000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
     # inference_model = work_model.inference("saved_models\\ERV-KuIMUXT1-BPFC1\\best-epoch=25-train_loss=0.01518-val_loss=0.01534-val_r2=0.89565-val_mse=0.00116-val_mae=0.01418-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_STD.ckpt")
-    inference_model = work_model.inference("saved_models/EAMU4-KuIMUXT2-BPFC4/best-epoch=26-train_loss=0.08889-val_loss=0.08248-val_r2=0.99727-val_mse=0.00020-val_mae=0.00647-batch_size=32-base_dataset_size=300000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
+    # inference_model = work_model.inference("saved_models/EAMU4-KuIMUXT2-BPFC4/best-epoch=26-train_loss=0.08889-val_loss=0.08248-val_r2=0.99727-val_mse=0.00020-val_mae=0.00647-batch_size=32-base_dataset_size=300000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
     # inference_model = work_model.inference("saved_models/EAMU4-KuIMUXT2-BPFC2/best-epoch=27-train_loss=0.08527-val_loss=0.07506-val_r2=0.99731-val_mse=0.00021-val_mae=0.00531-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    # inference_model = work_model.inference(lit_model.trainer.checkpoint_callback.best_model_path)
+    inference_model = work_model.inference(lit_model.trainer.checkpoint_callback.best_model_path)
 
 
     # work_model_widenet = common.WorkModel(configs.ENV_DATASET_PATH, configs.BASE_DATASET_SIZE+100000, SamplerTypes.SAMPLER_SOBOL)
@@ -619,7 +616,8 @@ def main():
     # pred_fil.coupling_matrix.plot_matrix(title="Predict tuned matrix for inverted model")
     # optim_matrix.plot_matrix(title="Optimized tuned matrix for inverted model")
 
-
+    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted",
+                            s_tf=S_Resample(301))
     cst_tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/cst",
                             s_tf=S_Resample(301))
     # TODO: РЕФАКТОРИНГ МЕТОДОВ WORK_MODEL!!!!!

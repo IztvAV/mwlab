@@ -34,6 +34,7 @@ filters/FilterData/*/optimize_data_*
 filters/FilterData/*/study_results
 filters/FilterData/*/modeling
 filters/FilterData/*/measure
+filters/FilterData/*/bundle
 
 filters/saved_models
 lightning_logs

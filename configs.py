@@ -24,7 +24,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+import numpy as np
 
 import yaml
 
@@ -54,7 +54,30 @@ class PathsConfig:
 
 
 @dataclass
+class MatrixSamplerConfig:
+    self_coupling: float
+    mainline_coupling: float
+    cross_coupling: float
+    parasitic_coupling: float
+    absolute: bool
+
+
+@dataclass
+class PssSampler:
+    a11: float
+    a22: float
+    b11: float
+    b22: float
+
+    def array(self):
+        return np.array([self.a11, self.a22, self.b11, self.b22])
+
+
+@dataclass
 class DatasetConfig:
+    matrix_sampler_delta: MatrixSamplerConfig
+    pss_origin: PssSampler
+    pss_sampler_delta: PssSampler
     size: int  # раньше BASE_DATASET_SIZE
     sampler_type: str
 
@@ -146,7 +169,20 @@ class Configs:
         meta_cfg = MetaConfig(**data["meta"])
         filter_cfg = FilterConfig(**data["filter"])
         paths_cfg = PathsConfig(**data["paths"])
-        dataset_cfg = DatasetConfig(**data["dataset"])
+        dataset_section = data["dataset"]
+
+        matrix_sampler_cfg = MatrixSamplerConfig(**dataset_section["matrix_sampler_delta"])
+        pss_origin_cfg = PssSampler(**dataset_section["pss_origin"])
+        pss_sampler_cfg = PssSampler(**dataset_section["pss_sampler_delta"])
+
+        dataset_cfg = DatasetConfig(
+            size=dataset_section["size"],
+            sampler_type=dataset_section["sampler_type"],
+            matrix_sampler_delta=matrix_sampler_cfg,
+            pss_origin=pss_origin_cfg,
+            pss_sampler_delta=pss_sampler_cfg,
+        )
+
         model_cfg = ModelConfig(**data["model"])
         inference_cfg = InferenceConfig(**data["inference"])
 
