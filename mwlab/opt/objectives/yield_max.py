@@ -93,6 +93,8 @@ class YieldObjective:
         self.spec: Specification = spec
         self.space: DesignSpace = design_space
         self.n_mc: int = int(n_mc)
+        if self.n_mc <= 0:
+            raise ValueError("n_mc must be a positive integer")
 
         if isinstance(sampler, str):
             self.sampler: BaseSampler = get_sampler(sampler, **(sampler_kwargs or {}))
@@ -117,14 +119,15 @@ class YieldObjective:
             reject_invalid=False,   # дизайн-спейс уже валиден
         )
 
-        # 2) Batched прогноз surrogate
-        preds = self.sur.batch_predict(pts)
-
-        # 3) Вычисляем долю pass
-        ok = [self.spec.is_ok(net) for net in preds]
-        return float(np.mean(ok))
+        # 2) Проверяем спецификацию через суррогат.
+        #    Всегда используем BaseSurrogate.passes_spec:
+        #    - для NNSurrogate сработает быстрый векторный путь (GPU-friendly);
+        #    - для остальных будет корректный fallback через batch_predict.
+        ok_mask = self.sur.passes_spec(pts, self.spec)  # np.ndarray[bool]
+        return float(np.mean(ok_mask))
 
     # ---------------------------------------------------------------- repr
     def __repr__(self):  # pragma: no cover
         return (f"YieldObjective(n_mc={self.n_mc}, sampler={self.sampler}, "
                 f"spec={self.spec.name})")
+

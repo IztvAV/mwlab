@@ -250,7 +250,8 @@ class SoftPlusLEComparator(LEComparator):
     def penalty(self, value: float) -> float:
         sc = _resolve_scale(self.limit, self._scale_param)
         r = (float(value) - self.limit) / sc
-        return float(_softplus(r, self.beta))
+        base = _softplus(0.0, self.beta)  # = ln(2)/beta
+        return float(_softplus(r, self.beta) - base)
 
     def __repr__(self):  # pragma: no cover
         return f"softplus ≤ {self.limit} / scale={self._scale_param}, beta={self.beta} {self.unit}".strip()
@@ -278,7 +279,8 @@ class SoftPlusGEComparator(GEComparator):
     def penalty(self, value: float) -> float:
         sc = _resolve_scale(self.limit, self._scale_param)
         r = (self.limit - float(value)) / sc
-        return float(_softplus(r, self.beta))
+        base = _softplus(0.0, self.beta)
+        return float(_softplus(r, self.beta) - base)
 
     def __repr__(self):  # pragma: no cover
         return f"softplus ≥ {self.limit} / scale={self._scale_param}, beta={self.beta} {self.unit}".strip()

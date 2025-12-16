@@ -16,10 +16,10 @@ import numpy as np
 
 from scipy.optimize import minimize, OptimizeResult
 
-from mwlab.opt.design import DesignSpace, get_sampler
+from mwlab.opt.design.space import DesignSpace
+from mwlab.opt.design.samplers import get_sampler
 from mwlab.opt.surrogates.base import BaseSurrogate
 from mwlab.opt.objectives.specification import Specification
-from mwlab.opt.objectives import YieldObjective
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -102,6 +102,16 @@ class JointBoxOptimizer:
                                (np.log(1e-12), np.log(v[1]))])  # плюс
             else:
                 bounds.append((np.log(1e-12), np.log(v)))
+
+        # ---------------------- проверка значений  -----------------------
+        for n, v in delta_upper.items():
+            if isinstance(v, tuple):
+                if v[0] <= 0 or v[1] <= 0:
+                    raise ValueError(
+                        f"delta_upper['{n}'] ожидает положительные амплитуды (δ_minus_max, δ_plus_max), получили {v}")
+            else:
+                if v <= 0:
+                    raise ValueError(f"delta_upper['{n}'] ожидает положительный радиус, получили {v}")
 
         # ---------------------- вспомогательные функции ------------------
         def _dict_from_vec(vec):

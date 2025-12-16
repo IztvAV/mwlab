@@ -15,7 +15,6 @@ from __future__ import annotations
 from typing import Mapping, Sequence
 
 import numpy as np
-import torch
 
 from mwlab.opt.surrogates.base import BaseSurrogate
 from mwlab.opt.design.space import DesignSpace
@@ -40,8 +39,6 @@ def _fd_gradient(
     d = len(space)
     g = np.zeros(d)
     lows, highs = space.bounds()
-
-    f0 = batch_eval(surrogate, [space.dict(x0)], spec)[0]  # 0/1
 
     for i in range(d):
         delta = eps_rel * (highs[i] - lows[i])

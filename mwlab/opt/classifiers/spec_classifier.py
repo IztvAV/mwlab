@@ -20,6 +20,7 @@ import json
 from pathlib import Path
 
 import joblib
+import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.model_selection import train_test_split
@@ -91,24 +92,24 @@ class SpecClassifier(BaseSurrogate):
         points: Sequence[Mapping[str, float]],
         specification: Specification,
         *,
+        teacher: BaseSurrogate,  # ← НОВОЕ: суррогат-«учитель» для y_true
         name: str = "eval",
         verbose: bool = True,
     ):
         """
-        Короткая утилита: считает y_true через Specification
-        и выводит classification_report + balanced accuracy.
+        Считает y_true через переданный teacher-суррогат и Specification,
+        затем сравнивает с предсказаниями классификатора.
         """
-        y_true = specification.passes_spec(points, specification).astype(int)
-        y_pred = self.batch_predict(points)
+        y_true = teacher.passes_spec(points, specification).astype(int)
+        y_pred = np.asarray(self.batch_predict(points), dtype=int)
 
         if verbose:
             print(f"\nClassification report ({name}):")
-            print(classification_report(y_true, y_pred,
-                                        digits=3, zero_division=0))
+            print(classification_report(y_true, y_pred, digits=3, zero_division=0))
             ba = balanced_accuracy_score(y_true, y_pred)
             print(f"Balanced accuracy: {ba:.4f}")
 
-        return ba
+        return balanced_accuracy_score(y_true, y_pred)
     # ---------------------------------------------------------------- factory
     @classmethod
     def from_training(

@@ -102,7 +102,7 @@ crit_il_ripple = BaseCriterion(
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, Type, Callable, Sequence, Tuple, List
+from typing import Dict, Type, TypeVar, Callable, Sequence, Tuple, List, Union, Iterable
 
 import numpy as np
 import skrf as rf
@@ -112,25 +112,25 @@ import skrf as rf
 #  Registry helpers ― чтобы @register_selector(...) было максимально похоже
 #  на существующие регистры (samplers, surrogates и т. д.)
 # ────────────────────────────────────────────────────────────────────────────
-_SELECTOR_REG: Dict[str, "BaseSelector"] = {}
-_AGGREGATOR_REG: Dict[str, "BaseAggregator"] = {}
-_COMPARATOR_REG: Dict[str, "BaseComparator"] = {}
+T = TypeVar("T")
 
-
-def _make_register(reg: Dict[str, Type], kind: str) -> Callable[[str], Callable]:
-    """Фабрика декораторов `register_selector / aggregator / comparator`."""
-    def _decor(alias: str | Sequence[str]):
-        aliases: List[str] = [alias] if isinstance(alias, str) else list(alias)
-
-        def _wrap(cls):
+def _make_register(reg: Dict[str, Type[T]], kind: str) -> Callable[[Union[str, Iterable[str]]], Callable[[Type[T]], Type[T]]]:
+    def _decor(alias: Union[str, Iterable[str]]):
+        aliases = [alias] if isinstance(alias, str) else list(alias)
+        def _wrap(cls: Type[T]) -> Type[T]:
             for name in aliases:
                 if name in reg:
                     raise KeyError(f"{kind.capitalize()} alias '{name}' already exists")
                 reg[name] = cls
-            cls._aliases = aliases      # type: ignore[attr-defined]
+            setattr(cls, "_aliases", aliases)
             return cls
         return _wrap
     return _decor
+
+
+_SELECTOR_REG: Dict[str, "BaseSelector"] = {}
+_AGGREGATOR_REG: Dict[str, "BaseAggregator"] = {}
+_COMPARATOR_REG: Dict[str, "BaseComparator"] = {}
 
 
 register_selector   = _make_register(_SELECTOR_REG,   "selector")
@@ -144,9 +144,11 @@ def get_selector(alias: str, **kw):
     return _SELECTOR_REG[alias](**kw)
 
 
-# аналогичные фабрики можно добавить при необходимости
-# get_aggregator / get_comparator
+def get_aggregator(alias: str, **kw):
+    return _AGGREGATOR_REG[alias](**kw)
 
+def get_comparator(alias: str, **kw):
+    return _COMPARATOR_REG[alias](**kw)
 
 # ────────────────────────────────────────────────────────────────────────────
 #  Base-классы
@@ -212,6 +214,8 @@ class BaseCriterion:
         self.agg = aggregator
         self.comp = comparator
         self.weight = float(weight)
+        if self.weight < 0:
+            raise ValueError("weight must be >= 0")
         self.name = name or getattr(selector, "name", "crit")
 
     # ---------------------------------------------------------------- value

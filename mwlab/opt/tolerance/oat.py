@@ -19,10 +19,10 @@ from tqdm import tqdm
 
 import numpy as np
 
-from mwlab.opt.design import DesignSpace, get_sampler
+from mwlab.opt.design.space import DesignSpace
+from mwlab.opt.design.samplers import get_sampler
 from mwlab.opt.surrogates.base import BaseSurrogate
 from mwlab.opt.objectives.specification import Specification
-from mwlab.opt.objectives import YieldObjective
 
 
 # ────────────────────────────────────────────────────────────────────────────

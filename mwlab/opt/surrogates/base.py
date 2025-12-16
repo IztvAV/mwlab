@@ -46,16 +46,18 @@ class BaseSurrogate(ABC):
         return_std: bool = False,
     ) -> List[Any] | Tuple[List[Any], List[float]]:
         """Конвенция: по-умолчанию просто итерирует `predict`."""
+        if return_std and not self.supports_uncertainty:
+            raise NotImplementedError("This surrogate does not support uncertainty (σ).")
         ys, sig = [], []
         for x in xs:
             out = self.predict(x, return_std=return_std)
-            if return_std and self.supports_uncertainty:
+            if return_std:  # сюда мы попадаем только если supports_uncertainty=True
                 y, s = out
-                ys.append(y)
+                ys.append(y);
                 sig.append(s)
             else:
                 ys.append(out)
-        return (ys, sig) if (return_std and self.supports_uncertainty) else ys
+        return (ys, sig) if return_std else ys
 
     def passes_spec(
             self,
