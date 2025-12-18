@@ -5,3 +5,4 @@ meta:
 
 paths:
   manifest: "filters/FilterData/EAMU4-KuIMUXT2-BPFC2/manifest.yml"
+#  manifest: "filters/FilterData/EAMU4-KuIMUXT2-BPFC4/manifest.yml"
