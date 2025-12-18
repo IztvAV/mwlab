@@ -1,3 +1,5 @@
+import copy
+
 import numpy as np
 from scipy.optimize import minimize
 from scipy import optimize
@@ -1177,6 +1179,14 @@ def optimize_cm(pred_filter: DatasetMWFilter,
         plt.plot(w_full, s21_opt_db, linestyle=':', label="S21 Optimized")
         plt.legend(); plt.grid(True)
 
-    return CouplingMatrix(optim_matrix), Q_opt, (a11_o, a22_o, b11_o, b22_o)
+    optim_filter = copy.deepcopy(pred_filter)
+    optim_filter._coupling_matrix = CouplingMatrix(optim_matrix)
+    optim_filter._Q = Q_opt
+
+    fbw = optim_filter.bw / optim_filter.f0
+    s_opt = MWFilter.response_from_coupling_matrix(M=optim_matrix, f0=optim_filter.f0, FBW=fbw, Q=optim_filter.Q, frange=optim_filter.f/1e6)
+    # s_opt = calc_s_params(optim_matrix.numpy(), pred_filter.f0, pred_filter.bw, Q_opt, pred_filter.f / 1e6)
+    optim_filter.s = s_opt
+    return optim_filter, (a11_o, a22_o, b11_o, b22_o)
 
 
