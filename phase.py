@@ -1665,6 +1665,8 @@ class PhaseLoadingExtractor:
 
         w_norm = np.asarray(w_norm, dtype=np.float64)
 
+        self.inference_model = self.inference_model.to('cpu')
+
         def objective(params, verbose=False):
             b11_opt, b22_opt = params
 
@@ -1756,7 +1758,7 @@ class PhaseLoadingExtractor:
             method='Nelder-Mead',
             options={'maxiter': 100, 'xatol': 2e-4, 'fatol': 5e-4}
         )
-        print(f"[NELDER-MEAD] x_opt={res.x}, loss={res.fun:.6f}, success={res.success}")
+        # print(f"[NELDER-MEAD] x_opt={res.x}, loss={res.fun:.6f}, success={res.success}")
         return res
 
     def optimize_phase_loading(self, ntw_orig, w_norm, use_grid=False):
@@ -1775,11 +1777,11 @@ class PhaseLoadingExtractor:
             x0 = self._last_x0
 
         res = self._refine_local(x0, obj)
-        self._last_x0 = res.x.copy()
+        # self._last_x0 = res.x.copy()
         self.last_b11_opt, self.last_b22_opt = res.x
 
         stop_time = time.time()
-        print(f"Optimize phase loading time: {stop_time - start_time:.3f} sec")
+        # print(f"Optimize phase loading time: {stop_time - start_time:.3f} sec")
         return res
 
     def extract_all(
