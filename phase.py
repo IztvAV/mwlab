@@ -28,6 +28,16 @@ def apply_phase_all(S11, S21, S22, w, a11, b11, a22, b22):
     S21_corr = apply_phase_one(S21, 0.5 * (phi11 + phi22))
     return S11_corr, S21_corr, S22_corr
 
+def apply_phase_for_ntw(net: rf.Network, w, a11, b11, a22, b22):
+    phi11 = -2 * (a11 + np.asarray(w) * b11)
+    phi22 = -2 * (a22 + np.asarray(w) * b22)
+    phi21 = -(phi11 + phi22)
+    net.s[:, 0, 0] = apply_phase_one(net.s[:, 0, 0], phi11)
+    net.s[:, 0, 1] = apply_phase_one(net.s[:, 0, 1], phi21)
+    net.s[:, 1, 0] = apply_phase_one(net.s[:, 1, 0], phi21)
+    net.s[:, 1, 1] = apply_phase_one(net.s[:, 1, 1], phi22)
+    return net
+
 
 def _wrap_to_pi(x):
     return (x + np.pi) % (2 * np.pi) - np.pi
@@ -1777,8 +1787,8 @@ class PhaseLoadingExtractor:
             x0 = self._last_x0
 
         res = self._refine_local(x0, obj)
-        # self._last_x0 = res.x.copy()
-        self.last_b11_opt, self.last_b22_opt = res.x
+        self._last_x0 = res.x.copy()
+        self.last_b11_opt, self.last_b22_opt = 0.5*res.x # Умножаю на 0.5, чтобы физический смысл соответствовал смещению фазы на порте
 
         stop_time = time.time()
         # print(f"Optimize phase loading time: {stop_time - start_time:.3f} sec")
@@ -1845,15 +1855,15 @@ class PhaseLoadingExtractor:
         S_lin = np.array(ntw_edges_deembedded.s, dtype=np.complex128, copy=True)
 
         # фазы на портах
-        phi11_lin = w * b11_opt
-        phi22_lin = w * b22_opt
-        phi21_lin = 0.5 * (phi11_lin + phi22_lin)
+        phi11_lin = -2*w * b11_opt
+        phi22_lin = -2*w * b22_opt
+        phi21_lin = -(phi11_lin + phi22_lin)
 
         # применяем обратную фазу: умножаем на exp(+j * φ)
-        S_lin[:, 0, 0] = apply_phase_one(S_lin[:, 0, 0], -phi11_lin)
-        S_lin[:, 1, 1] = apply_phase_one(S_lin[:, 1, 1], -phi22_lin)
-        S_lin[:, 0, 1] = apply_phase_one(S_lin[:, 0, 1], -phi21_lin)
-        S_lin[:, 1, 0] = apply_phase_one(S_lin[:, 1, 0], -phi21_lin)
+        S_lin[:, 0, 0] = apply_phase_one(S_lin[:, 0, 0], phi11_lin)
+        S_lin[:, 1, 1] = apply_phase_one(S_lin[:, 1, 1], phi22_lin)
+        S_lin[:, 0, 1] = apply_phase_one(S_lin[:, 0, 1], phi21_lin)
+        S_lin[:, 1, 0] = apply_phase_one(S_lin[:, 1, 0], phi21_lin)
 
         ntw_full_deembedded = rf.Network(
             frequency=ntw_edges_deembedded.frequency,

@@ -115,33 +115,12 @@ def phase_extract(fil: rf.Network):
         ntw_de = calibration_res['ntw_deembedded']
         calibrated = True
     else:
-        s_de = np.array(fil.s, dtype=np.complex128, copy=True)
-        w = np.asarray(work_model.orig_filter.f_norm)
-
-        # фазы на портах
-        phi1 = -2.0 * (calibration_res['phi1_c'])
-        phi2 = -2.0 * (calibration_res['phi2_c'])
-
-        s_de[:, 0, 0] = phase.apply_phase_one(s_de[:, 0, 0], phi1)
-        s_de[:, 1, 1] = phase.apply_phase_one(s_de[:, 1, 1], phi2)
-        s_de[:, 0, 1] = -phase.apply_phase_one(s_de[:, 0, 1], 0.5 * (phi1 + phi2))
-        s_de[:, 1, 0] = -phase.apply_phase_one(s_de[:, 1, 0], 0.5 * (phi1 + phi2))
-
-        phi11_lin = w * calibration_res['b11_opt']
-        phi22_lin = w * calibration_res['b22_opt']
-        phi21_lin = 0.5 * (phi11_lin + phi22_lin)
-
-        # применяем обратную фазу: умножаем на exp(+j * φ)
-        s_de[:, 0, 0] = phase.apply_phase_one(s_de[:, 0, 0], -phi11_lin)
-        s_de[:, 1, 1] = phase.apply_phase_one(s_de[:, 1, 1], -phi22_lin)
-        s_de[:, 0, 1] = phase.apply_phase_one(s_de[:, 0, 1], -phi21_lin)
-        s_de[:, 1, 0] = phase.apply_phase_one(s_de[:, 1, 0], -phi21_lin)
-
-        ntw_de = rf.Network(
-            frequency=fil.frequency,
-            s=s_de,
-            name="fully_deembedded_phase",
-        )
+        w = work_model.orig_filter.f_norm
+        a11 = calibration_res['phi1_c']
+        a22 = calibration_res['phi2_c']
+        b11 = calibration_res['b11_opt']
+        b22 = calibration_res['b22_opt']
+        ntw_de = phase.apply_phase_for_ntw(fil, w, a11, b11, a22, b22)
     return ntw_de
 
 
@@ -159,33 +138,20 @@ def predict(fil: rf.Network):
         pred_fil = work_model.create_filter_from_prediction(orig_fil_to_nn, work_model.orig_filter, pred_prms,
                                                             work_model.codec)
 
-        ps_shifts = [pred_prms["a11"], pred_prms["a22"], pred_prms["b11"], pred_prms["b22"]]
         a11_final = calibration_res['phi1_c'] + pred_prms["a11"]
         a22_final = calibration_res['phi2_c'] + pred_prms["a22"]
-        b11_final = pred_prms["b11"] + 0.5*calibration_res['b11_opt']
-        b22_final = pred_prms["b22"] + 0.5*calibration_res['b22_opt']
+        b11_final = pred_prms["b11"] + calibration_res['b11_opt']
+        b22_final = pred_prms["b22"] + calibration_res['b22_opt']
         print(
             f"Финальный фазовый сдвиг, после корректировки ИИ: a11={a11_final:.6f} рад ({np.degrees(a11_final):.2f}°), a22={a22_final:.6f} рад ({np.degrees(a22_final):.2f}°)"
             f" b11 = {b11_final:.6f} рад ({np.degrees(b11_final):.2f}°), b22 = {b22_final:.6f} рад ({np.degrees(b22_final):.2f}°)")
-        pred_fil.s[:, 0, 0] *= np.array(torch.exp(-1j * 2 * (a11_final + w * b11_final)), dtype=np.complex64)
-        pred_fil.s[:, 0, 1] *= np.array(-torch.exp(-1j * (a11_final + a22_final + w * (b11_final + b22_final))),
-                                        dtype=np.complex64)
-        pred_fil.s[:, 1, 0] *= np.array(-torch.exp(-1j * (a11_final + a22_final + w * (b11_final + b22_final))),
-                                        dtype=np.complex64)
-        pred_fil.s[:, 1, 1] *= np.array(torch.exp(-1j * 2 * (a22_final + w * b22_final)), dtype=np.complex64)
-        optim_matrix, Q, phase_opt = optimize_cm(pred_fil, fil,
-                                                 phase_init=(a11_final, a22_final, b11_final, b22_final))
-        print(
-            f"Оптимизированные параметры: {optim_matrix.factors}. Добротность: {pred_fil.Q}. Фаза: {np.degrees(phase_opt)}")
 
-        S = calc_s_params(optim_matrix.matrix.numpy(), pred_fil.f0, pred_fil.bw, pred_fil.Q, fil.f/1e6)
-        a11_final, a22_final, b11_final, b22_final = phase_opt
-        S[:, 0, 0] *= np.array(torch.exp(-1j * 2 * (a11_final + w * b11_final)), dtype=np.complex64)
-        S[:, 0, 1] *= np.array(-torch.exp(-1j * (a11_final + a22_final + w * (b11_final + b22_final))), dtype=np.complex64)
-        S[:, 1, 0] *= np.array(-torch.exp(-1j * (a11_final + a22_final + w * (b11_final + b22_final))), dtype=np.complex64)
-        S[:, 1, 1] *= np.array(torch.exp(-1j * 2 * (a22_final + w * b22_final)), dtype=np.complex64)
-        return S, optim_matrix.matrix.numpy()
-        # return pred_fil.s, pred_fil.coupling_matrix.matrix.numpy()
+        pred_fil = phase.apply_phase_for_ntw(pred_fil, w, a11_final, b11_final, a22_final, b22_final)
+        optim_filter, phase_opt = optimize_cm(pred_fil, fil, phase_init=(a11_final, a22_final, b11_final, b22_final), plot=False)
+        print(f"Оптимизированные параметры: {optim_filter.coupling_matrix.factors}. Добротность: {optim_filter.Q}. Фаза: {np.degrees(phase_opt)}")
+
+        optim_filter = phase.apply_phase_for_ntw(optim_filter, w, *phase_opt)
+        return optim_filter.s, optim_filter.coupling_matrix.matrix.numpy()
     except Exception as e:
         raise ValueError(f"На сервере возникла ошибка: {e}") from e
 
