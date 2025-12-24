@@ -40,6 +40,7 @@ from dataclasses import dataclass
 
 work_model: WorkModel|None = None
 inference_model = None
+inference_model_ft = None
 corr_model = None
 corr_fast_calc = None
 corr_optim = None
@@ -80,15 +81,6 @@ def load_model(manifest_path: str|os.PathLike|None=None):
                                                                         work_model.orig_filter.coupling_matrix.links] +
                                                                        ["Q"] + ["f0"] + ["bw"] + ["a11"] +
                                                                        ["a22"] + ["b11"] + ["b22"])
-        global corr_fast_calc
-        corr_fast_calc = FastMN2toSParamCalculation(matrix_order=work_model.orig_filter.coupling_matrix.matrix_order,
-                                                    wlist=work_model.orig_filter.f_norm,
-                                                    Q=work_model.orig_filter.Q,
-                                                    fbw=work_model.orig_filter.fbw)
-        global corr_model
-        corr_model = CorrectionNet(s_shape=(8, 301), m_dim=len(codec.x_keys))
-        global corr_optim
-        corr_optim = torch.optim.AdamW(params=corr_model.parameters(), lr=1e-5)
 
         codec = codec
         work_model.setup(
@@ -96,11 +88,29 @@ def load_model(manifest_path: str|os.PathLike|None=None):
             model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
             dm_codec=codec
         )
-        global inference_model, phase_extractor
+
+        global inference_model, phase_extractor, inference_model_ft
         inference_model = work_model.inference(configs.MODEL_CHECKPOINT_PATH)
-        # inference_model = work_model.inference(f"D:\\Burlakov\\pyprojects\\mwlab\\saved_models\\EAMU4-KuIMUXT2-BPFC2\\best-epoch=27-train_loss=0.08527-val_loss=0.07506-val_r2=0.99731-val_mse=0.00021-val_mae=0.00531-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-        # inference_model = work_model.inference(
-        #     "D:/Burlakov/pyprojects/mwlab/saved_models/EAMU4-KuIMUXT2-BPFC4/best-epoch=26-train_loss=0.08889-val_loss=0.08248-val_r2=0.99727-val_mse=0.00020-val_mae=0.00647-batch_size=32-base_dataset_size=300000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
+        inference_model_ft = copy.deepcopy(inference_model)
+        inference_model_ft.eval()
+        for param in inference_model_ft.model.parameters():
+            param.requires_grad = False
+
+        for param in inference_model_ft.model._main_model.fc.parameters():
+            param.requires_grad = True
+
+        for param in inference_model_ft.model._correction_model.parameters():
+            param.requires_grad = True
+        params = [p for p in inference_model_ft.parameters() if p.requires_grad]
+        global corr_optim
+        corr_optim = torch.optim.AdamW(params=params, lr=0.0005370623202982373, weight_decay=1e-5)
+        global corr_fast_calc
+        corr_fast_calc = FastMN2toSParamCalculation(matrix_order=work_model.orig_filter.coupling_matrix.matrix_order,
+                                                    wlist=work_model.orig_filter.f_norm,
+                                                    Q=work_model.orig_filter.Q,
+                                                    fbw=work_model.orig_filter.fbw,
+                                                    device=inference_model_ft.device)
+
         phase_extractor = phase.PhaseLoadingExtractor(inference_model, work_model, work_model.orig_filter)
     except Exception as e:
         raise ValueError(f"На сервере возникла ошибка: {e}") from e
@@ -124,39 +134,37 @@ def phase_extract(fil: rf.Network):
     return ntw_de
 
 
-def predict(fil: rf.Network):
-    try:
-        global inference_model, calibration_res
-        w = work_model.orig_filter.f_norm
-        s_resample = S_Resample(301)
-        fil = s_resample(fil)
-        orig_fil_to_nn = copy.deepcopy(fil)
-        ntw_de = phase_extract(fil)
+def prediction_with_optim_correct(fil: rf.Network):
+    global inference_model, calibration_res
+    w = work_model.orig_filter.f_norm
+    s_resample = S_Resample(301)
+    fil = s_resample(fil)
+    # orig_fil_to_nn = copy.deepcopy(fil)
+    ntw_de = phase_extract(fil)
 
-        pred_prms = inference_model.predict_x(ntw_de)
-        print(f"Предсказанные параметры: {pred_prms}")
-        pred_fil = work_model.create_filter_from_prediction(orig_fil_to_nn, work_model.orig_filter, pred_prms,
-                                                            work_model.codec)
+    pred_prms = inference_model.predict_x(ntw_de)
+    print(f"Предсказанные параметры: {pred_prms}")
+    pred_fil = work_model.create_filter_from_prediction(fil, work_model.orig_filter, pred_prms,
+                                                        work_model.codec)
 
-        a11_final = calibration_res['phi1_c'] + pred_prms["a11"]
-        a22_final = calibration_res['phi2_c'] + pred_prms["a22"]
-        b11_final = pred_prms["b11"] + calibration_res['b11_opt']
-        b22_final = pred_prms["b22"] + calibration_res['b22_opt']
-        print(
-            f"Финальный фазовый сдвиг, после корректировки ИИ: a11={a11_final:.6f} рад ({np.degrees(a11_final):.2f}°), a22={a22_final:.6f} рад ({np.degrees(a22_final):.2f}°)"
-            f" b11 = {b11_final:.6f} рад ({np.degrees(b11_final):.2f}°), b22 = {b22_final:.6f} рад ({np.degrees(b22_final):.2f}°)")
+    a11_final = calibration_res['phi1_c'] + pred_prms["a11"]
+    a22_final = calibration_res['phi2_c'] + pred_prms["a22"]
+    b11_final = pred_prms["b11"] + calibration_res['b11_opt']
+    b22_final = pred_prms["b22"] + calibration_res['b22_opt']
+    print(
+        f"Финальный фазовый сдвиг, после корректировки ИИ: a11={a11_final:.6f} рад ({np.degrees(a11_final):.2f}°), a22={a22_final:.6f} рад ({np.degrees(a22_final):.2f}°)"
+        f" b11 = {b11_final:.6f} рад ({np.degrees(b11_final):.2f}°), b22 = {b22_final:.6f} рад ({np.degrees(b22_final):.2f}°)")
 
-        pred_fil = phase.apply_phase_for_ntw(pred_fil, w, a11_final, b11_final, a22_final, b22_final)
-        optim_filter, phase_opt = optimize_cm(pred_fil, fil, phase_init=(a11_final, a22_final, b11_final, b22_final), plot=False)
-        print(f"Оптимизированные параметры: {optim_filter.coupling_matrix.factors}. Добротность: {optim_filter.Q}. Фаза: {np.degrees(phase_opt)}")
+    pred_fil = phase.apply_phase_for_ntw(pred_fil, w, a11_final, b11_final, a22_final, b22_final)
+    optim_filter, phase_opt = optimize_cm(pred_fil, fil, phase_init=(a11_final, a22_final, b11_final, b22_final), plot=False)
+    print(f"Оптимизированные параметры: {optim_filter.coupling_matrix.factors}. Добротность: {optim_filter.Q}. Фаза: {np.degrees(phase_opt)}")
 
-        optim_filter = phase.apply_phase_for_ntw(optim_filter, w, *phase_opt)
-        return optim_filter.s, optim_filter.coupling_matrix.matrix.numpy()
-    except Exception as e:
-        raise ValueError(f"На сервере возникла ошибка: {e}") from e
+    optim_filter = phase.apply_phase_for_ntw(optim_filter, w, *phase_opt)
+    return optim_filter.s, optim_filter.coupling_matrix.matrix.numpy()
 
+pred_fil = None
 
-def _online_correct(fil: rf.Network):
+def prediction_with_online_correct(fil: rf.Network):
     def factors_from_preds(preds: dict, links: list, ref_tensor: torch.Tensor):
         """
         links: список пар (i, j) или объектов, из которых можно получить i,j
@@ -179,240 +187,106 @@ def _online_correct(fil: rf.Network):
             vals.append(v)
         return torch.stack(vals, dim=0)  # [n_links]
 
+    global inference_model_ft, corr_optim, corr_fast_calc, pred_fil
+
+    if pred_fil is None:
+        pred_fil = fil
+    else:
+        delta = abs(pred_fil.s) - abs(fil.s)
+        pass
+
     codec = work_model.codec
 
-    inference_model.eval()
-    total_err = 0
-    for param in inference_model.model.parameters():
-        param.requires_grad = False
-
-    for param in inference_model.model._main_model.fc.parameters():
-        param.requires_grad = True
-
-    for param in inference_model.model._correction_model.parameters():
-        param.requires_grad = True
-
     loss = nn.L1Loss()
-    codec_db = copy.deepcopy(codec)
-    codec_db.y_channels = ['S1_1.db', 'S2_1.db', 'S2_2.db']
 
-    pred_prms = inference_model.predict_x(fil)
+    codec_db = copy.deepcopy(codec)
+    codec_db.y_channels = ['S1_1.db', 'S2_1.db']
+    codec_mag = copy.deepcopy(codec)
+    codec_mag.y_channels = ['S1_1.mag', 'S2_1.mag']
+
+    ntw_de = phase_extract(fil)
+    pred_prms = inference_model_ft.predict_x(ntw_de)
     pred_fil = work_model.create_filter_from_prediction(fil, work_model.orig_filter, pred_prms, work_model.codec)
+
     keys = pred_prms.keys()
-    ts = TouchstoneData(fil)
-    preds = pred_fil.coupling_matrix.factors.unsqueeze(0)
+    m_keys = list(keys)[:-7]
+
+    ts = TouchstoneData(ntw_de)
     s = codec.encode(ts)[1].unsqueeze(0)
     s_db = codec_db.encode(ts)[1].unsqueeze(0)
+    s_mag = codec_mag.encode(ts)[1].unsqueeze(0)
+
     print(f"Initial loss: {loss(s_db, codec_db.encode(TouchstoneData(pred_fil))[1].unsqueeze(0))}")
-    global corr_model, corr_optim, corr_fast_calc
-    corr_model.train()
+
+    s = s.to(inference_model_ft.device)
+    s_db = s_db.to(inference_model_ft.device)
+    s_mag = s_mag.to(inference_model_ft.device)
+
     start_time = time.time()
-    for i in range(200):
-        correction = corr_model(s, preds)
-        total_pred = correction  # скорректированная матрица
-        M = CouplingMatrix.from_factors(total_pred, pred_fil.coupling_matrix.links, pred_fil.coupling_matrix.matrix_order)
+    w = work_model.orig_filter.f_norm.to(inference_model_ft.device)
+    for j in range(50):
+        x_pred = inference_model_ft(s)
+        # print("x_pred grad:", x_pred.requires_grad)
+        if inference_model_ft.scaler_out is not None:
+            x_pred = inference_model_ft._apply_inverse(inference_model_ft.scaler_out, x_pred)
+            # print("x_pred inverse grad:", x_pred.requires_grad)
+        preds = dict(zip(keys, x_pred.squeeze(0)))
+        m_factors = factors_from_preds(preds, pred_fil.coupling_matrix.links, x_pred).unsqueeze(0)
+        # print("m_factors grad:", m_factors.requires_grad)
+
+        M = CouplingMatrix.from_factors(m_factors, pred_fil.coupling_matrix.links,
+                                        pred_fil.coupling_matrix.matrix_order)
+        corr_fast_calc.update_Q(preds['Q'])
         _, s11_pred, s21_pred, s22_pred = corr_fast_calc.RespM2(M, with_s22=True)
-        s_db_corr = torch.stack([
-            MWFilter.to_db(s11_pred),
-            # MWFilter.to_db(s21_pred),  # замените на S12, если у вас именно S1_2.db
-            MWFilter.to_db(s21_pred),  # либо правильно распакуйте, если RespM2 возвращает все 4
-            MWFilter.to_db(s22_pred),
-        ]).unsqueeze(0)  # [B, 4, L] — подгоните под ваш codec_db
-        err = loss(s_db_corr, s_db)
-        print(f"[{i}] Error: {err.item()}")
+
+
+        phi11 = -2*(preds['a11'] + preds['b22'] * w)
+        phi22 = -2*(preds['a22'] + preds['b22'] * w)
+        phi21 = 0.5 * (phi11 + phi22)
+
+        s11_corr = s11_pred*torch.exp(-1j*phi11)
+        s22_corr = s22_pred*torch.exp(-1j*phi22)
+        s21_corr = s21_pred*torch.exp(-1j*phi21)
+
+        s_corr = torch.stack([
+            s11_corr,
+            s21_corr,  # замените на S12, если у вас именно S1_2.db
+            # s21_pred,  # либо правильно распакуйте, если RespM2 возвращает все 4
+            # s22_corr,
+        ]).unsqueeze(0)  # [B, 4, L]
+
+        err = (loss(MWFilter.to_db(s_corr), s_db))
+        reg = max(abs(torch.abs(s_corr) - s_mag).flatten())*2
         corr_optim.zero_grad()
-        err.backward()
+        (err + reg).backward()
         corr_optim.step()
-    stop_time = time.time()
-    print(f"Tuning time: {stop_time-start_time}")
+        # print(f"Error: {err}")
 
     with torch.no_grad():
-        correction = corr_model(s, preds)
-        total_pred = correction  # скорректированная матрица
-        total_pred = total_pred.squeeze(0)
-        total_pred_prms = dict(zip(keys, total_pred))
-        print(f"Origin parameters: {pred_prms}")
-        print(f"Tuned parameters: {total_pred_prms}")
-        correct_pred_fil = inference_model.create_filter_from_prediction(fil, work_model.orig_filter, pred_prms, work_model.codec)
-        # inference_model.plot_origin_vs_prediction(fil, correct_pred_fil)
-    return  correct_pred_fil
+        # m_factors = corr_model(s, preds)
+        x_pred = inference_model_ft(s)
+        if inference_model_ft.scaler_out is not None:
+            x_pred = inference_model_ft._apply_inverse(inference_model_ft.scaler_out, x_pred)
+            # print("x_pred inverse grad:", x_pred.requires_grad)
+        preds = dict(zip(keys, x_pred.squeeze(0)))
+        m_factors = factors_from_preds(preds, pred_fil.coupling_matrix.links, x_pred).unsqueeze(0)
+
+        m_factors = m_factors.squeeze(0)
+        total_pred_prms = dict(zip(m_keys, m_factors))
+        # print(f"Origin parameters: {pred_prms}")
+        # print(f"Tuned parameters: {total_pred_prms}")
+        correct_pred_fil = work_model.create_filter_from_prediction(fil, work_model.orig_filter, total_pred_prms, work_model.codec)
+        # inference_model.plot_origin_vs_prediction(orig_fil, correct_pred_fil, title=f' {i} After correction')
+    return  correct_pred_fil.s, correct_pred_fil.coupling_matrix.matrix.numpy()
 
 
-# def online_correct():
-#     def factors_from_preds(preds: dict, links: list, ref_tensor: torch.Tensor):
-#         """
-#         links: список пар (i, j) или объектов, из которых можно получить i,j
-#         preds: dict где есть ключи "m_i_j" (и/или "m_j_i")
-#         возвращает factors: torch.Tensor [n_links]
-#         """
-#         vals = []
-#         for (i, j) in links:
-#             k1 = f"m_{i}_{j}"
-#             k2 = f"m_{j}_{i}"  # на всякий случай
-#             if k1 in preds:
-#                 v = preds[k1]
-#             elif k2 in preds:
-#                 v = preds[k2]
-#             else:
-#                 # если отсутствует — можно 0, но лучше явно падать, чтобы не молча портить матрицу
-#                 v = torch.zeros((), device=ref_tensor.device, dtype=ref_tensor.dtype)
-#             if not torch.is_tensor(v):
-#                 v = torch.tensor(v, device=ref_tensor.device, dtype=ref_tensor.dtype)
-#             vals.append(v)
-#         return torch.stack(vals, dim=0)  # [n_links]
-#
-#     configs = cfg.Configs.init_as_default("default.yml")
-#     work_model = common.WorkModel(configs, SamplerTypes.SAMPLER_SOBOL)
-#
-#     codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
-#                                                  keys_for_analysis=[f"m_{r}_{c}" for r, c in
-#                                                                     work_model.orig_filter.coupling_matrix.links] + [
-#                                                                        "Q"] + ["f0"] + ["bw"] + ["a11"] + ["a22"] + [
-#                                                                        "b11"] + ["b22"])
-#     codec = codec
-#     work_model.setup(
-#         model_name="resnet_with_correction",
-#         model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
-#         dm_codec=codec
-#     )
-#     # inference_model = work_model_wide.inference(
-#     #     "saved_models/EAMU4-KuIMUXT2-BPFC4/best-epoch=29-train_loss=0.23384-val_loss=0.25414-val_r2=0.88339-val_mse=0.00926-val_mae=0.05538-batch_size=32-base_dataset_size=100000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-#     # sch = torch.optim.lr_scheduler.StepLR(optimizer=optim, step_size=40, gamma=0.1)
-#
-#
-#     # Загружаем лучшую модель
-#     # checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=12-val_loss=0.01266-train_loss=0.01224.ckpt",
-#     # checkpoint_path="saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=49-train_loss=0.03379-val_loss=0.03352-val_r2=0.84208-val_acc=0.25946-val_mae=0.05526-batch_size=32-dataset_size=100000.ckpt",
-#     # "saved_models/ERV-KuIMUXT1-BPFC1/best-epoch=22-train_loss=0.04863-val_loss=0.05762-val_r2=0.82785-val_mse=0.01366-val_mae=0.04395-batch_size=32-base_dataset_size=100000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt"
-#     # inference_model = work_model.inference("saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=29-train_loss=0.04166-val_loss=0.04450-val_r2=0.92560-val_mse=0.00588-val_mae=0.03862-batch_size=32-base_dataset_size=1500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-#     # inference_model = work_model.inference("saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=29-train_loss=0.03546-val_loss=0.03841-val_r2=0.94190-val_mse=0.00459-val_mae=0.03381-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-#     # inference_model = work_model.inference("saved_models\\EAMU4T1-BPFC2\\best-epoch=34-train_loss=0.02388-val_loss=0.02641-val_r2=0.96637-val_mse=0.00265-val_mae=0.02376-batch_size=32-base_dataset_size=600000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-#     # inference_model = work_model.inference("saved_models\\EAMU4T1-BPFC2\\best-epoch=25-train_loss=0.02530-val_loss=0.02793-val_r2=0.96251-val_mse=0.00296-val_mae=0.02496-batch_size=32-base_dataset_size=1000000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-#     # inference_model = work_model.inference(
-#     #     "saved_models/EAMU4-KuIMUXT2-BPFC2/best-epoch=77-train_loss=0.13232-val_loss=0.28403-val_r2=0.76389-val_mse=0.01879-val_mae=0.06333-batch_size=32-base_dataset_size=100000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-#     # inference_model = work_model_wide.inference("saved_models/EAMU4-KuIMUXT2-BPFC4/best-epoch=28-train_loss=0.14318-val_loss=0.14503-val_r2=0.97508-val_mse=0.00196-val_mae=0.01912-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-#     inference_model = work_model.inference(configs.MODEL_CHECKPOINT_PATH)
-#
-#     # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
-#     tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
-#
-#     fast_calc = FastMN2toSParamCalculation(matrix_order=work_model.orig_filter.coupling_matrix.matrix_order,
-#                                            wlist=work_model.orig_filter.f_norm,
-#                                            Q=work_model.orig_filter.Q,
-#                                            fbw=work_model.orig_filter.fbw)
-#     # loss = CustomLosses("log_cosh")
-#     loss = nn.L1Loss()
-#     codec_db = copy.deepcopy(codec)
-#     codec_db.y_channels = ['S1_1.db', 'S2_1.db']
-#     codec_mag = copy.deepcopy(codec)
-#     codec_mag.y_channels = ['S1_1.mag', 'S2_1.mag']
-#
-#     # corr_model = MatrixCorrectionNet(m_dim=len(work_model.orig_filter.coupling_matrix.factors), s_shape=(3, 301), hidden_dim=512)
-#     # corr_model = CorrectionNet(s_shape=(8, 301), m_dim=len(work_model.orig_filter.coupling_matrix.factors), hidden_dim=301)
-#     # corr_model.train()
-#     inference_model.eval()
-#     total_err = 0
-#     # inference_model = inference_model.to(device)
-#     for param in inference_model.model.parameters():
-#         param.requires_grad = False
-#
-#     for param in inference_model.model._main_model.fc.parameters():
-#         param.requires_grad = True
-#
-#     for param in inference_model.model._correction_model.parameters():
-#         param.requires_grad = True
-#
-#     params = [p for p in inference_model.parameters() if p.requires_grad]
-#     # for param in corr_model.parameters():
-#     #     params.append(param)
-#     # optim = torch.optim.AdamW(params=inference_model.parameters(), lr=1e-5)
-#     optim = torch.optim.AdamW(params=params, lr=0.0005370623202982373, weight_decay=1e-5)
-#     sch = torch.optim.lr_scheduler.StepLR(optim, step_size=100, gamma=0.09)
-#     phase_extractor = phase.PhaseLoadingExtractor(inference_model, work_model, work_model.orig_filter)
-#     for i in range(0, 5):
-#         # i = random.randint(0, len(tds))
-#         start_time = time.time()
-#         orig_fil = tds[i][1]
-#         w = work_model.orig_filter.f_norm
-#         res = phase_extractor.extract_all(orig_fil, w_norm=w, verbose=False)
-#         ntw_de = res['ntw_deembedded']
-#
-#         pred_prms = inference_model.predict_x(ntw_de)
-#         # stop_time = time.time()
-#         # print(f"Predict time: {stop_time - start_time:.3f} sec")
-#         pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms, work_model.codec)
-#         # optim_matrix = optimize_cm(pred_fil, orig_fil, pred_fil.f_norm, plot=False)
-#         inference_model.plot_origin_vs_prediction(orig_fil, pred_fil, title=f'{i} Before correction')
-#         keys = pred_prms.keys()
-#         m_keys = list(keys)[:-7]
-#         ts = TouchstoneData(ntw_de)
-#         preds = pred_fil.coupling_matrix.factors.unsqueeze(0)
-#         # preds = optim_matrix.factors.unsqueeze(0)
-#         s = codec.encode(ts)[1].unsqueeze(0)
-#         s_db = codec_db.encode(ts)[1].unsqueeze(0)
-#         s_mag = codec_mag.encode(ts)[1].unsqueeze(0)
-#         print(f"[{i}] Initial recover S-parameters loss: {loss(s_db, codec_db.encode(TouchstoneData(pred_fil))[1].unsqueeze(0))}")
-#         err = 0
-#         for j in range(50):
-#             # m_factors = corr_model(s, preds)
-#             x_pred = inference_model(s)
-#             # print("x_pred grad:", x_pred.requires_grad)
-#             if inference_model.scaler_out is not None:
-#                 x_pred = inference_model._apply_inverse(inference_model.scaler_out, x_pred)
-#                 # print("x_pred inverse grad:", x_pred.requires_grad)
-#             preds = dict(zip(keys, x_pred.squeeze(0)))
-#             m_factors = factors_from_preds(preds, pred_fil.coupling_matrix.links, x_pred).unsqueeze(0)
-#             # print("m_factors grad:", m_factors.requires_grad)
-#
-#             M = CouplingMatrix.from_factors(m_factors, pred_fil.coupling_matrix.links,
-#                                             pred_fil.coupling_matrix.matrix_order)
-#             fast_calc.update_Q(preds['Q'])
-#             _, s11_pred, s21_pred, s22_pred = fast_calc.RespM2(M, with_s22=True)
-#
-#             phi11 = preds['a11'] + preds['b22'] * w
-#             phi22 = preds['a22'] + preds['b22'] * w
-#             s11_corr = s11_pred*torch.exp(1j*phi11)
-#             s22_corr = s22_pred*torch.exp(1j*phi22)
-#             s21_corr = s21_pred*torch.exp(1j*0.5 * (phi11 + phi22))
-#
-#             s_corr = torch.stack([
-#                 s11_corr,
-#                 s21_corr,  # замените на S12, если у вас именно S1_2.db
-#                 # MWFilter.to_db(s21_pred),  # либо правильно распакуйте, если RespM2 возвращает все 4
-#                 # s22_corr,
-#             ]).unsqueeze(0)  # [B, 4, L]
-#
-#             err = (loss(MWFilter.to_db(s_corr), s_db))
-#             reg = max(abs(torch.abs(s_corr) - s_mag).flatten())*2
-#             # err = max(abs(MWFilter.to_db(s_corr) - s_db).flatten())
-#             optim.zero_grad()
-#             (err + reg).backward()
-#             optim.step()
-#             # sch.step(j)
-#             # print(f"Error: {err}")
-#
-#         with torch.no_grad():
-#             # m_factors = corr_model(s, preds)
-#             x_pred = inference_model(s)
-#             if inference_model.scaler_out is not None:
-#                 x_pred = inference_model._apply_inverse(inference_model.scaler_out, x_pred)
-#                 # print("x_pred inverse grad:", x_pred.requires_grad)
-#             preds = dict(zip(keys, x_pred.squeeze(0)))
-#             m_factors = factors_from_preds(preds, pred_fil.coupling_matrix.links, x_pred).unsqueeze(0)
-#
-#             m_factors = m_factors.squeeze(0)
-#             total_pred_prms = dict(zip(m_keys, m_factors))
-#             # print(f"Origin parameters: {pred_prms}")
-#             # print(f"Tuned parameters: {total_pred_prms}")
-#             correct_pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, total_pred_prms, work_model.codec)
-#             inference_model.plot_origin_vs_prediction(orig_fil, correct_pred_fil, title=f' {i} After correction')
-#         # correct_pred_fil.coupling_matrix.plot_matrix()
-#         optim_matrix = optimize_cm(correct_pred_fil, orig_fil, phase_init=(pred_prms['a11'], pred_prms['a22'], pred_prms['b11'], pred_prms['b22']))
-#         # optim_matrix.plot_matrix()
-#         total_err += err.detach().item()
-#         stop_time = time.time()
-#         print(f"[{i}] Total error: {err.item()}. Tuning time: {stop_time - start_time}")
-#     print(f"Mean error: {total_err/len(tds)}")
+def predict(fil: rf.Network):
+    try:
+        # s, m = prediction_with_optim_correct(fil)
+        s, m = prediction_with_online_correct(fil)
+        return s, m
+    except Exception as e:
+        raise ValueError(f"На сервере возникла ошибка: {e}") from e
 
 
 

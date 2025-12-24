@@ -217,7 +217,7 @@ def online_correct():
     optim = torch.optim.AdamW(params=params, lr=0.0005370623202982373, weight_decay=1e-5)
     sch = torch.optim.lr_scheduler.StepLR(optim, step_size=100, gamma=0.09)
     phase_extractor = phase.PhaseLoadingExtractor(inference_model, work_model, work_model.orig_filter)
-    for i in range(0, 5):
+    for i in range(len(tds)-1, len(tds)):
         # i = random.randint(0, len(tds))
         start_time = time.time()
         orig_fil = tds[i][1]
