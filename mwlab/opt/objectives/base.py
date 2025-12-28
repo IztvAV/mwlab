@@ -286,9 +286,18 @@ def interp_at_scalar(x: np.ndarray, y: np.ndarray, x0: float, *, atol: float = 0
 
 OnEmpty = Literal["raise", "ok"]
 
+def norm_on_empty(on_empty: str, who: str) -> OnEmpty:
+    """
+    Нормализация политики on_empty и единая диагностика.
+    """
+    v = str(on_empty).strip().lower()
+    if v not in ("raise", "ok"):
+        raise ValueError(f"{who}: on_empty должен быть 'raise' или 'ok'")
+    return v  # type: ignore[return-value]
+
 
 def handle_empty_curve(
-    on_empty: str,
+    on_empty: OnEmpty,
     who: str,
     *,
     y_dtype: np.dtype = np.dtype(np.float64),
@@ -761,6 +770,8 @@ class BaseCriterion:
     - поддерживает контекст единиц (freq_unit/value_unit),
     - выполняет строгую валидацию ожиданий по единицам на границах компонентов,
     - возвращает CriterionResult для отчётности и диагностики.
+
+    Валидация совместимости единиц выполняется один раз при создании экземпляра Criterion и не влияет на скорость последующих вычислений.
     """
 
     def __init__(
@@ -784,6 +795,51 @@ class BaseCriterion:
 
         self.name = name or getattr(selector, "name", "crit")
 
+        #Получаем начальные единицы от селектора
+        freq_unit, value_unit = self._initial_units()
+        self._freq_unit = freq_unit
+        self._selector_value_unit = value_unit
+
+        #Обрабатываем Transform (если есть)
+        if self.transform is not None:
+            exp_f_t = _infer_expected_freq_units_from_attr(self.transform)
+            exp_v_t = _infer_expected_value_units_from_attr(self.transform)
+
+            validate_expected_units(
+                who="Criterion",
+                component_name=f"Transform({self.transform.__class__.__name__})",
+                expected_freq=exp_f_t,
+                expected_value=exp_v_t,
+                actual_freq_unit=self._freq_unit,
+                actual_value_unit=self._selector_value_unit,
+            )
+
+            value_unit_after_transform = str(
+                self.transform.out_value_unit(self._selector_value_unit, self._freq_unit) or ""
+            )
+        else:
+            value_unit_after_transform = self._selector_value_unit
+
+        self._value_unit_after_transform = value_unit_after_transform
+
+        #Обрабатываем Aggregator (один раз)
+        exp_f_a = _infer_expected_freq_units_from_attr(self.agg)
+        exp_v_a = _infer_expected_value_units_from_attr(self.agg)
+
+        validate_expected_units(
+            who="Criterion",
+            component_name=f"Aggregator({self.agg.__class__.__name__})",
+            expected_freq=exp_f_a,
+            expected_value=exp_v_a,
+            actual_freq_unit=self._freq_unit,
+            actual_value_unit=self._value_unit_after_transform,
+        )
+
+        final_value_unit = str(
+            self.agg.out_value_unit(self._value_unit_after_transform, self._freq_unit) or ""
+        )
+        self._final_value_unit = final_value_unit
+
     def _initial_units(self) -> Tuple[str, str]:
         """
         Получить начальные единицы (freq_unit, value_unit) сразу после Selector.
@@ -798,33 +854,19 @@ class BaseCriterion:
 
     def _curve_with_units(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray, str, str]:
         """
-        Вернуть кривую после selector (+ transform, если он задан) и текущие единицы.
-
-        Единицы values обновляются через Transform.out_value_unit().
+            Вернуть кривую после selector (+ transform, если он задан) и текущие единицы.
         """
         freq, vals = self.selector(net)
-        freq_unit, value_unit = self._initial_units()
 
         if self.transform is not None:
-            exp_f = _infer_expected_freq_units_from_attr(self.transform)
-            exp_v = _infer_expected_value_units_from_attr(self.transform)
-
-            validate_expected_units(
-                who="Criterion",
-                component_name=f"Transform({self.transform.__class__.__name__})",
-                expected_freq=exp_f,
-                expected_value=exp_v,
-                actual_freq_unit=freq_unit,
-                actual_value_unit=value_unit,
+            freq, vals = self.transform.apply(
+                freq,
+                vals,
+                freq_unit=self._freq_unit,
+                value_unit=self._selector_value_unit,
             )
 
-            # Контекст единиц передаётся в Transform.apply().
-            freq, vals = self.transform.apply(freq, vals, freq_unit=freq_unit, value_unit=value_unit)
-
-            # Единицы значений после трансформа (для последующих компонентов и отчётов).
-            value_unit = str(self.transform.out_value_unit(value_unit, freq_unit) or "")
-
-        return freq, vals, freq_unit, value_unit
+        return freq, vals, self._freq_unit, self._value_unit_after_transform
 
     def curve(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -840,22 +882,11 @@ class BaseCriterion:
         """
         Скалярное значение критерия (до сравнения с порогом).
 
-        Контекст единиц передаётся в Aggregator.aggregate().
+        Примечание:
+        Ожидания агрегатора по единицам проверяются при создании критерия;
+        во время вычисления дополнительных проверок не выполняется.
         """
         freq, vals, freq_unit, value_unit = self._curve_with_units(net)
-
-        exp_f = _infer_expected_freq_units_from_attr(self.agg)
-        exp_v = _infer_expected_value_units_from_attr(self.agg)
-
-        validate_expected_units(
-            who="Criterion",
-            component_name=f"Aggregator({self.agg.__class__.__name__})",
-            expected_freq=exp_f,
-            expected_value=exp_v,
-            actual_freq_unit=freq_unit,
-            actual_value_unit=value_unit,
-        )
-
         return float(self.agg.aggregate(freq, vals, freq_unit=freq_unit, value_unit=value_unit))
 
     def _resolved_units(self) -> Tuple[str, str]:
@@ -865,13 +896,7 @@ class BaseCriterion:
         value_unit вычисляется последовательной протяжкой единиц через компоненты:
         selector.value_unit -> transform.out_value_unit -> aggregator.out_value_unit
         """
-        fu, vu = self._initial_units()
-
-        if self.transform is not None:
-            vu = str(self.transform.out_value_unit(vu, fu) or "")
-
-        vu = str(self.agg.out_value_unit(vu, fu) or "")
-        return fu, vu
+        return self._freq_unit, self._final_value_unit
 
     def evaluate(self, net: rf.Network) -> CriterionResult:
         """
@@ -880,6 +905,10 @@ class BaseCriterion:
         2) проверить is_ok
         3) посчитать raw penalty
         4) учесть weight
+
+        Метод предназначен для отчётности и отладки. Для быстрых вычислений штрафа
+        в оптимизационных задачах рекомендуется использовать penalty(net), который
+        не создаёт CriterionResult.
         """
         freq_unit, value_unit = self._resolved_units()
 
@@ -910,10 +939,13 @@ class BaseCriterion:
         )
 
     def is_ok(self, net: rf.Network) -> bool:
-        return self.evaluate(net).ok
+        v = float(self.value(net))
+        return bool(self.comp.is_ok(v))
 
     def penalty(self, net: rf.Network) -> float:
-        return self.evaluate(net).weighted_penalty
+        v = float(self.value(net))
+        raw = float(self.comp.penalty(v))
+        return self.weight * raw
 
     def __repr__(self):  # pragma: no cover
         return f"Criterion({self.name})"
@@ -951,18 +983,37 @@ class BaseSpecification:
         return all(r.ok for r in self.evaluate(net))
 
     def penalty(self, net: rf.Network, *, reduction: Reduction = "sum") -> float:
-        res = self.evaluate(net)
-        if not res:
+        """
+        Метод использует Criterion.penalty(net) и не создаёт CriterionResult
+        для каждого критерия. Для получения подробной информации по каждому
+        критерию используйте evaluate(net).
+        """
+        if not self.criteria:
             return 0.0
 
-        vals = np.asarray([r.weighted_penalty for r in res], dtype=float)
-
         if reduction == "sum":
-            return float(np.sum(vals))
+            total = 0.0
+            for c in self.criteria:
+                total += c.penalty(net)
+            return total
+
         if reduction == "mean":
-            return float(np.mean(vals))
+            total = 0.0
+            n = 0
+            for c in self.criteria:
+                total += c.penalty(net)
+                n += 1
+            return total / n if n else 0.0
+
         if reduction == "max":
-            return float(np.max(vals))
+            max_val = 0.0
+            first = True
+            for c in self.criteria:
+                p = c.penalty(net)
+                if first or p > max_val:
+                    max_val = p
+                    first = False
+            return max_val if not first else 0.0
 
         raise ValueError("reduction must be 'sum'|'mean'|'max'")
 
@@ -998,6 +1049,7 @@ __all__ = [
     "validate_expected_units",
     # empty curve helper
     "OnEmpty",
+    "norm_on_empty",
     "handle_empty_curve",
     # registry
     "normalize_alias",

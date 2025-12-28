@@ -94,7 +94,6 @@ from .base import (
     register_aggregator,
 )
 
-
 # =============================================================================
 # 1) ТИПЫ И ВНУТРЕННИЕ ХЕЛПЕРЫ
 # =============================================================================
@@ -426,10 +425,58 @@ def _norm_factor(
     return _one(normalize)
 
 
+def _build_target_line(
+    target: Union[str, float, LineSpec],
+    f: np.ndarray,
+    v0: np.ndarray,
+    *,
+    who: str,
+    on_empty: EmptyPolicy,
+) -> Tuple[np.ndarray, Optional[float]]:
+    """
+    Унифицированное построение target-линии для Ripple*-агрегаторов.
+
+    Возвращает (tgt, empty_scalar):
+    - tgt : вектор целевого значения в узлах f;
+    - empty_scalar : если не None, агрегатор может немедленно вернуть это скалярное
+      значение (используется для вырожденного случая 'linear' при f.size < 2).
+    """
+    f = np.asarray(f, dtype=float)
+    v0 = np.asarray(v0, dtype=float)
+
+    # 1) Константа
+    if isinstance(target, (int, float, np.number)):
+        return np.full_like(v0, float(target), dtype=float), None
+
+    mode = str(target).strip().lower()
+
+    # 2) Стандартные строковые режимы
+    if mode == "mean":
+        return np.full_like(v0, float(np.mean(v0)), dtype=float), None
+
+    if mode == "median":
+        return np.full_like(v0, float(np.median(v0)), dtype=float), None
+
+    if mode == "linear":
+        # Линейная аппроксимация v0 ≈ a + b f
+        if f.size < 2:
+            # Вырожденный случай: делегируем политику on_empty агрегатору.
+            empty = _handle_empty_scalar(on_empty, who)
+            return v0.astype(float, copy=False), empty
+
+        A = np.vstack([np.ones_like(f), f]).T
+        coef, *_ = np.linalg.lstsq(A, v0, rcond=None)
+        tgt = (coef[0] + coef[1] * f).astype(float, copy=False)
+        return tgt, None
+
+    # 3) Табличное задание (LineSpec)
+    # Не строковый режим или неизвестная строка -> интерпретируем как LineSpec.
+    tgt = _eval_line(target, f, who=f"{who}.target").astype(float, copy=False)  # type: ignore[arg-type]
+    return tgt, None
+
 # =============================================================================
 # 2) ПРОСТЫЕ АГРЕГАТОРЫ
 # =============================================================================
-
 class _SimpleAggBase(BaseAggregator):
     """
     Внутренняя база для простых агрегаторов.
@@ -456,10 +503,12 @@ class _SimpleAggBase(BaseAggregator):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         complex_mode: ComplexMode = "raise",
+        validate: bool = True,
     ):
         self.finite_policy = str(finite_policy).strip().lower()
         self.on_empty = str(on_empty).strip().lower()
         self.complex_mode = str(complex_mode).strip().lower()
+        self.validate = bool(validate)
 
     def out_value_unit(self, in_unit: str, freq_unit: str) -> str:
         _ = freq_unit
@@ -474,10 +523,18 @@ class _SimpleAggBase(BaseAggregator):
         complex_mode: Optional[str] = None,
     ) -> Tuple[np.ndarray, np.ndarray, Optional[float]]:
         """
-        Подготовка данных: 1-D + сортировка + finite_policy + (опц.) complex->real.
+        Подготовка данных: 1-D + (опц.) сортировка/валидация + finite_policy + complex->real.
+
+        При validate=False:
+        - предполагается, что freq/vals уже 1-D, согласованы по длине и отсортированы;
+        - дубликаты частоты не проверяются.
         """
-        f, y = ensure_1d(freq, vals, who)
-        f, y = sort_by_freq(f, y)
+        if self.validate:
+            f, y = ensure_1d(freq, vals, who)
+            f, y = sort_by_freq(f, y)
+        else:
+            f = np.asarray(freq)
+            y = np.asarray(vals)
 
         f2, y2, empty = _apply_finite_policy_xy(
             f, y,
@@ -488,7 +545,8 @@ class _SimpleAggBase(BaseAggregator):
         if empty is not None:
             return np.asarray(f2, dtype=float), np.asarray(y2), empty
 
-        _ensure_no_duplicate_freq(np.asarray(f2, dtype=float), who)
+        if self.validate:
+            _ensure_no_duplicate_freq(np.asarray(f2, dtype=float), who)
 
         cm = self.complex_mode if complex_mode is None else str(complex_mode).strip().lower()
         y_real = _coerce_to_real(y2, complex_mode=cm, who=who)
@@ -570,76 +628,49 @@ class RMSAgg(_SimpleAggBase):
 
 
 @register_aggregator(("abs_max", "AbsMaxAgg"))
-class AbsMaxAgg(BaseAggregator):
+class AbsMaxAgg(_SimpleAggBase):
     """
     Максимум модуля |y|.
 
     Этот агрегатор корректно работает для complex без дополнительных режимов.
     """
 
-    expects_freq_unit: Optional[str] = None
-    expects_value_unit: Optional[Union[str, Sequence[str]]] = None
-
-    def __init__(self, *, finite_policy: FinitePolicy = "omit", on_empty: EmptyPolicy = "raise"):
-        self.finite_policy = str(finite_policy).strip().lower()
-        self.on_empty = str(on_empty).strip().lower()
-
-    def out_value_unit(self, in_unit: str, freq_unit: str) -> str:
-        _ = freq_unit
-        return str(in_unit or "").strip()
+    def __init__(
+            self,
+            *,
+            finite_policy: FinitePolicy = "omit",
+            on_empty: EmptyPolicy = "raise",
+            validate: bool = True,
+    ):
+        super().__init__(finite_policy=finite_policy, on_empty=on_empty, complex_mode="abs", validate=validate)
 
     def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
-        f, y = ensure_1d(freq, vals, "AbsMaxAgg")
-        f, y = sort_by_freq(f, y)
-
-        _, y2, empty = _apply_finite_policy_xy(
-            f, y,
-            finite_policy=self.finite_policy,
-            on_empty=self.on_empty,
-            who="AbsMaxAgg",
-        )
+        _, y, empty = self._prep(freq, vals, who="AbsMaxAgg", complex_mode="abs")
         if empty is not None:
             return empty
-
-        _ensure_no_duplicate_freq(np.asarray(f, dtype=float), "AbsMaxAgg")
-        return float(np.max(np.abs(y2)))
-
+        return float(np.max(y))
 
 @register_aggregator(("abs_mean", "AbsMeanAgg"))
-class AbsMeanAgg(BaseAggregator):
+class AbsMeanAgg(_SimpleAggBase):
     """
     Среднее модуля |y|.
 
     В отличие от MeanAgg, для complex не возникает неоднозначности.
     """
-
-    expects_freq_unit: Optional[str] = None
-    expects_value_unit: Optional[Union[str, Sequence[str]]] = None
-
-    def __init__(self, *, finite_policy: FinitePolicy = "omit", on_empty: EmptyPolicy = "raise"):
-        self.finite_policy = str(finite_policy).strip().lower()
-        self.on_empty = str(on_empty).strip().lower()
-
-    def out_value_unit(self, in_unit: str, freq_unit: str) -> str:
-        _ = freq_unit
-        return str(in_unit or "").strip()
+    def __init__(
+            self,
+            *,
+            finite_policy: FinitePolicy = "omit",
+            on_empty: EmptyPolicy = "raise",
+            validate: bool = True,
+    ):
+        super().__init__(finite_policy=finite_policy, on_empty=on_empty, complex_mode="abs", validate=validate)
 
     def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
-        f, y = ensure_1d(freq, vals, "AbsMeanAgg")
-        f, y = sort_by_freq(f, y)
-
-        _, y2, empty = _apply_finite_policy_xy(
-            f, y,
-            finite_policy=self.finite_policy,
-            on_empty=self.on_empty,
-            who="AbsMeanAgg",
-        )
+        _, y, empty = self._prep(freq, vals, who="AbsMeanAgg", complex_mode="abs")
         if empty is not None:
             return empty
-
-        _ensure_no_duplicate_freq(np.asarray(f, dtype=float), "AbsMeanAgg")
-        return float(np.mean(np.abs(y2)))
-
+        return float(np.mean(y))
 
 @register_aggregator(("quantile", "QuantileAgg"))
 class QuantileAgg(_SimpleAggBase):
@@ -729,6 +760,7 @@ class ValueAtAgg(BaseAggregator):
         complex_mode: ComplexMode = "raise",
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
+        validate: bool = True,
     ):
         self.f0 = float(f0)
         self.f0_unit = None if f0_unit is None else normalize_freq_unit(f0_unit)
@@ -739,6 +771,8 @@ class ValueAtAgg(BaseAggregator):
 
         self.finite_policy = str(finite_policy).strip().lower()
         self.on_empty = str(on_empty).strip().lower()
+
+        self.validate = bool(validate)
 
     def out_value_unit(self, in_unit: str, freq_unit: str) -> str:
         _ = freq_unit
@@ -757,23 +791,29 @@ class ValueAtAgg(BaseAggregator):
         return self._value_at(freq, vals, f0=self.f0)
 
     def _value_at(self, freq: np.ndarray, vals: np.ndarray, *, f0: float) -> float:
-        f, y = ensure_1d(freq, vals, "ValueAtAgg")
-        f, y = sort_by_freq(f, y)
+        who = "ValueAtAgg"
+        if self.validate:
+            f, y = ensure_1d(freq, vals, who)
+            f, y = sort_by_freq(f, y)
+        else:
+            f = np.asarray(freq)
+            y = np.asarray(vals)
 
         f2, y2, empty = _apply_finite_policy_xy(
             f, y,
             finite_policy=self.finite_policy,
             on_empty=self.on_empty,
-            who="ValueAtAgg",
+            who=who,
         )
         if empty is not None:
             return empty
 
         f2 = np.asarray(f2, dtype=float)
-        _ensure_no_duplicate_freq(f2, "ValueAtAgg")
+        if self.validate:
+            _ensure_no_duplicate_freq(f2, who)
 
-        if f0 < float(f2[0]) or f0 > float(f2[-1]):
-            raise ValueError(f"ValueAtAgg: f0={float(f0)} вне диапазона [{float(f2[0])}, {float(f2[-1])}]")
+        if f2.size > 0 and (f0 < float(f2[0]) or f0 > float(f2[-1])):
+            raise ValueError(f"{who}: f0={float(f0)} вне диапазона [{float(f2[0])}, {float(f2[-1])}]")
 
         if np.iscomplexobj(y2):
             # interp_at_scalar умеет интерполировать complex в рамках линейной интерполяции
@@ -788,6 +828,7 @@ class ValueAtAgg(BaseAggregator):
 
         y0r = interp_at_scalar(f2, np.asarray(y2, dtype=float), float(f0))
         return float(y0r)
+
 
 
 # =============================================================================
@@ -819,6 +860,7 @@ class _IntegralAggBase(BaseAggregator):
         on_empty: EmptyPolicy = "raise",
         normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
         basis: FreqBasis = "native",
+        validate: bool = True,
     ):
         self.method = str(method).strip().lower()
         if self.method not in _INTEGRAL_METHODS:
@@ -828,6 +870,8 @@ class _IntegralAggBase(BaseAggregator):
         self.on_empty = str(on_empty).strip().lower()
 
         self.normalize = normalize
+
+        self.validate = bool(validate)
 
         self.basis = str(basis).strip()
         if self.basis not in _FREQ_BASIS:
@@ -847,8 +891,12 @@ class _IntegralAggBase(BaseAggregator):
         *,
         who: str,
     ) -> Tuple[np.ndarray, np.ndarray, Optional[float]]:
-        f, y = ensure_1d(freq, vals, who)
-        f, y = sort_by_freq(f, y)
+        if self.validate:
+            f, y = ensure_1d(freq, vals, who)
+            f, y = sort_by_freq(f, y)
+        else:
+            f = np.asarray(freq)
+            y = np.asarray(vals)
 
         if np.iscomplexobj(y):
             raise TypeError(f"{who}: ожидаются вещественные значения; преобразуйте данные Transform-ом")
@@ -862,7 +910,13 @@ class _IntegralAggBase(BaseAggregator):
         if empty is not None:
             return np.asarray(f2, dtype=float), np.asarray(y2, dtype=float), empty
 
-        return np.asarray(f2, dtype=float), np.asarray(y2, dtype=float), None
+        f2 = np.asarray(f2, dtype=float)
+        y2 = np.asarray(y2, dtype=float)
+
+        if self.validate:
+            _ensure_no_duplicate_freq(f2, who)
+
+        return f2, y2, None
 
     def _basis_freq(self, f: np.ndarray, *, freq_unit: str) -> np.ndarray:
         """
@@ -913,8 +967,16 @@ class UpIntAgg(_IntegralAggBase):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
+        validate: bool = False,
     ):
-        super().__init__(method=method, normalize=normalize, finite_policy=finite_policy, on_empty=on_empty, basis=basis)
+        super().__init__(
+            method=method,
+            normalize=normalize,
+            finite_policy=finite_policy,
+            on_empty=on_empty,
+            basis=basis,
+            validate=validate,
+        )
         self.limit = limit
         self.p = int(p)
         if self.p <= 0:
@@ -933,7 +995,6 @@ class UpIntAgg(_IntegralAggBase):
         f, v0, empty = self._prep_real(freq, vals, who="UpIntAgg")
         if empty is not None:
             return empty
-        _ensure_no_duplicate_freq(f, "UpIntAgg")
 
         lim = _eval_line(self.limit, f, who="UpIntAgg.limit").astype(float, copy=False)
         f, v0, lim, empty2 = _apply_finite_policy_xyz(
@@ -980,8 +1041,16 @@ class LoIntAgg(_IntegralAggBase):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
+        validate: bool = False,
     ):
-        super().__init__(method=method, normalize=normalize, finite_policy=finite_policy, on_empty=on_empty, basis=basis)
+        super().__init__(
+            method=method,
+            normalize=normalize,
+            finite_policy=finite_policy,
+            on_empty=on_empty,
+            basis=basis,
+            validate=validate,
+        )
         self.limit = limit
         self.p = int(p)
         if self.p <= 0:
@@ -999,7 +1068,6 @@ class LoIntAgg(_IntegralAggBase):
         f, v0, empty = self._prep_real(freq, vals, who="LoIntAgg")
         if empty is not None:
             return empty
-        _ensure_no_duplicate_freq(f, "LoIntAgg")
 
         lim = _eval_line(self.limit, f, who="LoIntAgg.limit").astype(float, copy=False)
         f, v0, lim, empty2 = _apply_finite_policy_xyz(
@@ -1052,8 +1120,16 @@ class RippleIntAgg(_IntegralAggBase):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
+        validate: bool = False,
     ):
-        super().__init__(method=method, normalize=normalize, finite_policy=finite_policy, on_empty=on_empty, basis=basis)
+        super().__init__(
+            method=method,
+            normalize=normalize,
+            finite_policy=finite_policy,
+            on_empty=on_empty,
+            basis=basis,
+            validate=validate,
+        )
         self.target = target
         self.deadzone = float(max(0.0, deadzone))
         self.p = int(p)
@@ -1072,26 +1148,11 @@ class RippleIntAgg(_IntegralAggBase):
         f, v0, empty = self._prep_real(freq, vals, who="RippleIntAgg")
         if empty is not None:
             return empty
-        _ensure_no_duplicate_freq(f, "RippleIntAgg")
 
         # 1) Построение target-линии
-        if isinstance(self.target, (int, float, np.number)):
-            tgt = np.full_like(v0, float(self.target), dtype=float)
-        else:
-            mode = str(self.target).strip().lower()
-            if mode == "mean":
-                tgt = np.full_like(v0, float(np.mean(v0)), dtype=float)
-            elif mode == "median":
-                tgt = np.full_like(v0, float(np.median(v0)), dtype=float)
-            elif mode == "linear":
-                if f.size < 2:
-                    return _handle_empty_scalar(self.on_empty, "RippleIntAgg")
-                A = np.vstack([np.ones_like(f), f]).T
-                coef, *_ = np.linalg.lstsq(A, v0, rcond=None)
-                tgt = (coef[0] + coef[1] * f).astype(float, copy=False)
-            else:
-                # Не строковый режим -> пробуем интерпретировать как табличное задание
-                tgt = _eval_line(self.target, f, who="RippleIntAgg.target").astype(float, copy=False)
+        tgt, empty_tgt = _build_target_line(self.target, f, v0, who="RippleIntAgg", on_empty=self.on_empty)
+        if empty_tgt is not None:
+            return empty_tgt
 
         # 2) Согласованная обработка finite
         f, v0, tgt, empty2 = _apply_finite_policy_xyz(
@@ -1237,6 +1298,7 @@ class _SignedAggBase(BaseAggregator):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
+        validate: bool = True,
     ):
         self.p = int(p)
         if self.p <= 0:
@@ -1255,6 +1317,8 @@ class _SignedAggBase(BaseAggregator):
         self.finite_policy = str(finite_policy).strip().lower()
         self.on_empty = str(on_empty).strip().lower()
 
+        self.validate = bool(validate)
+
         self.basis = str(basis).strip()
         if self.basis not in _FREQ_BASIS:
             raise ValueError(f"basis должен быть один из {_FREQ_BASIS}")
@@ -1266,7 +1330,8 @@ class _SignedAggBase(BaseAggregator):
 
     def _prep_real(self, freq: np.ndarray, vals: np.ndarray, *, who: str) -> Tuple[np.ndarray, np.ndarray, Optional[float]]:
         f, y = ensure_1d(freq, vals, who)
-        f, y = sort_by_freq(f, y)
+        if self.validate:
+            f, y = sort_by_freq(f, y)
 
         if np.iscomplexobj(y):
             raise TypeError(f"{who}: ожидаются вещественные значения; преобразуйте данные Transform-ом")
@@ -1280,7 +1345,13 @@ class _SignedAggBase(BaseAggregator):
         if empty is not None:
             return np.asarray(f2, dtype=float), np.asarray(y2, dtype=float), empty
 
-        return np.asarray(f2, dtype=float), np.asarray(y2, dtype=float), None
+        f2 = np.asarray(f2, dtype=float)
+        y2 = np.asarray(y2, dtype=float)
+
+        if self.validate:
+            _ensure_no_duplicate_freq(f2, who)
+
+        return f2, y2, None
 
     def _basis_freq(self, f: np.ndarray, *, freq_unit: str) -> np.ndarray:
         f = np.asarray(f, dtype=float)
@@ -1312,8 +1383,17 @@ class SignedUpIntAgg(_SignedAggBase):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
+        validate: bool = False,
     ):
-        super().__init__(p, method=method, normalize=normalize, rho=rho, finite_policy=finite_policy, on_empty=on_empty, basis=basis)
+        super().__init__(p,
+                         method=method,
+                         normalize=normalize,
+                         rho=rho,
+                         finite_policy=finite_policy,
+                         on_empty=on_empty,
+                         basis=basis,
+                         validate=validate,
+                         )
         self.limit = limit
 
     def aggregate(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str, value_unit: str) -> float:
@@ -1328,7 +1408,6 @@ class SignedUpIntAgg(_SignedAggBase):
         f, v0, empty = self._prep_real(freq, vals, who="SignedUpIntAgg")
         if empty is not None:
             return empty
-        _ensure_no_duplicate_freq(f, "SignedUpIntAgg")
 
         lim = _eval_line(self.limit, f, who="SignedUpIntAgg.limit").astype(float, copy=False)
         f, v0, lim, empty2 = _apply_finite_policy_xyz(
@@ -1372,8 +1451,17 @@ class SignedLoIntAgg(_SignedAggBase):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
+        validate: bool = False,
     ):
-        super().__init__(p, method=method, normalize=normalize, rho=rho, finite_policy=finite_policy, on_empty=on_empty, basis=basis)
+        super().__init__(p,
+                         method=method,
+                         normalize=normalize,
+                         rho=rho,
+                         finite_policy=finite_policy,
+                         on_empty=on_empty,
+                         basis=basis,
+                         validate=validate,
+                         )
         self.limit = limit
 
     def aggregate(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str, value_unit: str) -> float:
@@ -1388,7 +1476,6 @@ class SignedLoIntAgg(_SignedAggBase):
         f, v0, empty = self._prep_real(freq, vals, who="SignedLoIntAgg")
         if empty is not None:
             return empty
-        _ensure_no_duplicate_freq(f, "SignedLoIntAgg")
 
         lim = _eval_line(self.limit, f, who="SignedLoIntAgg.limit").astype(float, copy=False)
         f, v0, lim, empty2 = _apply_finite_policy_xyz(
@@ -1433,8 +1520,17 @@ class SignedRippleIntAgg(_SignedAggBase):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
+        validate: bool = False,
     ):
-        super().__init__(p, method=method, normalize=normalize, rho=rho, finite_policy=finite_policy, on_empty=on_empty, basis=basis)
+        super().__init__(p,
+                         method=method,
+                         normalize=normalize,
+                         rho=rho,
+                         finite_policy=finite_policy,
+                         on_empty=on_empty,
+                         basis=basis,
+                         validate=validate,
+                         )
         self.target = target
         self.deadzone = float(max(0.0, deadzone))
 
@@ -1450,26 +1546,12 @@ class SignedRippleIntAgg(_SignedAggBase):
         f, v0, empty = self._prep_real(freq, vals, who="SignedRippleIntAgg")
         if empty is not None:
             return empty
-        _ensure_no_duplicate_freq(f, "SignedRippleIntAgg")
 
         # target линия
-        if isinstance(self.target, (int, float, np.number)):
-            tgt = np.full_like(v0, float(self.target), dtype=float)
-        else:
-            mode = str(self.target).strip().lower()
-            if mode == "mean":
-                tgt = np.full_like(v0, float(np.mean(v0)), dtype=float)
-            elif mode == "median":
-                tgt = np.full_like(v0, float(np.median(v0)), dtype=float)
-            elif mode == "linear":
-                if f.size < 2:
-                    return _handle_empty_scalar(self.on_empty, "SignedRippleIntAgg")
-                A = np.vstack([np.ones_like(f), f]).T
-                coef, *_ = np.linalg.lstsq(A, v0, rcond=None)
-                tgt = (coef[0] + coef[1] * f).astype(float, copy=False)
-            else:
-                # Не строковый режим -> пробуем интерпретировать как табличное задание
-                tgt = _eval_line(self.target, f, who="SignedRippleIntAgg.target").astype(float, copy=False)
+        tgt, empty_tgt = _build_target_line(self.target, f, v0, who="SignedRippleIntAgg", on_empty=self.on_empty)
+        if empty_tgt is not None:
+            return empty_tgt
+
 
         f, v0, tgt, empty2 = _apply_finite_policy_xyz(
             f, v0, tgt,

@@ -93,6 +93,8 @@ import numpy as np
 
 from .base import (
     BaseTransform,
+    OnEmpty,
+    norm_on_empty,
     dtype_out,
     ensure_1d,
     handle_empty_curve,
@@ -107,18 +109,31 @@ from .base import (
 # =============================================================================
 # Внутренние утилиты
 # =============================================================================
-
-OnEmpty = Literal["raise", "ok"]
-
-
-def _norm_on_empty(on_empty: str, who: str) -> OnEmpty:
+def _prepare_curve(
+    freq: np.ndarray,
+    vals: np.ndarray,
+    who: str,
+    *,
+    validate: bool,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Нормализация политики on_empty и единая диагностика.
+    Нормализация кривой (freq, vals).
+
+    При validate=True:
+      - проверяется, что freq и vals — 1-D и одинаковой длины (ensure_1d),
+      - частотная ось сортируется по возрастанию (sort_by_freq).
+
+    При validate=False:
+      - выполняется только приведение к np.asarray без дополнительных проверок;
+        ответственность за 1-D и монотонность freq лежит на вызывающем коде.
     """
-    v = str(on_empty).strip().lower()
-    if v not in ("raise", "ok"):
-        raise ValueError(f"{who}: on_empty должен быть 'raise' или 'ok'")
-    return v  # type: ignore[return-value]
+    if validate:
+        f, y = ensure_1d(freq, vals, who)
+        f, y = sort_by_freq(f, y)
+    else:
+        f = np.asarray(freq)
+        y = np.asarray(vals)
+    return f, y
 
 
 def _freq_scale(from_unit: str) -> float:
@@ -272,6 +287,10 @@ class BandTransform(BaseTransform):
         Допуски для проверки “точка уже присутствует на сетке”.
     on_empty : {"raise","ok"}
         Политика при пустом результате.
+    validate : bool, optional
+        Включать ли структурные проверки входной кривой (1-D, одинаковая длина,
+        сортировка по частоте). По умолчанию True; установите False для
+        «доверенных» кривых в горячих циклах оптимизации.
     """
 
     def __init__(
@@ -283,6 +302,7 @@ class BandTransform(BaseTransform):
         tol: float = 0.0,
         rtol: float = 0.0,
         on_empty: str = "raise",
+        validate: bool = True,
     ):
         self.band = (float(band[0]), float(band[1]))
         self.include_edges = bool(include_edges)
@@ -291,7 +311,8 @@ class BandTransform(BaseTransform):
 
         self.tol = float(max(0.0, tol))
         self.rtol = float(max(0.0, rtol))
-        self.on_empty: OnEmpty = _norm_on_empty(on_empty, "BandTransform")
+        self.on_empty: OnEmpty = norm_on_empty(on_empty, "BandTransform")
+        self.validate = bool(validate)
         self.name = "Band"
 
     def apply(
@@ -317,8 +338,7 @@ class BandTransform(BaseTransform):
         vals: np.ndarray,
         band: Tuple[float, float],
     ) -> Tuple[np.ndarray, np.ndarray]:
-        f, y = ensure_1d(freq, vals, "BandTransform")
-        f, y = sort_by_freq(f, y)
+        f, y = _prepare_curve(freq, vals, "BandTransform", validate=self.validate)
 
         y_dt = dtype_out(y)
         if f.size == 0:
@@ -407,23 +427,29 @@ class DedupFreqTransform(BaseTransform):
         "mean"       : заменить группу дублей средним по y.
     on_empty : {"raise","ok"}
         Политика при пустом входе (см. handle_empty_curve).
+    validate : bool, optional
+        Включать ли структурные проверки входной кривой (1-D, одинаковая длина,
+        сортировка по частоте). По умолчанию True; установите False для
+        «доверенных» кривых.
     """
     def __init__(
         self,
         *,
         mode: Literal["raise", "keep_first", "keep_last", "mean"] = "raise",
         on_empty: str = "raise",
+        validate: bool = True,
     ):
         m = str(mode).strip().lower()
         if m not in ("raise", "keep_first", "keep_last", "mean"):
             raise ValueError("DedupFreqTransform.mode должен быть 'raise'|'keep_first'|'keep_last'|'mean'")
         self.mode: Literal["raise", "keep_first", "keep_last", "mean"] = m  # type: ignore[assignment]
 
-        self.on_empty: OnEmpty = _norm_on_empty(on_empty, "DedupFreqTransform")
+        self.on_empty: OnEmpty = norm_on_empty(on_empty, "DedupFreqTransform")
+        self.validate = bool(validate)
         self.name = f"DedupFreq(mode={self.mode})"
 
     def __call__(self, freq: np.ndarray, vals: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        f, y = ensure_1d(freq, vals, "DedupFreqTransform")
+        f, y = _prepare_curve(freq, vals, "DedupFreqTransform", validate=self.validate)
 
         y_dt = dtype_out(y)
         if f.size == 0:
@@ -431,8 +457,10 @@ class DedupFreqTransform(BaseTransform):
         if f.size == 1:
             return np.asarray(f, dtype=float), np.asarray(y, dtype=y_dt)
 
-        # Сортируем по частоте один раз, затем работаем с дубликатами на отсортированной оси.
-        f_sorted, y_sorted = sort_by_freq(f, y)
+        # При validate=True f уже отсортирован по частоте; при validate=False
+        # порядок остаётся как есть, ответственность на вызывающем коде.
+        f_sorted, y_sorted = f, y
+
         f_sorted = np.asarray(f_sorted, dtype=float)
         y_sorted = np.asarray(y_sorted, dtype=y_dt)
         uniq_f, idx_first, inv, counts = np.unique(
@@ -474,19 +502,27 @@ class SmoothPointsTransform(BaseTransform):
     Сглаживание по числу точек (оконное среднее по индексу).
 
     Этот Transform не зависит от единиц частоты: окно определяется в количестве точек.
+    Параметры
+    ---------
+    n_pts : int
+        Размер окна по числу точек.
+    on_empty : {"raise","ok"}
+        Политика при пустом входе.
+    validate : bool, optional
+        Включать ли структурные проверки входной кривой. По умолчанию True.
     """
 
-    def __init__(self, n_pts: int, *, on_empty: str = "raise"):
+    def __init__(self, n_pts: int, *, on_empty: str = "raise", validate: bool = True):
         self.n_pts = int(n_pts)
         if self.n_pts <= 0:
             raise ValueError("SmoothPointsTransform.n_pts должен быть положительным")
 
-        self.on_empty: OnEmpty = _norm_on_empty(on_empty, "SmoothPointsTransform")
+        self.on_empty: OnEmpty = norm_on_empty(on_empty, "SmoothPointsTransform")
+        self.validate = bool(validate)
         self.name = f"SmoothPoints(n={self.n_pts})"
 
     def __call__(self, freq: np.ndarray, vals: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        f, y = ensure_1d(freq, vals, "SmoothPointsTransform")
-        f, y = sort_by_freq(f, y)
+        f, y = _prepare_curve(freq, vals, "SmoothPointsTransform", validate=self.validate)
 
         y_dt = dtype_out(y)
         if y.size == 0:
@@ -562,6 +598,9 @@ class SmoothApertureTransform(BaseTransform):
     use_effective_fw : bool
         Если True, делить на фактическую ширину окна (fr-fl) у края диапазона.
         Если False, делить на номинальную fw.
+    validate : bool, optional
+        Включать ли структурные проверки (1-D, сортировка частоты). По умолчанию True;
+        установите False, если кривая уже подготовлена и порядок частот гарантирован.
     """
 
     def __init__(
@@ -571,6 +610,7 @@ class SmoothApertureTransform(BaseTransform):
         fw_unit: Optional[str] = None,
         use_effective_fw: bool = True,
         on_empty: str = "raise",
+        validate: bool = True,
     ):
         self.fw = float(fw)
         if self.fw <= 0.0:
@@ -578,7 +618,8 @@ class SmoothApertureTransform(BaseTransform):
 
         self.fw_unit = None if fw_unit is None else normalize_freq_unit(fw_unit)
         self.use_effective_fw = bool(use_effective_fw)
-        self.on_empty: OnEmpty = _norm_on_empty(on_empty, "SmoothApertureTransform")
+        self.on_empty: OnEmpty = norm_on_empty(on_empty, "SmoothApertureTransform")
+        self.validate = bool(validate)
         self.name = f"SmoothAperture(FW={self.fw})"
 
     @staticmethod
@@ -670,8 +711,7 @@ class SmoothApertureTransform(BaseTransform):
         return self._apply_fw(freq, vals, fw_local)
 
     def _apply_fw(self, freq: np.ndarray, vals: np.ndarray, fw_local: float) -> Tuple[np.ndarray, np.ndarray]:
-        f, y = ensure_1d(freq, vals, "SmoothApertureTransform")
-        f, y = sort_by_freq(f, y)
+        f, y = _prepare_curve(freq, vals, "SmoothApertureTransform", validate=self.validate)
 
         y_dt = dtype_out(y)
 
@@ -716,19 +756,28 @@ class SmoothApertureTransform(BaseTransform):
 class ResampleTransform(BaseTransform):
     """
     Ресэмплинг кривой на равномерную сетку по частоте (между f[0] и f[-1]).
+
+    Параметры
+    ---------
+    num_points : int
+        Число точек на новой равномерной сетке.
+    on_empty : {"raise","ok"}
+        Политика при пустом входе.
+    validate : bool, optional
+        Включать ли структурные проверки входной кривой. По умолчанию True.
     """
 
-    def __init__(self, num_points: int, *, on_empty: str = "raise"):
+    def __init__(self, num_points: int, *, on_empty: str = "raise", validate: bool = True):
         self.num_points = int(num_points)
         if self.num_points < 2:
             raise ValueError("ResampleTransform.num_points должен быть >= 2")
 
-        self.on_empty: OnEmpty = _norm_on_empty(on_empty, "ResampleTransform")
+        self.on_empty: OnEmpty = norm_on_empty(on_empty, "ResampleTransform")
+        self.validate = bool(validate)
         self.name = f"Resample(M={self.num_points})"
 
     def __call__(self, freq: np.ndarray, vals: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        f, y = ensure_1d(freq, vals, "ResampleTransform")
-        f, y = sort_by_freq(f, y)
+        f, y = _prepare_curve(freq, vals, "ResampleTransform", validate=self.validate)
 
         y_dt = dtype_out(y)
         if f.size < 2:
@@ -816,17 +865,24 @@ class ShiftTransform(BaseTransform):
     Сдвиг уровня: y'(f) = y(f) - y_ref.
 
     Единицы values сохраняются.
+
+    Параметры
+    ---------
+    ref : ShiftRef
+        Опорное значение или режим вычисления опоры.
+    validate : bool, optional
+        Включать ли структурные проверки входной кривой. По умолчанию True.
     """
 
-    def __init__(self, ref: ShiftRef, *, f0: Optional[float] = None, on_empty: str = "raise"):
+    def __init__(self, ref: ShiftRef, *, f0: Optional[float] = None, on_empty: str = "raise", validate: bool = True):
         self.ref = ref
         self.f0 = None if f0 is None else float(f0)
-        self.on_empty: OnEmpty = _norm_on_empty(on_empty, "ShiftTransform")
+        self.on_empty: OnEmpty = norm_on_empty(on_empty, "ShiftTransform")
+        self.validate = bool(validate)
         self.name = "Shift"
 
     def __call__(self, freq: np.ndarray, vals: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        f, y = ensure_1d(freq, vals, "ShiftTransform")
-        f, y = sort_by_freq(f, y)
+        f, y = _prepare_curve(freq, vals, "ShiftTransform", validate=self.validate)
 
         y_dt = dtype_out(y)
         if y.size == 0:
@@ -868,6 +924,9 @@ class ShiftByRefInBandTransform(BaseTransform):
         Единицы band. Если None, band задан в единицах входной freq.
     include_edges : bool
         Если True, границы band учитываются с линейной интерполяцией.
+    validate : bool, optional
+        Включать ли структурные проверки (1-D, сортировка частоты) до вычисления
+        опорного значения. По умолчанию True.
     """
 
     def __init__(
@@ -881,6 +940,7 @@ class ShiftByRefInBandTransform(BaseTransform):
         tol: float = 0.0,
         rtol: float = 0.0,
         on_empty: str = "raise",
+        validate: bool = True,
     ):
         self.band = (float(band[0]), float(band[1]))
         self.band_unit = None if band_unit is None else normalize_freq_unit(band_unit)
@@ -891,8 +951,8 @@ class ShiftByRefInBandTransform(BaseTransform):
         self.include_edges = bool(include_edges)
         self.tol = float(max(0.0, tol))
         self.rtol = float(max(0.0, rtol))
-        self.on_empty: OnEmpty = _norm_on_empty(on_empty, "ShiftByRefInBandTransform")
-
+        self.on_empty: OnEmpty = norm_on_empty(on_empty, "ShiftByRefInBandTransform")
+        self.validate = bool(validate)
         self.name = f"ShiftByRefInBand({self.band[0]}..{self.band[1]})"
 
     def apply(
@@ -917,8 +977,7 @@ class ShiftByRefInBandTransform(BaseTransform):
         vals: np.ndarray,
         band_local: Tuple[float, float],
     ) -> Tuple[np.ndarray, np.ndarray]:
-        f, y = ensure_1d(freq, vals, "ShiftByRefInBandTransform")
-        f, y = sort_by_freq(f, y)
+        f, y = _prepare_curve(freq, vals, "ShiftByRefInBandTransform", validate=self.validate)
 
         y_dt = dtype_out(y)
         if y.size == 0:
@@ -933,6 +992,8 @@ class ShiftByRefInBandTransform(BaseTransform):
             tol=self.tol,
             rtol=self.rtol,
             on_empty=self.on_empty,
+            # Кривая уже нормализована выше; повторная валидация здесь не нужна.
+            validate = False,
         )
         fb, yb = band_tr(f, y)
         if fb.size == 0:
@@ -952,18 +1013,23 @@ class SignTransform(BaseTransform):
     Явное изменение знака: y -> sign * y, где sign ∈ {+1, -1}.
 
     Единицы values сохраняются.
+
+    Параметры
+    ---------
+    validate : bool, optional
+        Включать ли структурные проверки входной кривой. По умолчанию True.
     """
 
-    def __init__(self, sign: int):
+    def __init__(self, sign: int, *, validate: bool = True):
         s = int(sign)
         if s not in (-1, +1):
             raise ValueError("SignTransform.sign должен быть +1 или -1")
         self.sign = s
+        self.validate = bool(validate)
         self.name = f"Sign({self.sign:+d})"
 
     def __call__(self, freq: np.ndarray, vals: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        f, y = ensure_1d(freq, vals, "SignTransform")
-        f, y = sort_by_freq(f, y)
+        f, y = _prepare_curve(freq, vals, "SignTransform", validate=self.validate)
 
         y_dt = dtype_out(y)
         return np.asarray(f, dtype=float), (np.asarray(y, dtype=y_dt) * self.sign)
@@ -992,6 +1058,12 @@ class FiniteTransform(BaseTransform):
     - Частотная ось является “координатой”, поэтому невалидные значения freq
       не могут быть корректно “заполнены”: такие точки всегда удаляются.
     - Для vals доступна политика drop/raise/fill.
+
+    Параметры
+    ---------
+    validate : bool, optional
+        Включать ли структурные проверки входной кривой (1-D, сортировка).
+        По умолчанию True.
     """
 
     def __init__(
@@ -1000,18 +1072,19 @@ class FiniteTransform(BaseTransform):
         *,
         fill_value: Union[float, complex] = 0.0,
         on_empty: str = "raise",
+        validate: bool = True,
     ):
         self.mode = str(mode).lower()
         if self.mode not in ("drop", "raise", "fill"):
             raise ValueError("FiniteTransform.mode должен быть 'drop'|'raise'|'fill'")
 
         self.fill_value = fill_value
-        self.on_empty: OnEmpty = _norm_on_empty(on_empty, "FiniteTransform")
+        self.on_empty: OnEmpty = norm_on_empty(on_empty, "FiniteTransform")
+        self.validate = bool(validate)
         self.name = f"Finite({self.mode})"
 
     def __call__(self, freq: np.ndarray, vals: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        f, y = ensure_1d(freq, vals, "FiniteTransform")
-        f, y = sort_by_freq(f, y)
+        f, y = _prepare_curve(freq, vals, "FiniteTransform", validate=self.validate)
 
         y_dt = dtype_out(y)
         f = np.asarray(f, dtype=float)
@@ -1075,6 +1148,9 @@ class DerivativeTransform(BaseTransform):
                       (требуется вызывать через apply(...) с корректным freq_unit).
 
     Это удобно, когда требуется физически сопоставимая производная при разных freq_unit.
+    Параметры
+    ---------
+    validate : bool, optional — структурные проверки входной кривой. По умолчанию True.
     """
 
     def __init__(
@@ -1084,6 +1160,7 @@ class DerivativeTransform(BaseTransform):
         basis: Literal["native", "Hz"] = "native",
         abs_value: bool = False,
         on_empty: str = "raise",
+        validate: bool = True,
     ):
         self.method = str(method).lower()
         if self.method not in ("diff", "gradient"):
@@ -1094,7 +1171,8 @@ class DerivativeTransform(BaseTransform):
             raise ValueError("DerivativeTransform.basis должен быть 'native' или 'Hz'")
 
         self.abs_value = bool(abs_value)
-        self.on_empty: OnEmpty = _norm_on_empty(on_empty, "DerivativeTransform")
+        self.on_empty: OnEmpty = norm_on_empty(on_empty, "DerivativeTransform")
+        self.validate = bool(validate)
         self.name = f"Derivative({self.method}, basis={self.basis})"
 
     def out_value_unit(self, in_unit: str, freq_unit: str) -> str:
@@ -1120,8 +1198,7 @@ class DerivativeTransform(BaseTransform):
         return self._apply(freq, vals, freq_unit="Hz")
 
     def _apply(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str) -> Tuple[np.ndarray, np.ndarray]:
-        f, y = ensure_1d(freq, vals, "DerivativeTransform")
-        f, y = sort_by_freq(f, y)
+        f, y = _prepare_curve(freq, vals, "DerivativeTransform", validate=self.validate)
 
         y_dt = dtype_out(y)
         if f.size < 2:
@@ -1192,6 +1269,10 @@ class GroupDelayTransform(BaseTransform):
     -----
     - Частотная ось: midpoints исходной сетки (в исходных единицах входного freq).
     - Значения: время задержки в "s" или "ns" (задаётся out_unit).
+
+    Параметры
+    ---------
+    validate : bool, optional — структурные проверки (1-D, сортировка). По умолчанию True.
     """
 
     def __init__(
@@ -1199,13 +1280,15 @@ class GroupDelayTransform(BaseTransform):
         *,
         out_unit: Literal["s", "ns"] = "ns",
         on_empty: str = "raise",
+        validate: bool = True,
     ):
         ou = str(out_unit).strip().lower()
         if ou not in ("s", "ns"):
             raise ValueError("GroupDelayTransform.out_unit должен быть 's' или 'ns'")
         self.out_unit: Literal["s", "ns"] = ou  # type: ignore[assignment]
 
-        self.on_empty: OnEmpty = _norm_on_empty(on_empty, "GroupDelayTransform")
+        self.on_empty: OnEmpty = norm_on_empty(on_empty, "GroupDelayTransform")
+        self.validate = bool(validate)
         self.name = f"GroupDelay({self.out_unit})"
 
     def out_value_unit(self, in_unit: str, freq_unit: str) -> str:
@@ -1236,8 +1319,7 @@ class GroupDelayTransform(BaseTransform):
         freq_unit: str,
         value_unit: str,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        f, phi = ensure_1d(freq, vals, "GroupDelayTransform")
-        f, phi = sort_by_freq(f, phi)
+        f, phi = _prepare_curve(freq, vals, "GroupDelayTransform", validate=self.validate)
 
         if f.size < 2:
             return handle_empty_curve(self.on_empty, "GroupDelayTransform", y_dtype=np.float64)
@@ -1299,6 +1381,9 @@ class ApertureSlopeTransform(BaseTransform):
         Если False, делить на номинальную fw.
     abs_value : bool
         Если True, возвращать модуль крутизны (float64).
+    validate : bool, optional
+        Включать ли структурные проверки входной кривой (1-D, сортировка).
+        По умолчанию True.
     """
 
     def __init__(
@@ -1309,6 +1394,7 @@ class ApertureSlopeTransform(BaseTransform):
         use_effective_fw: bool = True,
         abs_value: bool = True,
         on_empty: str = "raise",
+        validate: bool = True,
     ):
         self.fw = float(fw)
         if self.fw <= 0.0:
@@ -1318,7 +1404,8 @@ class ApertureSlopeTransform(BaseTransform):
 
         self.use_effective_fw = bool(use_effective_fw)
         self.abs_value = bool(abs_value)
-        self.on_empty: OnEmpty = _norm_on_empty(on_empty, "ApertureSlopeTransform")
+        self.on_empty: OnEmpty = norm_on_empty(on_empty, "ApertureSlopeTransform")
+        self.validate = bool(validate)
         self.name = f"ApertureSlope(FW={self.fw})"
 
     def out_value_unit(self, in_unit: str, freq_unit: str) -> str:
@@ -1343,8 +1430,7 @@ class ApertureSlopeTransform(BaseTransform):
         return self._apply_fw(freq, vals, fw_local)
 
     def _apply_fw(self, freq: np.ndarray, vals: np.ndarray, fw_local: float) -> Tuple[np.ndarray, np.ndarray]:
-        f, y = ensure_1d(freq, vals, "ApertureSlopeTransform")
-        f, y = sort_by_freq(f, y)
+        f, y = _prepare_curve(freq, vals, "ApertureSlopeTransform", validate=self.validate)
 
         y_dt = dtype_out(y)
         if f.size < 2:

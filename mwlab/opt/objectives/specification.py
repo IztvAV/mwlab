@@ -36,7 +36,7 @@ Specification = AND-набор Criterion-ов.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence, Literal
+from typing import Any, Dict, List, Sequence, Literal, Tuple
 
 import numpy as np
 import skrf as rf
@@ -45,6 +45,7 @@ from .base import BaseCriterion, BaseSpecification, CriterionResult
 
 
 Reduction = Literal["sum", "mean", "max"]
+_REDUCTION_MODES: Tuple[str, ...] = ("sum", "mean", "max")
 
 
 class Specification(BaseSpecification):
@@ -90,7 +91,11 @@ class Specification(BaseSpecification):
         float
             Итоговый штраф (>=0 для корректно настроенных компараторов).
         """
-        return super().penalty(net, reduction=reduction)
+        red = str(reduction).strip().lower()
+        if red not in _REDUCTION_MODES:
+            raise ValueError(f"reduction должен быть одним из {_REDUCTION_MODES}")
+
+        return super().penalty(net, reduction=red)  # type: ignore[arg-type]
 
     # -------------------------------------------------------------------------
     # Удобные “срезы” результатов
@@ -129,14 +134,15 @@ class Specification(BaseSpecification):
         if values.size == 0:
             return 0.0
 
-        if reduction == "sum":
+        red = str(reduction).strip().lower()
+        if red == "sum":
             return float(np.sum(values))
-        if reduction == "mean":
+        if red == "mean":
             return float(np.mean(values))
-        if reduction == "max":
+        if red == "max":
             return float(np.max(values))
 
-        raise ValueError("reduction должен быть 'sum'|'mean'|'max'")
+        raise ValueError(f"reduction должен быть одним из {_REDUCTION_MODES}")
 
     def report(self, net: rf.Network, *, reduction: Reduction = "sum") -> Dict[str, Any]:
         """

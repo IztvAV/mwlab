@@ -66,9 +66,6 @@ from .base import BaseComparator, register_comparator
 
 FinitePolicy = Literal["fail", "raise", "ok"]
 PenaltyKindOneSided = Literal["hard", "hinge", "softplus", "huber", "power"]
-# Полностью сериализуемые режимы для PenaltyComparator (без callable-параметров)
-PenaltyFnMode = Literal["identity", "abs", "square", "relu", "relu_square"]
-OkMode = Literal["always", "le0", "ge0", "eq0", "lt0", "gt0"]
 
 # Нижняя граница масштаба для scale="auto"
 _AUTO_EPS = 1e-6
@@ -537,7 +534,6 @@ class SoftPlusLEComparator(LEComparator):
         )
         self.scale_param = scale
         self.beta = _require_positive("beta", beta)
-        self._base = _softplus(0.0, self.beta)  # чтобы penalty(0)=0
 
     def penalty(self, value: float) -> float:
         v = float(value)
@@ -548,8 +544,12 @@ class SoftPlusLEComparator(LEComparator):
             )
             return p
         sc = _resolve_scale_for_limit(self.limit, self.scale_param)
-        x = max(0.0, (v - self.limit) / sc)
-        return max(0.0, _softplus(x, self.beta) - self._base)
+        return _penalty_one_sided(
+            v - self.limit,
+            kind="softplus",
+            scale=sc,
+            beta=self.beta,
+        )
 
 
 @register_comparator("softplus_ge")
@@ -578,7 +578,6 @@ class SoftPlusGEComparator(GEComparator):
         )
         self.scale_param = scale
         self.beta = _require_positive("beta", beta)
-        self._base = _softplus(0.0, self.beta)
 
     def penalty(self, value: float) -> float:
         v = float(value)
@@ -588,9 +587,14 @@ class SoftPlusGEComparator(GEComparator):
                 non_finite_penalty=self.non_finite_penalty,
             )
             return p
+
         sc = _resolve_scale_for_limit(self.limit, self.scale_param)
-        x = max(0.0, (self.limit - v) / sc)
-        return max(0.0, _softplus(x, self.beta) - self._base)
+        return _penalty_one_sided(
+            self.limit - v,
+            kind="softplus",
+            scale = sc,
+            beta = self.beta,
+        )
 
 
 @register_comparator("huber_le")
@@ -714,7 +718,6 @@ class WindowComparator(BaseComparator):
         self.scale_param = scale
         self.beta = _require_positive("beta", beta)
         self.delta = _require_positive("delta", delta)
-        self._base = _softplus(0.0, self.beta)
 
         self.unit = str(unit)
         self.finite_policy: FinitePolicy = _norm_finite_policy(finite_policy)
@@ -756,10 +759,8 @@ class WindowComparator(BaseComparator):
                 return float(p_left + p_right)
 
             # softplus
-            x_left = max(0.0, left_res / sc)
-            x_right = max(0.0, right_res / sc)
-            p_left = max(0.0, _softplus(x_left, self.beta) - self._base)
-            p_right = max(0.0, _softplus(x_right, self.beta) - self._base)
+            p_left = _penalty_one_sided(left_res, kind="softplus", scale=sc, beta=self.beta)
+            p_right = _penalty_one_sided(right_res, kind="softplus", scale=sc, beta=self.beta)
             return float(p_left + p_right)
 
         # huber

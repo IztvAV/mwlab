@@ -38,9 +38,10 @@ Selector **не должен** внедрять инженерные согла�
 Соглашения по частоте
 ---------------------
 - Внутри `skrf.Network` частота хранится в Гц: `net.frequency.f`.
-- На выходе Selector переводит частоту в `freq_unit` и **обязательно приводит**
+- На выходе Selector переводит частоту в `freq_unit` и по умолчанию приводит
   ось к монотонно возрастающей, чтобы downstream-компоненты могли полагаться на
-  корректный порядок.
+  корректный порядок. Для «доверенных» сетей эти проверки можно отключить,
+  передав `validate=False` в конструктор селектора.
 
 Параметр band
 -------------
@@ -171,7 +172,8 @@ def _apply_band(
     - band задаётся в тех же единицах, что и freq (то есть в freq_unit селектора).
     - Границы не интерполируются: выбираются только существующие точки сетки.
     """
-    f, y = ensure_1d(freq, vals, who="band")
+    f = np.asarray(freq)
+    y = np.asarray(vals)
     if band is None:
         return f, y
 
@@ -248,6 +250,10 @@ class SComplexSelector(BaseSelector):
         "Hz"/"kHz"/"MHz"/"GHz" (регистр не важен).
     name : str | None
         Человекочитаемое имя кривой.
+    validate : bool, optional
+        Включать ли проверки портов, сортировку оси частот и проверку
+        размерностей (ensure_1d). По умолчанию True; установите False для
+        «доверенных» сетей в горячих циклах оптимизации.
     """
 
     def __init__(
@@ -258,6 +264,7 @@ class SComplexSelector(BaseSelector):
         band: Tuple[float, float] | None = None,
         freq_unit: str = "GHz",
         name: Optional[str] = None,
+        validate: bool = True,
     ):
         self.m, self.n = _ports_to_0based(m, n)
         self.band = band
@@ -265,19 +272,25 @@ class SComplexSelector(BaseSelector):
         self.freq_unit = normalize_freq_unit(freq_unit)
         self.value_unit = "complex"
         self.name = name or f"S{m}{n}_complex"
+        self.validate = bool(validate)
 
     def __call__(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
-        _ensure_port_exists(net, self.m, self.n, "SComplexSelector")
+        if self.validate:
+            _ensure_port_exists(net, self.m, self.n, "SComplexSelector")
 
         f_hz = np.asarray(net.frequency.f, dtype=float)
         s_mn = np.asarray(net.s[:, self.m, self.n], dtype=np.complex128)
 
-        f_hz, (s_mn,) = _sort_freq_and_apply(f_hz, [s_mn])
+        if self.validate:
+            f_hz, (s_mn,) = _sort_freq_and_apply(f_hz, [s_mn])
 
         freq = convert_freq_from_hz(f_hz, self.freq_unit)
         freq, s_mn = _apply_band(freq, s_mn, self.band)
 
-        return ensure_1d(freq, s_mn, who="SComplexSelector")
+        if self.validate:
+            freq, s_mn = ensure_1d(freq, s_mn, who="SComplexSelector")
+
+        return freq, s_mn
 
 # =============================================================================
 # 2) SMagSelector — |S_mn| в lin или в dB (стандартное определение)
@@ -307,6 +320,10 @@ class SMagSelector(BaseSelector):
         Единицы частоты на выходе.
     name : str | None
         Имя кривой.
+    validate : bool, optional
+        Включать ли проверки портов, сортировку оси частот и проверку
+        размерностей (ensure_1d). По умолчанию True; установите False для
+        «доверенных» сетей в горячих циклах оптимизации.
     """
 
     def __init__(
@@ -318,6 +335,7 @@ class SMagSelector(BaseSelector):
         db: bool = True,
         freq_unit: str = "GHz",
         name: Optional[str] = None,
+        validate: bool = True,
     ):
         self.m, self.n = _ports_to_0based(m, n)
         self.band = band
@@ -326,9 +344,11 @@ class SMagSelector(BaseSelector):
         self.freq_unit = normalize_freq_unit(freq_unit)
         self.value_unit = "dB" if self.db else "lin"
         self.name = name or f"S{m}{n}_{'dB' if self.db else 'mag'}"
+        self.validate = bool(validate)
 
     def __call__(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
-        _ensure_port_exists(net, self.m, self.n, "SMagSelector")
+        if self.validate:
+            _ensure_port_exists(net, self.m, self.n, "SMagSelector")
 
         f_hz = np.asarray(net.frequency.f, dtype=float)
 
@@ -338,12 +358,16 @@ class SMagSelector(BaseSelector):
         y = net.s_db[:, self.m, self.n] if self.db else net.s_mag[:, self.m, self.n]
         y = np.asarray(y, dtype=np.float64)
 
-        f_hz, (y,) = _sort_freq_and_apply(f_hz, [y])
+        if self.validate:
+            f_hz, (y,) = _sort_freq_and_apply(f_hz, [y])
 
         freq = convert_freq_from_hz(f_hz, self.freq_unit)
         freq, y = _apply_band(freq, y, self.band)
 
-        return ensure_1d(freq, y, who="SMagSelector")
+        if self.validate:
+            freq, y = ensure_1d(freq, y, who="SMagSelector")
+
+        return freq, y
 
 # =============================================================================
 # 3) PhaseSelector — фаза S_mn(f)
@@ -376,6 +400,10 @@ class PhaseSelector(BaseSelector):
         Единицы частоты на выходе.
     name : str | None
         Имя кривой.
+    validate : bool, optional
+        Включать ли проверки портов, сортировку оси частот и проверку
+        размерностей (ensure_1d). По умолчанию True; установите False для
+        «доверенных» сетей в горячих циклах оптимизации.
     """
 
     def __init__(
@@ -388,6 +416,7 @@ class PhaseSelector(BaseSelector):
         unit: str = "rad",
         freq_unit: str = "GHz",
         name: Optional[str] = None,
+        validate: bool = True,
     ):
         self.m, self.n = _ports_to_0based(m, n)
         self.band = band
@@ -401,14 +430,17 @@ class PhaseSelector(BaseSelector):
         self.freq_unit = normalize_freq_unit(freq_unit)
         self.value_unit = self.unit
         self.name = name or f"Phase_S{m}{n}_{self.unit}"
+        self.validate = bool(validate)
 
     def __call__(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
-        _ensure_port_exists(net, self.m, self.n, "PhaseSelector")
+        if self.validate:
+            _ensure_port_exists(net, self.m, self.n, "PhaseSelector")
 
         f_hz = np.asarray(net.frequency.f, dtype=float)
         s_mn = np.asarray(net.s[:, self.m, self.n], dtype=np.complex128)
 
-        f_hz, (s_mn,) = _sort_freq_and_apply(f_hz, [s_mn])
+        if self.validate:
+            f_hz, (s_mn,) = _sort_freq_and_apply(f_hz, [s_mn])
 
         phi = np.angle(s_mn)  # radians in [-pi, pi]
         if self.unwrap:
@@ -419,7 +451,10 @@ class PhaseSelector(BaseSelector):
         freq = convert_freq_from_hz(f_hz, self.freq_unit)
         freq, phi = _apply_band(freq, phi.astype(np.float64), self.band)
 
-        return ensure_1d(freq, phi, who="PhaseSelector")
+        if self.validate:
+            freq, phi = ensure_1d(freq, phi, who="PhaseSelector")
+
+        return freq, phi
 
 # =============================================================================
 # 4) AxialRatioSelector — демонстрационный derived-селектор
@@ -452,6 +487,10 @@ class AxialRatioSelector(BaseSelector):
         Единицы частоты на выходе.
     name : str | None
         Имя кривой.
+    validate : bool, optional
+        Включать ли проверку числа портов, сортировку оси частот и проверку
+        размерностей (ensure_1d). По умолчанию True; установите False для
+        «доверенных» сетей в горячих циклах оптимизации.
     """
 
     def __init__(
@@ -461,6 +500,7 @@ class AxialRatioSelector(BaseSelector):
         db: bool = True,
         freq_unit: str = "GHz",
         name: Optional[str] = None,
+        validate: bool = True,
     ):
         self.band = band
         self.db = bool(db)
@@ -468,21 +508,24 @@ class AxialRatioSelector(BaseSelector):
         self.freq_unit = normalize_freq_unit(freq_unit)
         self.value_unit = "dB" if self.db else "lin"
         self.name = name or f"AxialRatio_{'dB' if self.db else 'lin'}"
+        self.validate = bool(validate)
 
     def __call__(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
         # AR использует S31 и S41 => требуется сеть как минимум с 4 портами.
-        nports = getattr(net, "nports", None)
-        if nports is not None and int(nports) < 4:
-            raise ValueError(
-                f"AxialRatioSelector: требуется сеть с >=4 портами, получено nports={int(nports)}"
-            )
+        if self.validate:
+            nports = getattr(net, "nports", None)
+            if nports is not None and int(nports) < 4:
+                raise ValueError(
+                    f"AxialRatioSelector: требуется сеть с >=4 портами, получено nports={int(nports)}"
+                )
 
         f_hz = np.asarray(net.frequency.f, dtype=float)
         s31 = np.asarray(net.s[:, 2, 0], dtype=np.complex128)
         s41 = np.asarray(net.s[:, 3, 0], dtype=np.complex128)
 
         # Сортируем частоту один раз и применяем порядок к обоим каналам.
-        f_hz, (s31, s41) = _sort_freq_and_apply(f_hz, [s31, s41])
+        if self.validate:
+            f_hz, (s31, s41) = _sort_freq_and_apply(f_hz, [s31, s41])
 
         freq = convert_freq_from_hz(f_hz, self.freq_unit)
 
@@ -515,7 +558,10 @@ class AxialRatioSelector(BaseSelector):
         vals = np.asarray(vals[ok], dtype=np.float64)
 
         freq, vals = _apply_band(freq, vals, self.band)
-        return ensure_1d(freq, vals, who="AxialRatioSelector")
+        if self.validate:
+            freq, vals = ensure_1d(freq, vals, who="AxialRatioSelector")
+
+        return freq, vals
 
 
 # =============================================================================
