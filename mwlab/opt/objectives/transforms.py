@@ -258,6 +258,14 @@ class Compose(BaseTransform):
     def __len__(self) -> int:  # pragma: no cover
         return len(self.transforms)
 
+    def iter_transforms(self):
+        for tr in self.transforms:
+            fn_iter = getattr(tr, "iter_transforms", None)
+            if callable(fn_iter):
+                yield from fn_iter()
+            else:
+                yield tr
+
     def __repr__(self) -> str:  # pragma: no cover
         inner = ", ".join(tr.__class__.__name__ for tr in self.transforms)
         return f"Compose([{inner}])"

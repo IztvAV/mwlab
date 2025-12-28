@@ -802,17 +802,28 @@ class BaseCriterion:
 
         #Обрабатываем Transform (если есть)
         if self.transform is not None:
-            exp_f_t = _infer_expected_freq_units_from_attr(self.transform)
-            exp_v_t = _infer_expected_value_units_from_attr(self.transform)
+            def _iter_transforms(tr: BaseTransform):
+                fn_iter = getattr(tr, "iter_transforms", None)
+                if callable(fn_iter):
+                    yield from fn_iter()
+                else:
+                    yield tr
 
-            validate_expected_units(
-                who="Criterion",
-                component_name=f"Transform({self.transform.__class__.__name__})",
-                expected_freq=exp_f_t,
-                expected_value=exp_v_t,
-                actual_freq_unit=self._freq_unit,
-                actual_value_unit=self._selector_value_unit,
-            )
+            current_value_unit = self._selector_value_unit
+            for tr in _iter_transforms(self.transform):
+                exp_f_t = _infer_expected_freq_units_from_attr(tr)
+                exp_v_t = _infer_expected_value_units_from_attr(tr)
+
+                validate_expected_units(
+                    who="Criterion",
+                    component_name=f"Transform({tr.__class__.__name__})",
+                    expected_freq=exp_f_t,
+                    expected_value=exp_v_t,
+                    actual_freq_unit=self._freq_unit,
+                    actual_value_unit=current_value_unit,
+                )
+
+                current_value_unit = str(tr.out_value_unit(current_value_unit, self._freq_unit) or "")
 
             value_unit_after_transform = str(
                 self.transform.out_value_unit(self._selector_value_unit, self._freq_unit) or ""
@@ -980,7 +991,7 @@ class BaseSpecification:
         return [c.evaluate(net) for c in self.criteria]
 
     def is_ok(self, net: rf.Network) -> bool:
-        return all(r.ok for r in self.evaluate(net))
+        return all(c.is_ok(net) for c in self.criteria)
 
     def penalty(self, net: rf.Network, *, reduction: Reduction = "sum") -> float:
         """
