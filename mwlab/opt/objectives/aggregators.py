@@ -1,141 +1,420 @@
+# mwlab/opt/objectives/aggregators.py
 """
 mwlab.opt.objectives.aggregators
 ================================
 
-«Как» из 1-D вектора сделать скаляр.
+Aggregator отвечает на вопрос: «как свернуть 1-D кривую Y(f) в скаляр?».
 
-БАЗОВЫЕ АГРЕГАТОРЫ
+Роль в архитектуре
 ------------------
-* MaxAgg      – максимум;
-* MinAgg      – минимум;
-* MeanAgg     – среднее;
-* RippleAgg   – размах (max - min);
-* StdAgg      – стандартное отклонение.
+Типичная цепочка вычисления критерия:
 
-ИНТЕГРАЛЬНЫЕ АГРЕГАТОРЫ (для гладких целевых функций)
------------------------------------------------------
-* UpIntAgg     – интеграл (или среднее) ВЕРХНИХ нарушений для целей вида `value ≤ limit`;
-* LoIntAgg     – интеграл (или среднее) НИЖНИХ нарушений для целей вида `value ≥ limit`;
-* RippleIntAgg – интегральная «неравномерность» относительно опорной линии.
+    Selector -> Transform -> Aggregator -> Comparator
 
-ЗНАКОВЫЕ ИНТЕГРАТОРЫ (минималистичная и строгая формулировка)
--------------------------------------------------------------
-* SignedUpIntAgg     – для целей `value ≤ limit(f)`;
-* SignedLoIntAgg     – для целей `value ≥ limit(f)`;
-* SignedRippleIntAgg – для «рябь ≤ deadzone» относительно опорной линии.
+- Selector извлекает (freq, vals) из rf.Network и задаёт исходные единицы.
+- Transform выполняет предобработку кривой (обрезка band, сглаживание, производные, и т.д.).
+- Aggregator сворачивает подготовленную кривую в одно число (скаляр).
+- Comparator интерпретирует число как ограничение или штраф.
 
-Ключевые идеи знаковых интеграторов (новая версия):
-    1) Вводим остаток r(f) так, чтобы цель была r(f) ≤ 0.
-       - Up   : r = v - L(f)
-       - Lo   : r = L(f) - v
-       - Ripple: r = |v - T(f)| - deadzone
-       Тогда нарушения: [r]_+ = max(r, 0), запас: [r]_- = max(-r, 0).
+Почему агрегаторы должны быть «unit-aware»
+------------------------------------------
+Многие ошибки в задачах оптимизации возникают из-за смешения единиц:
+например, частота в MHz вместо GHz может «тихо» поменять масштаб интегралов,
+производных, апертурных метрик и т.п.
 
-    2) Положительная часть A_plus строится как раньше:
-       mean/trapz от [r]_+^p и делится на общий нормировочный множитель Z>0.
+Чтобы избежать подобных ошибок, агрегаторы поддерживают два режима вызова:
 
-    3) «Награда» за запас считается по худшему запасу, но гладко:
-       M_τ = log-mean-exp (LME) от вектора s=[r]_-, с автоподбором τ.
-       Это даёт корректное M_τ=0, когда запасов нет, и гладкость вместо max.
+1) Старый режим совместимости:
+   __call__(freq, vals) -> float
+   - агрегатор работает «как есть», предполагая, что его параметры заданы
+     в тех же единицах, что и входной freq.
 
-    4) Жёсткий выключатель награды (gate): если A_plus > eps → награда = 0.
-       (eps очень мал — чтобы не было награды при наличии нарушений.)
+2) Unit-aware режим:
+   aggregate(freq, vals, *, freq_unit: str, value_unit: str) -> float
+   - агрегатор получает контекст единиц и может:
+     * валидировать ожидаемые единицы (expects_freq_unit / expects_value_unit),
+     * конвертировать свои частотные параметры (f0, band) в текущие freq_unit,
+     * выполнять физически корректные операции на базисе Hz (basis="Hz").
 
-    5) Затухание награды одной фиксированной формой:
-       Reward = S * exp(-S/ρ), где S = raw_minus/Z — нормированный размер «худшего запаса».
-       Такой вид даёт естественную «сладкую точку» при S≈ρ и затухание при чрезмерных запасах,
-       чтобы один критерий не «перетягивал одеяло».
+В вычислительном проходе критерия рекомендуется использовать именно aggregate(...).
 
-Параметры, оставленные пользователю для знаковых интеграторов:
-    - p: {1,2} (по умолчанию 2),
-    - method: {'mean','trapz'},
-    - normalize: см. ниже,
-    - rho: float>0 — «масштаб разумного запаса» для затухания exp(-S/rho).
+Инварианты входных данных
+-------------------------
+- freq и vals должны быть 1-D массивами одинаковой длины.
+- частотная ось приводится к монотонно возрастающей (sort_by_freq).
+- политики обработки NaN/Inf и пустых данных задаются явно (см. ниже).
 
-Остальные детали (порог gate, τ для LME, устойчивость интегрирования) — внутри.
+Политики обработки NaN/Inf и пустых наборов точек
+------------------------------------------------
+finite_policy:
+- "omit"      : удалить точки с NaN/Inf (и в freq, и в vals),
+- "raise"     : при NaN/Inf -> ValueError,
+- "propagate" : ничего не делать (NaN может «заразить» результат).
+
+on_empty:
+- "raise" : ValueError,
+- "nan"   : вернуть np.nan,
+- "zero"  : вернуть 0.0.
+
+Замечание: при finite_policy="omit" после фильтрации точек может не остаться —
+тогда применяется on_empty.
+
+Комплексные значения
+-------------------
+Агрегаторы, которые математически предполагают вещественные величины, по умолчанию
+запрещают complex (complex_mode="raise"), чтобы исключить «тихие» отбрасывания
+мнимой части. При необходимости можно выбрать:
+- "abs"  : агрегировать по |y|,
+- "real" : агрегировать по Re(y),
+- "imag" : агрегировать по Im(y).
+
+Структура файла
+---------------
+1) Внутренние типы и хелперы (политики, конверсия единиц, фильтрация).
+2) Простые агрегаторы (max/min/mean/std/ripple/rms/abs/квантили).
+3) Точечный агрегатор (ValueAtAgg).
+4) Интегральные агрегаторы (UpIntAgg/LoIntAgg/RippleIntAgg).
+5) Signed-агрегаторы (SignedUpIntAgg/SignedLoIntAgg/SignedRippleIntAgg).
 
 """
 
 from __future__ import annotations
 
-from typing import Callable, Union, Tuple, Sequence
+from typing import Optional, Sequence, Union, Literal, Tuple
 
 import numpy as np
 
-from .base import BaseAggregator, register_aggregator
+from .base import (
+    BaseAggregator,
+    ensure_1d,
+    sort_by_freq,
+    interp_at_scalar,
+    normalize_freq_unit,
+    freq_unit_scale_to_hz,
+    register_aggregator,
+)
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# ВСПОМОГАТЕЛЬНЫЕ ТИПЫ И ХЕЛПЕРЫ
-# ────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# 1) ТИПЫ И ВНУТРЕННИЕ ХЕЛПЕРЫ
+# =============================================================================
 
-# Тип для limit/target: константа или функция от частоты (в ГГц) → массив
-LimitFunc = Union[float, Callable[[np.ndarray], np.ndarray]]
+# Пороговые/опорные линии должны быть сериализуемыми:
+# - константа (float)
+# - табличное задание как набор точек [(f, y), ...] (линейная интерполяция по f)
+LineSpec = Union[float, Sequence[Sequence[float]]]
+
+FinitePolicy = Literal["omit", "raise", "propagate"]
+EmptyPolicy = Literal["raise", "nan", "zero"]
+ComplexMode = Literal["raise", "abs", "real", "imag"]
+IntegralMethod = Literal["mean", "trapz"]
+FreqBasis = Literal["native", "Hz"]
+
+
+_FINITE_POLICIES: Tuple[str, ...] = ("omit", "raise", "propagate")
+_EMPTY_POLICIES: Tuple[str, ...] = ("raise", "nan", "zero")
+_COMPLEX_MODES: Tuple[str, ...] = ("raise", "abs", "real", "imag")
+_INTEGRAL_METHODS: Tuple[str, ...] = ("mean", "trapz")
+_FREQ_BASIS: Tuple[str, ...] = ("native", "Hz")
+
+
+def _handle_empty_scalar(on_empty: str, who: str) -> float:
+    """
+    Унифицированная политика возвращаемого значения, когда точек нет.
+
+    Используется везде, где агрегатор сворачивает кривую в скаляр.
+    """
+    mode = str(on_empty).strip().lower()
+    if mode not in _EMPTY_POLICIES:
+        raise ValueError(f"{who}: on_empty должен быть один из {_EMPTY_POLICIES}")
+    if mode == "raise":
+        raise ValueError(f"{who}: пустой набор точек (после Transform/фильтрации не осталось данных)")
+    if mode == "zero":
+        return 0.0
+    return float(np.nan)
+
+
+def _ensure_no_duplicate_freq(f: np.ndarray, who: str) -> None:
+    """
+    Диагностика дубликатов частоты.
+
+    Дубликаты делают интерполяцию неоднозначной, а интегрирование/производные —
+    зависимыми от случайного выбора точки.
+
+    Политика в mwlab:
+    - агрегаторы/интерполяция требуют строгой частотной оси без дублей;
+    - если данные могут содержать дубли, используйте явный Transform:
+        DedupFreqTransform(mode=...)
+    """
+    f = np.asarray(f, dtype=float)
+    if f.size < 2:
+        return
+    df = np.diff(f)
+    # sort_by_freq гарантирует неубывание; df==0 означает дубликаты.
+    if bool(np.any(df == 0.0)):
+        raise ValueError(
+            f"{who}: обнаружены дубликаты freq (нестрого возрастающая ось). "
+            "Добавьте DedupFreqTransform(...) в цепочку перед агрегатором."
+        )
+
+
+def _convert_freq_scalar(x: float, from_unit: str, to_unit: str) -> float:
+    """
+    Перевод одного значения частоты между единицами ("Hz"/"kHz"/"MHz"/"GHz").
+
+    Перевод выполняется через масштаб к Гц:
+        x_to = x_from * scale(from) / scale(to)
+    """
+    fu = normalize_freq_unit(from_unit)
+    tu = normalize_freq_unit(to_unit)
+    if fu == tu:
+        return float(x)
+    s_from = freq_unit_scale_to_hz(fu)
+    s_to = freq_unit_scale_to_hz(tu)
+    return float(x) * (s_from / s_to)
+
+
+def _coerce_to_real(y: np.ndarray, *, complex_mode: str, who: str) -> np.ndarray:
+    """
+    Приведение массива значений к вещественному виду согласно complex_mode.
+
+    По умолчанию complex_mode="raise" запрещает «неявное» использование complex.
+    """
+    y = np.asarray(y)
+    if not np.iscomplexobj(y):
+        return y.astype(np.float64, copy=False)
+
+    mode = str(complex_mode).strip().lower()
+    if mode not in _COMPLEX_MODES:
+        raise ValueError(f"{who}: complex_mode должен быть один из {_COMPLEX_MODES}")
+
+    if mode == "raise":
+        raise TypeError(
+            f"{who}: получены комплексные значения. "
+            f"Выберите complex_mode='abs'|'real'|'imag' или преобразуйте данные Transform-ом."
+        )
+    if mode == "abs":
+        return np.abs(y).astype(np.float64, copy=False)
+    if mode == "real":
+        return np.real(y).astype(np.float64, copy=False)
+    # mode == "imag"
+    return np.imag(y).astype(np.float64, copy=False)
+
+
+def _eval_line(line: LineSpec, f: np.ndarray, *, who: str) -> np.ndarray:
+    """
+    Вычислить опорную/пороговую линию в узлах f.
+
+    Допустимые формы line (строго сериализуемые):
+    - число (float) -> константная линия
+    - табличное задание: последовательность точек [(f0, y0), (f1, y1), ...]
+      интерполируется линейно по частоте.
+    """
+    if callable(line):  # type: ignore[arg-type]
+        raise TypeError(
+            f"{who}: callable-значение для линии не поддерживается. "
+            "Используйте число или табличное задание [(f, y), ...]."
+        )
+
+    f = np.asarray(f, dtype=float)
+
+    # 1) Константа
+    if isinstance(line, (int, float, np.number)):
+        v = float(line)
+        return np.full_like(f, v, dtype=float)
+
+    # 2) Табличное задание
+    pts = list(line)  # type: ignore[arg-type]
+    if len(pts) < 2:
+        raise ValueError(f"{who}: табличная линия должна содержать минимум 2 точки [(f, y), ...]")
+
+    fx: list[float] = []
+    fy: list[float] = []
+    for p in pts:
+        if not isinstance(p, (list, tuple)) or len(p) != 2:
+            raise ValueError(f"{who}: каждая точка линии должна иметь вид (f, y)")
+        fx.append(float(p[0]))
+        fy.append(float(p[1]))
+
+    fx_arr = np.asarray(fx, dtype=float)
+    fy_arr = np.asarray(fy, dtype=float)
+
+    # Сортировка по частоте
+    idx = np.argsort(fx_arr)
+    fx_arr = fx_arr[idx]
+    fy_arr = fy_arr[idx]
+
+    # Запрещаем повторяющиеся частоты (иначе np.interp становится неоднозначным)
+    if np.any(np.diff(fx_arr) == 0.0):
+        raise ValueError(f"{who}: в табличной линии обнаружены повторяющиеся значения частоты")
+
+    if f.size == 0:
+        return np.asarray([], dtype=float)
+
+    fmin = float(fx_arr[0])
+    fmax = float(fx_arr[-1])
+    if float(np.min(f)) < fmin or float(np.max(f)) > fmax:
+        raise ValueError(
+            f"{who}: частотная ось выходит за диапазон табличной линии "
+            f"[{fmin}, {fmax}]. Расширьте таблицу или согласуйте диапазоны."
+        )
+
+    return np.interp(f, fx_arr, fy_arr).astype(float, copy=False)
+
+
+def _apply_finite_policy_xy(
+    f: np.ndarray,
+    y: np.ndarray,
+    *,
+    finite_policy: str,
+    on_empty: str,
+    who: str,
+) -> Tuple[np.ndarray, np.ndarray, Optional[float]]:
+    """
+    Применить finite_policy к (f, y).
+
+    Возвращает (f2, y2, empty_scalar).
+    Если empty_scalar is not None, агрегатор может вернуть его немедленно.
+    """
+    pol = str(finite_policy).strip().lower()
+    if pol not in _FINITE_POLICIES:
+        raise ValueError(f"{who}: finite_policy должен быть один из {_FINITE_POLICIES}")
+
+    f = np.asarray(f, dtype=float)
+    y = np.asarray(y)
+
+    if f.size == 0:
+        return f, y, _handle_empty_scalar(on_empty, who)
+
+    if pol == "propagate":
+        return f, y, None
+
+    if pol == "raise":
+        if (not np.all(np.isfinite(f))) or (not np.all(np.isfinite(y))):
+            raise ValueError(f"{who}: обнаружены NaN/Inf (finite_policy='raise')")
+        return f, y, None
+
+    # pol == "omit"
+    mask = np.isfinite(f) & np.isfinite(y)
+    f2 = f[mask]
+    y2 = y[mask]
+    if f2.size == 0:
+        return f2, y2, _handle_empty_scalar(on_empty, who)
+    return f2, y2, None
+
+
+def _apply_finite_policy_xyz(
+    f: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    *,
+    finite_policy: str,
+    on_empty: str,
+    who: str,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[float]]:
+    """
+    Применить finite_policy к тройке массивов (f, y, z), где z — опорная/пороговая линия.
+
+    Это полезно для интегральных и signed-агрегаторов, где невалидность limit/target
+    должна обрабатываться согласованно с vals.
+    """
+    pol = str(finite_policy).strip().lower()
+    if pol not in _FINITE_POLICIES:
+        raise ValueError(f"{who}: finite_policy должен быть один из {_FINITE_POLICIES}")
+
+    f = np.asarray(f, dtype=float)
+    y = np.asarray(y, dtype=float)
+    z = np.asarray(z, dtype=float)
+
+    if f.size == 0:
+        empty = _handle_empty_scalar(on_empty, who)
+        return f, y, z, empty
+
+    if pol == "propagate":
+        return f, y, z, None
+
+    if pol == "raise":
+        if (not np.all(np.isfinite(f))) or (not np.all(np.isfinite(y))) or (not np.all(np.isfinite(z))):
+            raise ValueError(f"{who}: обнаружены NaN/Inf (finite_policy='raise')")
+        return f, y, z, None
+
+    # pol == "omit"
+    mask = np.isfinite(f) & np.isfinite(y) & np.isfinite(z)
+    f2 = f[mask]
+    y2 = y[mask]
+    z2 = z[mask]
+    if f2.size == 0:
+        empty = _handle_empty_scalar(on_empty, who)
+        return f2, y2, z2, empty
+    return f2, y2, z2, None
 
 
 def _trapz(y: np.ndarray, x: np.ndarray) -> float:
     """
-    Безопасная обёртка над трапецией:
-    * в новых NumPy используем np.trapezoid;
-    * fallback на np.trapz для совместимости со старыми версиями.
+    Безопасная обёртка интегрирования по трапециям.
+
+    np.trapezoid появился в более новых NumPy; поддерживаем и np.trapz.
     """
     if hasattr(np, "trapezoid"):
         return float(np.trapezoid(y, x))
-    if hasattr(np, "trapz"):
-        return float(np.trapz(y, x))
-    # крайний случай: численное интегрирование вручную
-    x = x.astype(float)
-    y = y.astype(float)
-    if x.size < 2:
-        return 0.0
-    dx = np.diff(x)
-    ym = 0.5 * (y[1:] + y[:-1])
-    return float(np.sum(dx * ym))
+    return float(np.trapz(y, x))
 
 
-def _as_limit_fn(limit: LimitFunc) -> Callable[[np.ndarray], np.ndarray]:
+def _bandwidth(f: np.ndarray) -> float:
     """
-    Приводит переданный limit (константа или функция) к вызываемой форме:
-    f_GHz: ndarray → limit(f_GHz): ndarray
+    Ширина диапазона частот (для нормировок и аппроксимаций).
+
+    Возвращает 1.0 для вырожденного случая.
     """
-    if callable(limit):
-        return limit
-    v = float(limit)
-    return lambda f: np.full_like(f, v, dtype=float)
+    f = np.asarray(f, dtype=float)
+    if f.size >= 2:
+        return float(f[-1] - f[0])
+    return 1.0
 
 
 def _norm_factor(
     normalize: Union[str, float, Sequence[Union[str, float]]],
-    f_ghz: np.ndarray,
+    f: np.ndarray,
     ref_line: np.ndarray,
 ) -> float:
     """
-    Вычисляет множитель нормализации. Возвращает ВСЕГДА > 0.
+    Вычисление положительного множителя нормировки.
 
-    normalize:
-      - 'none'                → 1.0
-      - 'bandwidth'|'bw'      → ширина диапазона (f[-1] - f[0]) или 1.0
-      - 'limit'               → среднее |ref_line| по диапазону или 1.0
-      - 'bandwidth*limit'     → произведение двух нормировок
-      - число (float)         → явная шкала
-      - последовательность    → композиция нормировок (перемножение факторов)
+    normalize может быть:
+    - 'none'/'1'                 -> 1.0
+    - 'bandwidth'|'bw'           -> max(bandwidth(f), EPS)
+    - 'limit'                    -> max(mean(|ref_line|), EPS)
+    - 'bw*limit'|'bandwidth*limit' -> произведение факторов
+    - число > 0                  -> явная шкала
+    - последовательность         -> произведение указанных факторов
+
+    Нормировка применяется только как масштаб (в знаменателе) для получения
+    сопоставимых скалярных метрик.
     """
     EPS = 1e-12
 
     def _one(item) -> float:
         if isinstance(item, (int, float)):
             return max(float(item), EPS)
-        if item in ("bandwidth", "bw"):
-            if f_ghz.size >= 2:
-                bw = float(f_ghz[-1] - f_ghz[0])
-                return max(bw, EPS)
+
+        s = str(item).strip().lower()
+        if s in ("none", "1"):
             return 1.0
-        if item == "limit":
-            s = float(np.mean(np.abs(ref_line))) if ref_line.size else 0.0
-            return max(s, 1.0) if s > 0.0 else 1.0
-        if item in ("bandwidth*limit", "bw*limit"):
-            return _one("bandwidth") * _one("limit")
-        # 'none' или неизвестное значение → без нормализации
+
+        if s in ("bandwidth", "bw"):
+            return max(_bandwidth(f), EPS)
+
+        if s == "limit":
+            ref = np.asarray(ref_line, dtype=float)
+            if ref.size == 0:
+                return 1.0
+            m = float(np.mean(np.abs(ref)))
+            return max(m, EPS)
+
+        if s in ("bw*limit", "bandwidth*limit"):
+            return _one("bw") * _one("limit")
+
+        # Неизвестный режим: «без нормировки», чтобы поведение было предсказуемым.
         return 1.0
 
     if isinstance(normalize, (list, tuple)):
@@ -147,384 +426,925 @@ def _norm_factor(
     return _one(normalize)
 
 
-def _ensure_non_empty(vals: np.ndarray, who: str):
-    """Единообразная диагностика пустых массивов для базовых агрегаторов."""
-    if vals.size == 0:
-        raise ValueError(f"{who}: пустой массив значений (диапазон не попал в сетку)")
+# =============================================================================
+# 2) ПРОСТЫЕ АГРЕГАТОРЫ
+# =============================================================================
+
+class _SimpleAggBase(BaseAggregator):
+    """
+    Внутренняя база для простых агрегаторов.
+
+    Предназначение:
+    - единые finite_policy/on_empty,
+    - единая обработка комплексности через complex_mode,
+    - одинаковая подготовка входных данных.
+
+    Публичный контракт:
+    - __call__(freq, vals) — режим совместимости (без контекста единиц),
+    - aggregate(freq, vals, freq_unit, value_unit) — unit-aware режим.
+
+    По умолчанию агрегатор не навязывает ожидания по единицам, но при желании
+    дочерний класс может выставить expects_value_unit/ expects_freq_unit.
+    """
+
+    expects_freq_unit: Optional[str] = None
+    expects_value_unit: Optional[Union[str, Sequence[str]]] = None
+
+    def __init__(
+        self,
+        *,
+        finite_policy: FinitePolicy = "omit",
+        on_empty: EmptyPolicy = "raise",
+        complex_mode: ComplexMode = "raise",
+    ):
+        self.finite_policy = str(finite_policy).strip().lower()
+        self.on_empty = str(on_empty).strip().lower()
+        self.complex_mode = str(complex_mode).strip().lower()
+
+    def out_value_unit(self, in_unit: str, freq_unit: str) -> str:
+        _ = freq_unit
+        return str(in_unit or "").strip()
+
+    def _prep(
+        self,
+        freq: np.ndarray,
+        vals: np.ndarray,
+        *,
+        who: str,
+        complex_mode: Optional[str] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, Optional[float]]:
+        """
+        Подготовка данных: 1-D + сортировка + finite_policy + (опц.) complex->real.
+        """
+        f, y = ensure_1d(freq, vals, who)
+        f, y = sort_by_freq(f, y)
+
+        f2, y2, empty = _apply_finite_policy_xy(
+            f, y,
+            finite_policy=self.finite_policy,
+            on_empty=self.on_empty,
+            who=who,
+        )
+        if empty is not None:
+            return np.asarray(f2, dtype=float), np.asarray(y2), empty
+
+        _ensure_no_duplicate_freq(np.asarray(f2, dtype=float), who)
+
+        cm = self.complex_mode if complex_mode is None else str(complex_mode).strip().lower()
+        y_real = _coerce_to_real(y2, complex_mode=cm, who=who)
+        return np.asarray(f2, dtype=float), y_real, None
 
 
-def _bandwidth(f_ghz: np.ndarray) -> float:
-    """Ширина диапазона частот (в ГГц). Если точек < 2, возвращает 1.0 как безопасный масштаб."""
-    if f_ghz.size >= 2:
-        return float(f_ghz[-1] - f_ghz[0])
-    return 1.0
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# БАЗОВЫЕ ПРОСТЫЕ АГРЕГАТОРЫ
-# ────────────────────────────────────────────────────────────────────────────
 
 @register_aggregator("max")
-class MaxAgg(BaseAggregator):
-    """Возвращает максимум значений."""
-    def __call__(self, _: np.ndarray, vals: np.ndarray) -> float:
-        _ensure_non_empty(vals, "MaxAgg")
-        return float(np.max(vals))
+class MaxAgg(_SimpleAggBase):
+    """Максимум по кривой."""
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        _, y, empty = self._prep(freq, vals, who="MaxAgg")
+        if empty is not None:
+            return empty
+        return float(np.max(y))
 
 
 @register_aggregator("min")
-class MinAgg(BaseAggregator):
-    """Возвращает минимум значений."""
-    def __call__(self, _: np.ndarray, vals: np.ndarray) -> float:
-        _ensure_non_empty(vals, "MinAgg")
-        return float(np.min(vals))
+class MinAgg(_SimpleAggBase):
+    """Минимум по кривой."""
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        _, y, empty = self._prep(freq, vals, who="MinAgg")
+        if empty is not None:
+            return empty
+        return float(np.min(y))
 
 
 @register_aggregator("mean")
-class MeanAgg(BaseAggregator):
-    """Возвращает среднее значений."""
-    def __call__(self, _: np.ndarray, vals: np.ndarray) -> float:
-        _ensure_non_empty(vals, "MeanAgg")
-        return float(np.mean(vals))
-
-
-@register_aggregator("ripple")
-class RippleAgg(BaseAggregator):
-    """Разброс (max - min)."""
-    def __call__(self, _: np.ndarray, vals: np.ndarray) -> float:
-        _ensure_non_empty(vals, "RippleAgg")
-        return float(np.max(vals) - np.min(vals))
+class MeanAgg(_SimpleAggBase):
+    """Среднее арифметическое."""
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        _, y, empty = self._prep(freq, vals, who="MeanAgg")
+        if empty is not None:
+            return empty
+        return float(np.mean(y))
 
 
 @register_aggregator("std")
-class StdAgg(BaseAggregator):
-    """Стандартное отклонение (population std)."""
-    def __call__(self, _: np.ndarray, vals: np.ndarray) -> float:
-        _ensure_non_empty(vals, "StdAgg")
-        return float(np.std(vals))
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# ИНТЕГРАЛЬНЫЕ АГРЕГАТОРЫ ДЛЯ ГЛАДКИХ ЦЕЛЕЙ (БЕЗ ЗНАКА)
-# ────────────────────────────────────────────────────────────────────────────
-
-@register_aggregator(("upint", "UpIntAgg"))
-class UpIntAgg(BaseAggregator):
+class StdAgg(_SimpleAggBase):
     """
-    Интегральная мера ВЕРХНИХ нарушений для целей вида `value ≤ limit`.
+    Стандартное отклонение (population std, ddof=0).
 
-    Формально:
-        lim(f) = константа или функция от частоты (в ГГц)
-        viol = clip(vals - lim(f), 0, +inf)
-        acc  = mean(viol**p)   или   trapz(viol**p, f)
-        out  = acc / norm_factor
+    Используется как мера разброса/неравномерности, когда важно «в среднем».
     """
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        _, y, empty = self._prep(freq, vals, who="StdAgg")
+        if empty is not None:
+            return empty
+        return float(np.std(y, ddof=0))
+
+
+@register_aggregator("ripple")
+class RippleAgg(_SimpleAggBase):
+    """
+    Размах: max - min.
+
+    Удобен как простая метрика «неравномерности» без выбора опорной линии.
+    """
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        _, y, empty = self._prep(freq, vals, who="RippleAgg")
+        if empty is not None:
+            return empty
+        return float(np.max(y) - np.min(y))
+
+
+@register_aggregator(("rms", "RMSAgg"))
+class RMSAgg(_SimpleAggBase):
+    """
+    Среднеквадратичное значение:
+        RMS = sqrt(mean(y^2))
+
+    Полезно для «энергетических» метрик и сглаженных штрафов.
+    """
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        _, y, empty = self._prep(freq, vals, who="RMSAgg")
+        if empty is not None:
+            return empty
+        return float(np.sqrt(np.mean(y * y)))
+
+
+@register_aggregator(("abs_max", "AbsMaxAgg"))
+class AbsMaxAgg(BaseAggregator):
+    """
+    Максимум модуля |y|.
+
+    Этот агрегатор корректно работает для complex без дополнительных режимов.
+    """
+
+    expects_freq_unit: Optional[str] = None
+    expects_value_unit: Optional[Union[str, Sequence[str]]] = None
+
+    def __init__(self, *, finite_policy: FinitePolicy = "omit", on_empty: EmptyPolicy = "raise"):
+        self.finite_policy = str(finite_policy).strip().lower()
+        self.on_empty = str(on_empty).strip().lower()
+
+    def out_value_unit(self, in_unit: str, freq_unit: str) -> str:
+        _ = freq_unit
+        return str(in_unit or "").strip()
+
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        f, y = ensure_1d(freq, vals, "AbsMaxAgg")
+        f, y = sort_by_freq(f, y)
+
+        _, y2, empty = _apply_finite_policy_xy(
+            f, y,
+            finite_policy=self.finite_policy,
+            on_empty=self.on_empty,
+            who="AbsMaxAgg",
+        )
+        if empty is not None:
+            return empty
+
+        _ensure_no_duplicate_freq(np.asarray(f, dtype=float), "AbsMaxAgg")
+        return float(np.max(np.abs(y2)))
+
+
+@register_aggregator(("abs_mean", "AbsMeanAgg"))
+class AbsMeanAgg(BaseAggregator):
+    """
+    Среднее модуля |y|.
+
+    В отличие от MeanAgg, для complex не возникает неоднозначности.
+    """
+
+    expects_freq_unit: Optional[str] = None
+    expects_value_unit: Optional[Union[str, Sequence[str]]] = None
+
+    def __init__(self, *, finite_policy: FinitePolicy = "omit", on_empty: EmptyPolicy = "raise"):
+        self.finite_policy = str(finite_policy).strip().lower()
+        self.on_empty = str(on_empty).strip().lower()
+
+    def out_value_unit(self, in_unit: str, freq_unit: str) -> str:
+        _ = freq_unit
+        return str(in_unit or "").strip()
+
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        f, y = ensure_1d(freq, vals, "AbsMeanAgg")
+        f, y = sort_by_freq(f, y)
+
+        _, y2, empty = _apply_finite_policy_xy(
+            f, y,
+            finite_policy=self.finite_policy,
+            on_empty=self.on_empty,
+            who="AbsMeanAgg",
+        )
+        if empty is not None:
+            return empty
+
+        _ensure_no_duplicate_freq(np.asarray(f, dtype=float), "AbsMeanAgg")
+        return float(np.mean(np.abs(y2)))
+
+
+@register_aggregator(("quantile", "QuantileAgg"))
+class QuantileAgg(_SimpleAggBase):
+    """
+    Квантиль q (0..1), например q=0.95 — 95% квантиль.
+
+    Полезно вместо max/min, когда важно «почти везде», но допускаются редкие выбросы.
+    """
+
     def __init__(
         self,
-        limit: LimitFunc,
-        p: int = 2,
-        method: str = "mean",
-        normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
-        on_empty: str = "raise",
+        q: float,
+        *,
+        finite_policy: FinitePolicy = "omit",
+        on_empty: EmptyPolicy = "raise",
+        complex_mode: ComplexMode = "raise",
     ):
+        super().__init__(finite_policy=finite_policy, on_empty=on_empty, complex_mode=complex_mode)
+        self.q = float(q)
+        if not (0.0 <= self.q <= 1.0):
+            raise ValueError("QuantileAgg.q должен быть в диапазоне [0, 1]")
+
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        _, y, empty = self._prep(freq, vals, who="QuantileAgg")
+        if empty is not None:
+            return empty
+        return float(np.quantile(y, self.q))
+
+
+@register_aggregator(("percentile", "PercentileAgg"))
+class PercentileAgg(QuantileAgg):
+    """
+    Перцентиль p (0..100), например p=95 — 95-й перцентиль.
+
+    Это удобная форма задания квантиля в процентах.
+    """
+
+    def __init__(
+        self,
+        p: float,
+        *,
+        finite_policy: FinitePolicy = "omit",
+        on_empty: EmptyPolicy = "raise",
+        complex_mode: ComplexMode = "raise",
+    ):
+        pp = float(p)
+        if not (0.0 <= pp <= 100.0):
+            raise ValueError("PercentileAgg.p должен быть в диапазоне [0, 100]")
+        super().__init__(q=pp / 100.0, finite_policy=finite_policy, on_empty=on_empty, complex_mode=complex_mode)
+
+
+# =============================================================================
+# 3) ТОЧЕЧНЫЙ АГРЕГАТОР: ValueAtAgg
+# =============================================================================
+
+@register_aggregator(("value_at", "at_freq", "ValueAtAgg"))
+class ValueAtAgg(BaseAggregator):
+    """
+    Значение кривой в заданной частоте f0 (линейная интерполяция по частоте).
+
+    Параметры
+    ---------
+    f0 : float
+        Опорная частота.
+    f0_unit : str | None
+        Единицы f0. Если None, то f0 считается заданным в тех же единицах,
+        что и входной freq. Если задано (например "MHz"), то в unit-aware режиме
+        f0 будет автоматически приведён к текущему freq_unit.
+    complex_mode : {"raise","abs","real","imag"}
+        Политика для комплексных значений:
+        - "raise" : запретить complex,
+        - "abs"   : вернуть |y(f0)|,
+        - "real"  : вернуть Re(y(f0)),
+        - "imag"  : вернуть Im(y(f0)).
+    finite_policy, on_empty
+        Политики обработки NaN/Inf и пустых данных.
+    """
+
+    expects_freq_unit: Optional[str] = None
+    expects_value_unit: Optional[Union[str, Sequence[str]]] = None
+
+    def __init__(
+        self,
+        f0: float,
+        *,
+        f0_unit: Optional[str] = None,
+        complex_mode: ComplexMode = "raise",
+        finite_policy: FinitePolicy = "omit",
+        on_empty: EmptyPolicy = "raise",
+    ):
+        self.f0 = float(f0)
+        self.f0_unit = None if f0_unit is None else normalize_freq_unit(f0_unit)
+
+        self.complex_mode = str(complex_mode).strip().lower()
+        if self.complex_mode not in _COMPLEX_MODES:
+            raise ValueError(f"ValueAtAgg: complex_mode должен быть один из {_COMPLEX_MODES}")
+
+        self.finite_policy = str(finite_policy).strip().lower()
+        self.on_empty = str(on_empty).strip().lower()
+
+    def out_value_unit(self, in_unit: str, freq_unit: str) -> str:
+        _ = freq_unit
+        return str(in_unit or "").strip()
+
+    def aggregate(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str, value_unit: str) -> float:
+        f_unit = normalize_freq_unit(freq_unit)
+        f0 = self.f0
+        if self.f0_unit is not None:
+            f0 = _convert_freq_scalar(f0, self.f0_unit, f_unit)
+
+        return self._value_at(freq, vals, f0=f0)
+
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        # Режим совместимости: f0 считается заданным в единицах входного freq.
+        return self._value_at(freq, vals, f0=self.f0)
+
+    def _value_at(self, freq: np.ndarray, vals: np.ndarray, *, f0: float) -> float:
+        f, y = ensure_1d(freq, vals, "ValueAtAgg")
+        f, y = sort_by_freq(f, y)
+
+        f2, y2, empty = _apply_finite_policy_xy(
+            f, y,
+            finite_policy=self.finite_policy,
+            on_empty=self.on_empty,
+            who="ValueAtAgg",
+        )
+        if empty is not None:
+            return empty
+
+        f2 = np.asarray(f2, dtype=float)
+        _ensure_no_duplicate_freq(f2, "ValueAtAgg")
+
+        if f0 < float(f2[0]) or f0 > float(f2[-1]):
+            raise ValueError(f"ValueAtAgg: f0={float(f0)} вне диапазона [{float(f2[0])}, {float(f2[-1])}]")
+
+        if np.iscomplexobj(y2):
+            # interp_at_scalar умеет интерполировать complex в рамках линейной интерполяции
+            y0 = interp_at_scalar(f2, np.asarray(y2, dtype=np.complex128), float(f0))
+            if self.complex_mode == "abs":
+                return float(np.abs(y0))
+            if self.complex_mode == "real":
+                return float(np.real(y0))
+            if self.complex_mode == "imag":
+                return float(np.imag(y0))
+            raise TypeError("ValueAtAgg: комплексные значения не поддержаны (complex_mode='raise')")
+
+        y0r = interp_at_scalar(f2, np.asarray(y2, dtype=float), float(f0))
+        return float(y0r)
+
+
+# =============================================================================
+# 4) ИНТЕГРАЛЬНЫЕ АГРЕГАТОРЫ
+# =============================================================================
+
+class _IntegralAggBase(BaseAggregator):
+    """
+    База для интегральных агрегаторов.
+
+    Особенности:
+    - валидирует 1-D и сортирует частотную ось,
+    - требует вещественные значения (complex запрещён),
+    - поддерживает basis="native"|"Hz" для устранения зависимости от единиц freq.
+
+    Метод свёртки (method):
+    - "mean"  : среднее по точкам (не зависит от масштаба freq),
+    - "trapz" : интеграл по частоте (зависит от масштаба freq, поэтому часто полезен basis="Hz").
+    """
+
+    expects_freq_unit: Optional[str] = None
+    expects_value_unit: Optional[Union[str, Sequence[str]]] = None
+
+    def __init__(
+        self,
+        *,
+        method: IntegralMethod = "mean",
+        finite_policy: FinitePolicy = "omit",
+        on_empty: EmptyPolicy = "raise",
+        normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
+        basis: FreqBasis = "native",
+    ):
+        self.method = str(method).strip().lower()
+        if self.method not in _INTEGRAL_METHODS:
+            raise ValueError(f"method должен быть один из {_INTEGRAL_METHODS}")
+
+        self.finite_policy = str(finite_policy).strip().lower()
+        self.on_empty = str(on_empty).strip().lower()
+
+        self.normalize = normalize
+
+        self.basis = str(basis).strip()
+        if self.basis not in _FREQ_BASIS:
+            raise ValueError(f"basis должен быть один из {_FREQ_BASIS}")
+
+    def out_value_unit(self, in_unit: str, freq_unit: str) -> str:
+        # Интегральные метрики обычно трактуются как «штраф/score» (безразмерные),
+        # так как содержат нормировку, степени p и т.п.
+        _ = in_unit
+        _ = freq_unit
+        return ""
+
+    def _prep_real(
+        self,
+        freq: np.ndarray,
+        vals: np.ndarray,
+        *,
+        who: str,
+    ) -> Tuple[np.ndarray, np.ndarray, Optional[float]]:
+        f, y = ensure_1d(freq, vals, who)
+        f, y = sort_by_freq(f, y)
+
+        if np.iscomplexobj(y):
+            raise TypeError(f"{who}: ожидаются вещественные значения; преобразуйте данные Transform-ом")
+
+        f2, y2, empty = _apply_finite_policy_xy(
+            f, y.astype(float, copy=False),
+            finite_policy=self.finite_policy,
+            on_empty=self.on_empty,
+            who=who,
+        )
+        if empty is not None:
+            return np.asarray(f2, dtype=float), np.asarray(y2, dtype=float), empty
+
+        return np.asarray(f2, dtype=float), np.asarray(y2, dtype=float), None
+
+    def _basis_freq(self, f: np.ndarray, *, freq_unit: str) -> np.ndarray:
+        """
+        Частота в базисе интегрирования:
+        - native: f как есть,
+        - Hz    : f, приведённая к Гц по freq_unit.
+        """
+        f = np.asarray(f, dtype=float)
+        if self.basis == "native":
+            return f
+
+        fu = normalize_freq_unit(freq_unit)
+        return f * float(freq_unit_scale_to_hz(fu))
+
+    def _reduce(self, f_basis: np.ndarray, v: np.ndarray) -> float:
+        if self.method == "mean":
+            return float(np.mean(v))
+        return _trapz(v, f_basis)
+
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:  # pragma: no cover
+        raise NotImplementedError
+
+
+@register_aggregator(("upint", "UpIntAgg"))
+class UpIntAgg(_IntegralAggBase):
+    """
+    Интегральная мера верхних нарушений для ограничений вида:
+        vals <= limit(f)
+
+    Определение:
+        r(f)    = vals(f) - limit(f)
+        viol(f) = clip(r(f), 0, +inf)
+        acc     = mean(viol^p)  или  trapz(viol^p, f_basis)
+        out     = acc / norm_factor(...)
+
+    Замечания:
+    - limit задаётся в единицах vals (value_unit), и должен быть согласован по смыслу.
+    - basis="Hz" полезен для "trapz", чтобы интеграл имел одинаковый смысл при любом freq_unit.
+    """
+
+    def __init__(
+        self,
+        limit: LineSpec,
+        p: int = 2,
+        *,
+        method: IntegralMethod = "mean",
+        normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
+        finite_policy: FinitePolicy = "omit",
+        on_empty: EmptyPolicy = "raise",
+        basis: FreqBasis = "native",
+    ):
+        super().__init__(method=method, normalize=normalize, finite_policy=finite_policy, on_empty=on_empty, basis=basis)
         self.limit = limit
         self.p = int(p)
-        self.method = str(method)
-        self.normalize = normalize
-        self.on_empty = str(on_empty)
+        if self.p <= 0:
+            raise ValueError("p должен быть положительным целым")
 
-    def __call__(self, freq_ghz: np.ndarray, vals: np.ndarray) -> float:
-        if vals.size == 0:
-            if self.on_empty == "ok":
-                return 0.0
-            raise ValueError("UpIntAgg: пустой массив значений (диапазон не попал в сетку)")
+    def aggregate(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str, value_unit: str) -> float:
+        return self._compute(freq, vals, freq_unit=freq_unit)
 
-        f = freq_ghz.astype(float)
-        lim = _as_limit_fn(self.limit)(f)  # shape = (N,)
-        viol = np.clip(vals - lim, 0.0, None)  # верхние нарушения
-        v = viol ** self.p
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        # Режим совместимости: basis="native" эквивалентен, basis="Hz" требует unit-aware вызова.
+        if self.basis == "Hz":
+            raise ValueError("UpIntAgg(basis='Hz') требует вызова aggregate(..., freq_unit=...)")
+        return self._compute(freq, vals, freq_unit="GHz")  # значение не используется при basis='native'
 
-        if self.method == "trapz":
-            raw = _trapz(v, f)
-        elif self.method == "mean":
-            raw = float(np.mean(v))
-        else:
-            raise ValueError("UpIntAgg.method должен быть 'mean' или 'trapz'")
+    def _compute(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str) -> float:
+        f, v0, empty = self._prep_real(freq, vals, who="UpIntAgg")
+        if empty is not None:
+            return empty
+        _ensure_no_duplicate_freq(f, "UpIntAgg")
 
-        scale = _norm_factor(self.normalize, f, lim)
-        return raw / scale
+        lim = _eval_line(self.limit, f, who="UpIntAgg.limit").astype(float, copy=False)
+        f, v0, lim, empty2 = _apply_finite_policy_xyz(
+            f, v0, lim,
+            finite_policy=self.finite_policy,
+            on_empty=self.on_empty,
+            who="UpIntAgg",
+        )
+        if empty2 is not None:
+            return empty2
+
+        r = v0 - lim
+        viol = np.clip(r, 0.0, None)
+        vv = viol ** self.p
+
+        f_basis = self._basis_freq(f, freq_unit=freq_unit)
+        raw = self._reduce(f_basis, vv)
+
+        # Для нормировки по bandwidth используем тот же базис частоты, что и для интеграла.
+        Z = _norm_factor(self.normalize, f_basis, lim)
+        return raw / Z
 
 
 @register_aggregator(("loint", "LoIntAgg"))
-class LoIntAgg(BaseAggregator):
+class LoIntAgg(_IntegralAggBase):
     """
-    Интегральная мера НИЖНИХ нарушений для целей вида `value ≥ limit`.
+    Интегральная мера нижних нарушений для ограничений вида:
+        vals >= limit(f)
 
-    Формально:
-        lim(f) = константа или функция от частоты (в ГГц)
-        viol = clip(lim(f) - vals, 0, +inf)
-        acc  = mean(viol**p)   или   trapz(viol**p, f)
-        out  = acc / norm_factor
+    Определение:
+        r(f)    = limit(f) - vals(f)
+        viol(f) = clip(r(f), 0, +inf)
+        acc     = mean(viol^p)  или  trapz(viol^p, f_basis)
+        out     = acc / norm_factor(...)
     """
+
     def __init__(
         self,
-        limit: LimitFunc,
+        limit: LineSpec,
         p: int = 2,
-        method: str = "mean",
+        *,
+        method: IntegralMethod = "mean",
         normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
-        on_empty: str = "raise",
+        finite_policy: FinitePolicy = "omit",
+        on_empty: EmptyPolicy = "raise",
+        basis: FreqBasis = "native",
     ):
+        super().__init__(method=method, normalize=normalize, finite_policy=finite_policy, on_empty=on_empty, basis=basis)
         self.limit = limit
         self.p = int(p)
-        self.method = str(method)
-        self.normalize = normalize
-        self.on_empty = str(on_empty)
+        if self.p <= 0:
+            raise ValueError("p должен быть положительным целым")
 
-    def __call__(self, freq_ghz: np.ndarray, vals: np.ndarray) -> float:
-        if vals.size == 0:
-            if self.on_empty == "ok":
-                return 0.0
-            raise ValueError("LoIntAgg: пустой массив значений (диапазон не попал в сетку)")
+    def aggregate(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str, value_unit: str) -> float:
+        return self._compute(freq, vals, freq_unit=freq_unit)
 
-        f = freq_ghz.astype(float)
-        lim = _as_limit_fn(self.limit)(f)
-        viol = np.clip(lim - vals, 0.0, None)  # нижние нарушения
-        v = viol ** self.p
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        if self.basis == "Hz":
+            raise ValueError("LoIntAgg(basis='Hz') требует вызова aggregate(..., freq_unit=...)")
+        return self._compute(freq, vals, freq_unit="GHz")
 
-        if self.method == "trapz":
-            raw = _trapz(v, f)
-        elif self.method == "mean":
-            raw = float(np.mean(v))
-        else:
-            raise ValueError("LoIntAgg.method должен быть 'mean' или 'trapz'")
+    def _compute(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str) -> float:
+        f, v0, empty = self._prep_real(freq, vals, who="LoIntAgg")
+        if empty is not None:
+            return empty
+        _ensure_no_duplicate_freq(f, "LoIntAgg")
 
-        scale = _norm_factor(self.normalize, f, lim)
-        return raw / scale
+        lim = _eval_line(self.limit, f, who="LoIntAgg.limit").astype(float, copy=False)
+        f, v0, lim, empty2 = _apply_finite_policy_xyz(
+            f, v0, lim,
+            finite_policy=self.finite_policy,
+            on_empty=self.on_empty,
+            who="LoIntAgg",
+        )
+        if empty2 is not None:
+            return empty2
+
+        r = lim - v0
+        viol = np.clip(r, 0.0, None)
+        vv = viol ** self.p
+
+        f_basis = self._basis_freq(f, freq_unit=freq_unit)
+        raw = self._reduce(f_basis, vv)
+
+        Z = _norm_factor(self.normalize, f_basis, lim)
+        return raw / Z
 
 
 @register_aggregator(("rippleint", "RippleIntAgg"))
-class RippleIntAgg(BaseAggregator):
+class RippleIntAgg(_IntegralAggBase):
     """
-    Интегральная «неравномерность» относительно опорной линии.
+    Интегральная мера «неравномерности» относительно опорной линии target(f).
 
-    Идея: измеряем отклонения |vals - target(f)|,
-    возможно, игнорируя малые колебания через `deadzone`,
-    затем накапливаем (L¹/L²) и нормируем.
+    Определение:
+        dev_raw(f) = |vals(f) - target(f)|
+        dev(f)     = clip(dev_raw(f) - deadzone, 0, +inf)
+        acc        = mean(dev^p)  или  trapz(dev^p, f_basis)
+        out        = acc / norm_factor(...)
 
-    Формально:
-        tgt(f) = опорная линия (константа, 'mean', 'median', 'linear' или функция)
-        dev_raw = |vals - tgt(f)|
-        dev = clip(dev_raw - deadzone, 0, +inf)
-        acc = mean(dev**p) или trapz(dev**p, f)
-        out = acc / norm_factor
+    target может быть:
+    - float (константа),
+    - "mean"   : константа mean(vals),
+    - "median" : константа median(vals),
+    - "linear" : линейная аппроксимация vals ≈ a + b f,
+    - табличное задание: последовательность точек [(f, y), ...] (линейная интерполяция).
     """
+
     def __init__(
         self,
-        target: Union[str, float, Callable[[np.ndarray], np.ndarray]] = "mean",
+        target: Union[str, float, LineSpec] = "mean",
         deadzone: float = 0.0,
         p: int = 2,
-        method: str = "mean",
+        *,
+        method: IntegralMethod = "mean",
         normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
-        on_empty: str = "raise",
+        finite_policy: FinitePolicy = "omit",
+        on_empty: EmptyPolicy = "raise",
+        basis: FreqBasis = "native",
     ):
+        super().__init__(method=method, normalize=normalize, finite_policy=finite_policy, on_empty=on_empty, basis=basis)
         self.target = target
-        self.deadzone = float(deadzone)
+        self.deadzone = float(max(0.0, deadzone))
         self.p = int(p)
-        self.method = str(method)
-        self.normalize = normalize
-        self.on_empty = str(on_empty)
+        if self.p <= 0:
+            raise ValueError("p должен быть положительным целым")
 
-    def __call__(self, freq_ghz: np.ndarray, vals: np.ndarray) -> float:
-        if vals.size == 0:
-            if self.on_empty == "ok":
-                return 0.0
-            raise ValueError("RippleIntAgg: пустой массив значений (диапазон не попал в сетку)")
+    def aggregate(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str, value_unit: str) -> float:
+        return self._compute(freq, vals, freq_unit=freq_unit)
 
-        f = freq_ghz.astype(float)
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        if self.basis == "Hz":
+            raise ValueError("RippleIntAgg(basis='Hz') требует вызова aggregate(..., freq_unit=...)")
+        return self._compute(freq, vals, freq_unit="GHz")
 
-        # 1) строим опорную линию tgt(f)
-        if callable(self.target):
-            tgt = self.target(f)
-        elif isinstance(self.target, (int, float)):
-            tgt = np.full_like(vals, float(self.target), dtype=float)
-        elif self.target == "mean":
-            tgt = np.full_like(vals, float(np.mean(vals)), dtype=float)
-        elif self.target == "median":
-            tgt = np.full_like(vals, float(np.median(vals)), dtype=float)
-        elif self.target == "linear":
-            # МНК-приближение прямой: vals ≈ a + b f
-            A = np.vstack([np.ones_like(f), f]).T
-            coef, *_ = np.linalg.lstsq(A, vals, rcond=None)  # coef = [a, b]
-            tgt = (coef[0] + coef[1] * f).astype(float)
+    def _compute(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str) -> float:
+        f, v0, empty = self._prep_real(freq, vals, who="RippleIntAgg")
+        if empty is not None:
+            return empty
+        _ensure_no_duplicate_freq(f, "RippleIntAgg")
+
+        # 1) Построение target-линии
+        if isinstance(self.target, (int, float, np.number)):
+            tgt = np.full_like(v0, float(self.target), dtype=float)
         else:
-            raise ValueError("RippleIntAgg.target должен быть {'mean','median','linear'} | float | callable")
+            mode = str(self.target).strip().lower()
+            if mode == "mean":
+                tgt = np.full_like(v0, float(np.mean(v0)), dtype=float)
+            elif mode == "median":
+                tgt = np.full_like(v0, float(np.median(v0)), dtype=float)
+            elif mode == "linear":
+                if f.size < 2:
+                    return _handle_empty_scalar(self.on_empty, "RippleIntAgg")
+                A = np.vstack([np.ones_like(f), f]).T
+                coef, *_ = np.linalg.lstsq(A, v0, rcond=None)
+                tgt = (coef[0] + coef[1] * f).astype(float, copy=False)
+            else:
+                # Не строковый режим -> пробуем интерпретировать как табличное задание
+                tgt = _eval_line(self.target, f, who="RippleIntAgg.target").astype(float, copy=False)
 
-        # 2) модуль отклонений и «мёртвая зона»
-        dev = np.abs(vals - tgt)
+        # 2) Согласованная обработка finite
+        f, v0, tgt, empty2 = _apply_finite_policy_xyz(
+            f, v0, tgt,
+            finite_policy=self.finite_policy,
+            on_empty=self.on_empty,
+            who="RippleIntAgg",
+        )
+        if empty2 is not None:
+            return empty2
+
+        # 3) Отклонения + deadzone
+        dev = np.abs(v0 - tgt)
         if self.deadzone > 0.0:
             dev = np.clip(dev - self.deadzone, 0.0, None)
+        vv = dev ** self.p
 
-        v = dev ** self.p
+        # 4) Усреднение/интеграл
+        f_basis = self._basis_freq(f, freq_unit=freq_unit)
+        raw = self._reduce(f_basis, vv)
 
-        # 3) свёртка по частоте
-        if self.method == "trapz":
-            raw = _trapz(v, f)
-        elif self.method == "mean":
-            raw = float(np.mean(v))
-        else:
-            raise ValueError("RippleIntAgg.method должен быть 'mean' или 'trapz'")
-
-        # 4) нормализация (для 'limit' используем tgt как ref_line)
-        scale = _norm_factor(self.normalize, f, tgt)
-        return raw / scale
+        # Для normalize='limit' используем tgt как ref_line.
+        Z = _norm_factor(self.normalize, f_basis, tgt)
+        return raw / Z
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# ЗНАКОВЫЕ АГРЕГАТОРЫ (минимальный API: rho, p, method, normalize)
-# ────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# 5) SIGNED-АГРЕГАТОРЫ
+# =============================================================================
 
-# Константы поведения «по-умолчанию» (внутренние; не выносить в публичный API)
-_GATE_EPS = 1e-12          # жёсткий порог для отключения награды при наличии нарушений
-_LME_TAU_MIN = 1e-12       # минимальный τ для LME (в тех же единицах, что s_i)
-_LME_TAU_REL = 0.1         # τ = max(τ_min, τ_rel * m), где m = max(s_i)
+_GATE_EPS = 1e-12
+_LME_TAU_MIN = 1e-12
+_LME_TAU_REL = 0.1
 
 
 def _lme_soft_max(s: np.ndarray) -> float:
     """
-    Log-Mean-Exp мягкий максимум для вектора неотрицательных s_i = [r]_-(f_i).
-    Свойства:
-      * Если все s_i=0 → возвращает 0 (нет «ложной» награды).
-      * Гладкая аппроксимация max(s).
-      * τ подбирается автоматически: τ = max(τ_min, τ_rel * m), m=max(s).
+    Log-Mean-Exp мягкий максимум для неотрицательных s_i.
+
+    Идея: использовать гладкий аналог max для устойчивого «поощрения запаса».
     """
+    s = np.asarray(s, dtype=float)
     if s.size == 0:
         return 0.0
-    s = np.asarray(s, dtype=float)
     m = float(np.max(s))
     if m == 0.0:
         return 0.0
     tau = max(_LME_TAU_MIN, _LME_TAU_REL * m)
     z = (s - m) / tau
-    # LME: m + τ * log(mean(exp(z)))
-    # численно стабильно: z ≤ 0, exp(z) ∈ (0,1], mean(exp(z)) ∈ (0,1]
     return float(m + tau * np.log(np.mean(np.exp(z))))
 
 
 def _signed_core(
-    f: np.ndarray,
+    f_basis: np.ndarray,
     r: np.ndarray,
     *,
     p: int,
-    method: str,
+    method: IntegralMethod,
     normalize: Union[str, float, Sequence[Union[str, float]]],
     rho: float,
     ref_for_norm: np.ndarray,
 ) -> float:
     """
-    Общая «начинка» для трёх знаковых агрегаторов.
+    Общая «начинка» signed-метрики.
 
     Вход:
-        f   — вектор частот (ГГц),
-        r   — остаток (хотим r ≤ 0),
-        p, method, normalize — как в интегральных агрегаторах,
-        rho — масштаб разумного запаса для затухания,
-        ref_for_norm — опорная линия для нормировочного фактора Z (как в *_IntAgg).
+    - r(f) — функция нарушения, хотим r <= 0.
+    - f_basis — частота в базисе интегрирования (native или Hz).
+    - ref_for_norm — линия для нормировки (limit/target).
 
     Выход:
-        X = A_plus - Reward, где
-            A_plus  = mean/trapz([r]_+^p)/Z
-            Reward  = 0, если A_plus > eps
-                    = S * exp(-S/rho), S = raw_minus/Z
-            raw_minus = M_τ^p * (BW, если method='trapz'), M_τ = LME([r]_-)
+    - если нарушений нет, метрика может быть < 0 из-за «награды за запас».
     """
+    r = np.asarray(r, dtype=float)
+    f_basis = np.asarray(f_basis, dtype=float)
+    ref_for_norm = np.asarray(ref_for_norm, dtype=float)
+
     if r.size == 0:
-        # Нарушение пустого диапазона — оставляем поведение как у интегральных:
-        # вызывающий класс решит через on_empty ('raise' или вернуть 0).
         return 0.0
 
-    f = f.astype(float)
     p = int(p)
-    method = str(method)
+    if p <= 0:
+        raise ValueError("p должен быть положительным целым")
+
+    mth = str(method).strip().lower()
+    if mth not in _INTEGRAL_METHODS:
+        raise ValueError(f"method должен быть один из {_INTEGRAL_METHODS}")
+
     rho = float(rho)
     if rho <= 0.0:
-        raise ValueError("rho must be > 0")
+        raise ValueError("rho должен быть > 0")
 
-    # 1) Положительная часть: нарушения
+    # 1) Штраф за нарушения (r > 0)
     pos = np.clip(r, 0.0, None) ** p
-    if method == "trapz":
-        raw_plus = _trapz(pos, f)
-    elif method == "mean":
-        raw_plus = float(np.mean(pos))
-    else:
-        raise ValueError("method должен быть 'mean' или 'trapz'")
+    raw_plus = _trapz(pos, f_basis) if mth == "trapz" else float(np.mean(pos))
 
-    Z = _norm_factor(normalize, f, ref_for_norm)
+    Z = _norm_factor(normalize, f_basis, ref_for_norm)
     A_plus = raw_plus / Z
 
-    # 2) Жёсткий gate: если есть нарушения — награды нет
+    # Если нарушения существенные — не начисляем «награду за запас».
     if A_plus > _GATE_EPS:
         return A_plus
 
-    # 3) «Худший запас» — мягкий максимум (LME)
+    # 2) Поощрение запаса (r < 0) — мягкий максимум
     neg = np.clip(-r, 0.0, None)
-    M_tau = _lme_soft_max(neg)    # уже гладко; 0 если запасов нет
-    if method == "trapz":
-        raw_minus = (M_tau ** p) * _bandwidth(f)
-    else:  # 'mean'
-        raw_minus = (M_tau ** p)
+    M = _lme_soft_max(neg)
 
-    # 4) Нормированная величина запаса S и затухающая награда
+    # Масштабируем «награду» совместимо с методом
+    if mth == "trapz":
+        raw_minus = (M ** p) * _bandwidth(f_basis)
+    else:
+        raw_minus = (M ** p)
+
     S = raw_minus / Z
-    # Единственный выбранный закон затухания: S * exp(-S/rho)
-    Reward = S * float(np.exp(-S / rho))
+    reward = S * float(np.exp(-S / rho))
+    return A_plus - reward
 
-    # 5) Итог
-    return A_plus - Reward
+
+class _SignedAggBase(BaseAggregator):
+    """
+    База для signed-агрегаторов.
+
+    Signed-агрегаторы предназначены для задач оптимизации, где полезно:
+    - штрафовать нарушения,
+    - но при отсутствии нарушений предпочитать больший «запас» (margin),
+      не превращая это в жёсткую «гонку в бесконечность».
+
+    Ограничения:
+    - vals должны быть вещественными (complex запрещён),
+    - при basis="Hz" требуется unit-aware вызов aggregate(..., freq_unit=...).
+    """
+
+    expects_freq_unit: Optional[str] = None
+    expects_value_unit: Optional[Union[str, Sequence[str]]] = None
+
+    def __init__(
+        self,
+        p: int = 2,
+        *,
+        method: IntegralMethod = "mean",
+        normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
+        rho: float = 0.25,
+        finite_policy: FinitePolicy = "omit",
+        on_empty: EmptyPolicy = "raise",
+        basis: FreqBasis = "native",
+    ):
+        self.p = int(p)
+        if self.p <= 0:
+            raise ValueError("p должен быть положительным целым")
+
+        self.method = str(method).strip().lower()
+        if self.method not in _INTEGRAL_METHODS:
+            raise ValueError(f"method должен быть один из {_INTEGRAL_METHODS}")
+
+        self.normalize = normalize
+
+        self.rho = float(rho)
+        if self.rho <= 0.0:
+            raise ValueError("rho должен быть > 0")
+
+        self.finite_policy = str(finite_policy).strip().lower()
+        self.on_empty = str(on_empty).strip().lower()
+
+        self.basis = str(basis).strip()
+        if self.basis not in _FREQ_BASIS:
+            raise ValueError(f"basis должен быть один из {_FREQ_BASIS}")
+
+    def out_value_unit(self, in_unit: str, freq_unit: str) -> str:
+        _ = in_unit
+        _ = freq_unit
+        return ""
+
+    def _prep_real(self, freq: np.ndarray, vals: np.ndarray, *, who: str) -> Tuple[np.ndarray, np.ndarray, Optional[float]]:
+        f, y = ensure_1d(freq, vals, who)
+        f, y = sort_by_freq(f, y)
+
+        if np.iscomplexobj(y):
+            raise TypeError(f"{who}: ожидаются вещественные значения; преобразуйте данные Transform-ом")
+
+        f2, y2, empty = _apply_finite_policy_xy(
+            f, y.astype(float, copy=False),
+            finite_policy=self.finite_policy,
+            on_empty=self.on_empty,
+            who=who,
+        )
+        if empty is not None:
+            return np.asarray(f2, dtype=float), np.asarray(y2, dtype=float), empty
+
+        return np.asarray(f2, dtype=float), np.asarray(y2, dtype=float), None
+
+    def _basis_freq(self, f: np.ndarray, *, freq_unit: str) -> np.ndarray:
+        f = np.asarray(f, dtype=float)
+        if self.basis == "native":
+            return f
+        fu = normalize_freq_unit(freq_unit)
+        return f * float(freq_unit_scale_to_hz(fu))
+
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:  # pragma: no cover
+        raise NotImplementedError
 
 
 @register_aggregator(("signed_upint", "SignedUpIntAgg"))
-class SignedUpIntAgg(BaseAggregator):
+class SignedUpIntAgg(_SignedAggBase):
     """
-    Знаковая версия UpIntAgg для целей `value ≤ limit(f)` с минимальным API.
+    Signed-версия ограничения vals <= limit(f).
 
-    Остаток: r(f) = vals - limit(f), хотим r ≤ 0.
-
-    Формула:
-        X = A_plus - Reward
-        A_plus  = mean/trapz([r]_+^p) / Z
-        Reward  = 0, если A_plus > eps
-                = S * exp(-S/rho), S = raw_minus / Z
-        raw_minus = (LME([r]_-))^p * (BW, если method='trapz')
-        Z = _norm_factor(normalize, f, limit(f))
+    r(f) = vals(f) - limit(f), хотим r <= 0.
     """
+
     def __init__(
         self,
-        limit: LimitFunc,
+        limit: LineSpec,
         p: int = 2,
-        method: str = "mean",
-        normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
         *,
+        method: IntegralMethod = "mean",
+        normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
         rho: float = 0.25,
-        on_empty: str = "raise",
+        finite_policy: FinitePolicy = "omit",
+        on_empty: EmptyPolicy = "raise",
+        basis: FreqBasis = "native",
     ):
+        super().__init__(p, method=method, normalize=normalize, rho=rho, finite_policy=finite_policy, on_empty=on_empty, basis=basis)
         self.limit = limit
-        self.p = int(p)
-        self.method = str(method)
-        self.normalize = normalize
-        self.rho = float(rho)
-        self.on_empty = str(on_empty)
 
-    def __call__(self, freq_ghz: np.ndarray, vals: np.ndarray) -> float:
-        if vals.size == 0:
-            if self.on_empty == "ok":
-                return 0.0
-            raise ValueError("SignedUpIntAgg: пустой массив значений (диапазон не попал в сетку)")
+    def aggregate(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str, value_unit: str) -> float:
+        return self._compute(freq, vals, freq_unit=freq_unit)
 
-        f = freq_ghz.astype(float)
-        lim = _as_limit_fn(self.limit)(f)
-        r = vals - lim
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        if self.basis == "Hz":
+            raise ValueError("SignedUpIntAgg(basis='Hz') требует вызова aggregate(..., freq_unit=...)")
+        return self._compute(freq, vals, freq_unit="GHz")
+
+    def _compute(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str) -> float:
+        f, v0, empty = self._prep_real(freq, vals, who="SignedUpIntAgg")
+        if empty is not None:
+            return empty
+        _ensure_no_duplicate_freq(f, "SignedUpIntAgg")
+
+        lim = _eval_line(self.limit, f, who="SignedUpIntAgg.limit").astype(float, copy=False)
+        f, v0, lim, empty2 = _apply_finite_policy_xyz(
+            f, v0, lim,
+            finite_policy=self.finite_policy,
+            on_empty=self.on_empty,
+            who="SignedUpIntAgg",
+        )
+        if empty2 is not None:
+            return empty2
+
+        r = v0 - lim
+        f_basis = self._basis_freq(f, freq_unit=freq_unit)
         return _signed_core(
-            f, r,
+            f_basis,
+            r,
             p=self.p,
             method=self.method,
             normalize=self.normalize,
@@ -534,42 +1354,57 @@ class SignedUpIntAgg(BaseAggregator):
 
 
 @register_aggregator(("signed_loint", "SignedLoIntAgg"))
-class SignedLoIntAgg(BaseAggregator):
+class SignedLoIntAgg(_SignedAggBase):
     """
-    Знаковая версия LoIntAgg для целей `value ≥ limit(f)` с минимальным API.
+    Signed-версия ограничения vals >= limit(f).
 
-    Остаток: r(f) = limit(f) - vals, хотим r ≤ 0.
-
-    Формула идентична SignedUpIntAgg (меняется только определение r и ref_line).
+    r(f) = limit(f) - vals(f), хотим r <= 0.
     """
+
     def __init__(
         self,
-        limit: LimitFunc,
+        limit: LineSpec,
         p: int = 2,
-        method: str = "mean",
-        normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
         *,
+        method: IntegralMethod = "mean",
+        normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
         rho: float = 0.25,
-        on_empty: str = "raise",
+        finite_policy: FinitePolicy = "omit",
+        on_empty: EmptyPolicy = "raise",
+        basis: FreqBasis = "native",
     ):
+        super().__init__(p, method=method, normalize=normalize, rho=rho, finite_policy=finite_policy, on_empty=on_empty, basis=basis)
         self.limit = limit
-        self.p = int(p)
-        self.method = str(method)
-        self.normalize = normalize
-        self.rho = float(rho)
-        self.on_empty = str(on_empty)
 
-    def __call__(self, freq_ghz: np.ndarray, vals: np.ndarray) -> float:
-        if vals.size == 0:
-            if self.on_empty == "ok":
-                return 0.0
-            raise ValueError("SignedLoIntAgg: пустой массив значений (диапазон не попал в сетку)")
+    def aggregate(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str, value_unit: str) -> float:
+        return self._compute(freq, vals, freq_unit=freq_unit)
 
-        f = freq_ghz.astype(float)
-        lim = _as_limit_fn(self.limit)(f)
-        r = lim - vals
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        if self.basis == "Hz":
+            raise ValueError("SignedLoIntAgg(basis='Hz') требует вызова aggregate(..., freq_unit=...)")
+        return self._compute(freq, vals, freq_unit="GHz")
+
+    def _compute(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str) -> float:
+        f, v0, empty = self._prep_real(freq, vals, who="SignedLoIntAgg")
+        if empty is not None:
+            return empty
+        _ensure_no_duplicate_freq(f, "SignedLoIntAgg")
+
+        lim = _eval_line(self.limit, f, who="SignedLoIntAgg.limit").astype(float, copy=False)
+        f, v0, lim, empty2 = _apply_finite_policy_xyz(
+            f, v0, lim,
+            finite_policy=self.finite_policy,
+            on_empty=self.on_empty,
+            who="SignedLoIntAgg",
+        )
+        if empty2 is not None:
+            return empty2
+
+        r = lim - v0
+        f_basis = self._basis_freq(f, freq_unit=freq_unit)
         return _signed_core(
-            f, r,
+            f_basis,
+            r,
             p=self.p,
             method=self.method,
             normalize=self.normalize,
@@ -579,73 +1414,79 @@ class SignedLoIntAgg(BaseAggregator):
 
 
 @register_aggregator(("signed_rippleint", "SignedRippleIntAgg"))
-class SignedRippleIntAgg(BaseAggregator):
+class SignedRippleIntAgg(_SignedAggBase):
     """
-    Знаковая «рябь» относительно опорной линии с допуском deadzone (минимальный API).
+    Signed-«рябь» относительно target линии с допуском deadzone.
 
-    Остаток:
-        построим опорную линию tgt(f) и возьмём
-        r(f) = |vals - tgt(f)| - deadzone, хотим r ≤ 0.
-
-    Формула:
-        X = A_plus - Reward
-        A_plus  = mean/trapz([r]_+^p) / Z
-        Reward  = 0, если A_plus > eps
-                = S * exp(-S/rho), S = raw_minus / Z
-        raw_minus = (LME([r]_-))^p * (BW, если method='trapz')
-        Z = _norm_factor(normalize, f, tgt(f))
+    r(f) = |vals(f) - tgt(f)| - deadzone, хотим r <= 0.
     """
+
     def __init__(
         self,
-        target: Union[str, float, Callable[[np.ndarray], np.ndarray]] = "mean",
+        target: Union[str, float, LineSpec] = "mean",
         deadzone: float = 0.0,
         p: int = 2,
-        method: str = "mean",
-        normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
         *,
+        method: IntegralMethod = "mean",
+        normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
         rho: float = 0.25,
-        on_empty: str = "raise",
+        finite_policy: FinitePolicy = "omit",
+        on_empty: EmptyPolicy = "raise",
+        basis: FreqBasis = "native",
     ):
+        super().__init__(p, method=method, normalize=normalize, rho=rho, finite_policy=finite_policy, on_empty=on_empty, basis=basis)
         self.target = target
         self.deadzone = float(max(0.0, deadzone))
-        self.p = int(p)
-        self.method = str(method)
-        self.normalize = normalize
-        self.rho = float(rho)
-        self.on_empty = str(on_empty)
 
-    def __call__(self, freq_ghz: np.ndarray, vals: np.ndarray) -> float:
-        if vals.size == 0:
-            if self.on_empty == "ok":
-                return 0.0
-            raise ValueError("SignedRippleIntAgg: пустой массив значений (диапазон не попал в сетку)")
+    def aggregate(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str, value_unit: str) -> float:
+        return self._compute(freq, vals, freq_unit=freq_unit)
 
-        f = freq_ghz.astype(float)
+    def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
+        if self.basis == "Hz":
+            raise ValueError("SignedRippleIntAgg(basis='Hz') требует вызова aggregate(..., freq_unit=...)")
+        return self._compute(freq, vals, freq_unit="GHz")
 
-        # Опорная линия tgt(f)
-        if callable(self.target):
-            tgt = self.target(f)
-        elif isinstance(self.target, (int, float)):
-            tgt = np.full_like(vals, float(self.target), dtype=float)
-        elif self.target == "mean":
-            tgt = np.full_like(vals, float(np.mean(vals)), dtype=float)
-        elif self.target == "median":
-            tgt = np.full_like(vals, float(np.median(vals)), dtype=float)
-        elif self.target == "linear":
-            A = np.vstack([np.ones_like(f), f]).T
-            coef, *_ = np.linalg.lstsq(A, vals, rcond=None)
-            tgt = (coef[0] + coef[1] * f).astype(float)
+    def _compute(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str) -> float:
+        f, v0, empty = self._prep_real(freq, vals, who="SignedRippleIntAgg")
+        if empty is not None:
+            return empty
+        _ensure_no_duplicate_freq(f, "SignedRippleIntAgg")
+
+        # target линия
+        if isinstance(self.target, (int, float, np.number)):
+            tgt = np.full_like(v0, float(self.target), dtype=float)
         else:
-            raise ValueError("SignedRippleIntAgg.target должен быть {'mean','median','linear'} | float | callable")
+            mode = str(self.target).strip().lower()
+            if mode == "mean":
+                tgt = np.full_like(v0, float(np.mean(v0)), dtype=float)
+            elif mode == "median":
+                tgt = np.full_like(v0, float(np.median(v0)), dtype=float)
+            elif mode == "linear":
+                if f.size < 2:
+                    return _handle_empty_scalar(self.on_empty, "SignedRippleIntAgg")
+                A = np.vstack([np.ones_like(f), f]).T
+                coef, *_ = np.linalg.lstsq(A, v0, rcond=None)
+                tgt = (coef[0] + coef[1] * f).astype(float, copy=False)
+            else:
+                # Не строковый режим -> пробуем интерпретировать как табличное задание
+                tgt = _eval_line(self.target, f, who="SignedRippleIntAgg.target").astype(float, copy=False)
 
-        dev = np.abs(vals - tgt)
-        if self.deadzone > 0.0:
-            r = dev - self.deadzone
-        else:
-            r = dev  # deadzone=0 → обычная «рябь» вокруг target
+        f, v0, tgt, empty2 = _apply_finite_policy_xyz(
+            f, v0, tgt,
+            finite_policy=self.finite_policy,
+            on_empty=self.on_empty,
+            who="SignedRippleIntAgg",
+        )
+        if empty2 is not None:
+            return empty2
 
+        dev = np.abs(v0 - tgt)
+        r = dev - self.deadzone if self.deadzone > 0.0 else dev
+
+        f_basis = self._basis_freq(f, freq_unit=freq_unit)
         return _signed_core(
-            f, r,
+            f_basis,
+            r,
             p=self.p,
             method=self.method,
             normalize=self.normalize,
@@ -654,15 +1495,30 @@ class SignedRippleIntAgg(BaseAggregator):
         )
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# ПУБЛИЧНЫЙ ЭКСПОРТ
-# ────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# 6) ПУБЛИЧНЫЙ ЭКСПОРТ
+# =============================================================================
 
 __all__ = [
-    # базовые
-    "MaxAgg", "MinAgg", "MeanAgg", "RippleAgg", "StdAgg",
-    # интегральные без знака
-    "UpIntAgg", "LoIntAgg", "RippleIntAgg",
-    # знаковые (минималистичный API)
-    "SignedUpIntAgg", "SignedLoIntAgg", "SignedRippleIntAgg",
+    # простые
+    "MaxAgg",
+    "MinAgg",
+    "MeanAgg",
+    "StdAgg",
+    "RippleAgg",
+    "RMSAgg",
+    "AbsMaxAgg",
+    "AbsMeanAgg",
+    "QuantileAgg",
+    "PercentileAgg",
+    # точечные
+    "ValueAtAgg",
+    # интегральные
+    "UpIntAgg",
+    "LoIntAgg",
+    "RippleIntAgg",
+    # signed (advanced)
+    "SignedUpIntAgg",
+    "SignedLoIntAgg",
+    "SignedRippleIntAgg",
 ]

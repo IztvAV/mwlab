@@ -1,143 +1,208 @@
-#mwlab/opt/objectives/specification.py
+# mwlab/opt/objectives/specification.py
 """
 mwlab.opt.objectives.specification
-==================================
-**Specification** — формализованное «техническое задание» для СВЧ-устройства.
+=================================
 
-* Состоит из *нескольких* `Criterion`-ов, объединённых логическим **AND**.
-* Каждый Criterion — это тройка
-  `Selector` → `Aggregator` → `Comparator`
-  (см. `base.py`, `selectors.py`, `aggregators.py`, `comparators.py`).
+Модуль предоставляет «пользовательский фасад» для формализации требований к СВЧ-устройству
+в терминах mwlab: набор критериев, объединённых логическим AND.
 
-Основные публичные методы
--------------------------
-* `is_ok(net)`     → bool    — выполняется ли ТЗ?
-* `penalty(net)`   → float   — суммарный штраф ≥ 0 (0 ⇔ ОК)
-* `report(net)`    → dict    — подробный отчёт по каждому критерию.
+Зачем нужен отдельный модуль, если есть BaseSpecification?
+----------------------------------------------------------
+В `base.py` определены базовые строительные блоки подсистемы целей/ограничений:
+`BaseCriterion`, `CriterionResult`, `BaseSpecification`.
 
-Пример
--------
->>> # Критерий: |S11| ≤ –22 dB в полосе 2-2.4 ГГц
->>> crit_s11 = BaseCriterion(
-...     selector   = SMagSelector(1, 1, band=(2.0, 2.4), db=True),
-...     aggregator = MaxAgg(),
-...     comparator = LEComparator(limit=-22, unit="dB"),
-...     weight = 1,
-...     name="S11_inband"
-... )
->>>
->>> spec = Specification([crit_s11])
->>> ok = spec.is_ok(net)          # net — skrf.Network
->>> pen = spec.penalty(net)       # 0 → pass
->>> print(spec.report(net))       # подробности
+Концепция Specification
+-----------------------
+Specification = AND-набор Criterion-ов.
+
+Каждый Criterion — композиция:
+    Selector ∘ Transform ∘ Aggregator ∘ Comparator
+
+- Selector извлекает кривую из `skrf.Network`
+- Transform (опционально) предварительно обрабатывает кривую
+- Aggregator сворачивает кривую в скаляр
+- Comparator интерпретирует скаляр как pass/fail и возвращает штраф
+
+Выходные данные (report)
+------------------------
+`report(net)` формируется **из CriterionResult**, который возвращает `BaseCriterion.evaluate()`.
+Таким образом, отчёт:
+- не дублирует вычисления,
+- содержит метаданные единиц (`freq_unit`, `value_unit`),
+- содержит информацию о цепочке компонентов (классы Selector/Transform/Aggregator/Comparator),
+- устойчив к политике NaN/Inf на стороне Comparator.
+
 """
+
 from __future__ import annotations
 
-from typing import Sequence, Dict, Any, Tuple
+from typing import Any, Dict, List, Sequence, Literal
 
 import numpy as np
 import skrf as rf
 
-from .base import BaseCriterion
+from .base import BaseCriterion, BaseSpecification, CriterionResult
 
 
-# ────────────────────────────────────────────────────────────────────────────
-class Specification:
+Reduction = Literal["sum", "mean", "max"]
+
+
+class Specification(BaseSpecification):
     """
-    Коллекция `Criterion`-ов, соединенных операцией «и».
+    Пользовательская спецификация (набор критериев), объединённая логическим AND.
 
     Parameters
     ----------
     criteria : Sequence[BaseCriterion]
-        Список критериев (должен быть непустым).
-    name : str, optional
-        Для логов/отчётов (по-умолчанию “spec”).
+        Непустой список критериев.
+    name : str, default="spec"
+        Имя спецификации для логов/отчётов.
 
     Notes
     -----
-    *Penalty* используется в задачах оптимизации с мягкими ограничениями
-    (cost-function = Σ penalty).  При yield-анализе берется только
-    булево `is_ok`.
+    - В задачах yield/верификации используется `is_ok(net)`.
+    - В задачах оптимизации с мягкими ограничениями используется `penalty(net)`,
+      при этом конкретная форма штрафов определяется компараторами.
     """
 
-    # ---------------------------------------------------------------- init
     def __init__(self, criteria: Sequence[BaseCriterion], *, name: str = "spec"):
         if not criteria:
             raise ValueError("Specification: список criteria пуст")
-        self.criteria: Tuple[BaseCriterion, ...] = tuple(criteria)
-        self.name = str(name)
+        super().__init__(criteria=criteria, name=name)
 
-    # ======================================================================
-    #                       PUBLIC API
-    # ======================================================================
-    # ---------------------------------------------------------------- value helpers
-    def values(self, net: rf.Network) -> Dict[str, float]:
+    # -------------------------------------------------------------------------
+    # Основные операции
+    # -------------------------------------------------------------------------
+    def penalty(self, net: rf.Network, *, reduction: Reduction = "sum") -> float:
         """
-        Возвращает словарь «имя критерия → агрегированное значение».
-        """
-        return {c.name: c.value(net) for c in self.criteria}
-
-    # ---------------------------------------------------------------- is_ok
-    def is_ok(self, net: rf.Network) -> bool:
-        """
-        True, если **все** критерии удовлетворены (pass).
-        """
-        return all(c.is_ok(net) for c in self.criteria)
-
-    # ---------------------------------------------------------------- penalty
-    def penalty(self, net: rf.Network, *, reduce: str = "sum") -> float:
-        """
-        Суммарный штраф ≥ 0.
+        Суммарный штраф по спецификации.
 
         Parameters
         ----------
-        reduce : {'sum', 'mean', 'max'}, default='sum'
-            Как агрегировать individual penalty каждого критерия.
-        """
-        vals = np.fromiter((c.penalty(net) for c in self.criteria), dtype=float)
-        if reduce == "sum":
-            return float(np.sum(vals))
-        if reduce == "mean":
-            return float(np.mean(vals))
-        if reduce == "max":
-            return float(np.max(vals))
-        raise ValueError("reduce должен быть 'sum' | 'mean' | 'max'")
+        reduction : {"sum","mean","max"}, default="sum"
+            Правило свёртки штрафов отдельных критериев:
+            - "sum"  : сумма weighted_penalty
+            - "mean" : среднее weighted_penalty
+            - "max"  : худший критерий (minimax)
 
-    # ---------------------------------------------------------------- report
-    def report(self, net: rf.Network) -> Dict[str, Any]:
+        Returns
+        -------
+        float
+            Итоговый штраф (>=0 для корректно настроенных компараторов).
         """
-        Подробный отчёт по всем критериям + итоговые поля
-        '__all_ok__' и '__penalty__'.
+        return super().penalty(net, reduction=reduction)
+
+    # -------------------------------------------------------------------------
+    # Удобные “срезы” результатов
+    # -------------------------------------------------------------------------
+    def values(self, net: rf.Network) -> Dict[str, float]:
         """
+        Вернуть словарь «имя критерия -> агрегированное значение».
+
+        Замечание:
+        Для согласованности и эффективности значения берутся из `evaluate(net)`,
+        а не вычисляются повторно через `c.value(net)`.
+        """
+        res = self.evaluate(net)
+        return {r.name: float(r.value) for r in res}
+
+    # -------------------------------------------------------------------------
+    # Отчёт
+    # -------------------------------------------------------------------------
+    @staticmethod
+    def _reduce_penalties(values: np.ndarray, reduction: Reduction) -> float:
+        """
+        Внутренняя свёртка штрафов без повторного пересчёта критериев.
+
+        Parameters
+        ----------
+        values : np.ndarray
+            1-D массив штрафов (weighted_penalty).
+        reduction : {"sum","mean","max"}
+            Правило свёртки.
+
+        Returns
+        -------
+        float
+            Сводный штраф.
+        """
+        if values.size == 0:
+            return 0.0
+
+        if reduction == "sum":
+            return float(np.sum(values))
+        if reduction == "mean":
+            return float(np.mean(values))
+        if reduction == "max":
+            return float(np.max(values))
+
+        raise ValueError("reduction должен быть 'sum'|'mean'|'max'")
+
+    def report(self, net: rf.Network, *, reduction: Reduction = "sum") -> Dict[str, Any]:
+        """
+        Подробный отчёт по всем критериям и сводные поля.
+
+        Parameters
+        ----------
+        reduction : {"sum","mean","max"}, default="sum"
+            Как формировать поле '__penalty__' в отчёте.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Структура отчёта. Для удобства человека и сериализации в JSON
+            используется словарь.
+
+        Формат отчёта
+        -------------
+        report[name] = {
+            "value": float,
+            "ok": bool,
+            "raw_penalty": float,
+            "weighted_penalty": float,
+            "weight": float,
+            "units": {"freq": str, "value": str},
+            "chain": {"selector": str, "transform": str, "aggregator": str, "comparator": str},
+        }
+
+        Служебные поля:
+        - "__all_ok__"  : bool  (AND по ok)
+        - "__penalty__" : float (свёртка weighted_penalty по правилу reduce)
+        """
+        results: List[CriterionResult] = self.evaluate(net)
+
         rep: Dict[str, Any] = {}
+        penalties = np.asarray([r.weighted_penalty for r in results], dtype=float)
 
-        for c in self.criteria:
-            val = c.value(net)
-            rep[c.name] = {
-                "value": val,
-                "ok": c.comp.is_ok(val),  # type: ignore[attr-defined]
-                "penalty": c.weight * c.comp.penalty(val),  # type: ignore[attr-defined]
-                "weight": c.weight,
+        for r in results:
+            rep[r.name] = {
+                "value": float(r.value),
+                "ok": bool(r.ok),
+                "raw_penalty": float(r.raw_penalty),
+                "weighted_penalty": float(r.weighted_penalty),
+                "weight": float(r.weight),
+                "units": {
+                    "freq": str(r.freq_unit),
+                    "value": str(r.value_unit),
+                },
+                "chain": {
+                    "selector": str(r.selector),
+                    "transform": str(r.transform),
+                    "aggregator": str(r.aggregator),
+                    "comparator": str(r.comparator),
+                },
             }
 
-        # ←–– сводные показатели считаем до добавления в rep
-        total_penalty = sum(d["penalty"] for d in rep.values())
-        all_ok = all(d["ok"] for d in rep.values())
+        rep["__all_ok__"] = bool(all(r.ok for r in results))
+        rep["__penalty__"] = self._reduce_penalties(penalties, reduction)
 
-        rep["__all_ok__"] = all_ok
-        rep["__penalty__"] = total_penalty
         return rep
 
-    # ---------------------------------------------------------------- len / iter helpers
-    def __len__(self):            # pragma: no cover
-        return len(self.criteria)
+    # -------------------------------------------------------------------------
+    # Представления
+    # -------------------------------------------------------------------------
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"Specification({self.name}, n={len(self.criteria)})"
 
-    def __iter__(self):           # pragma: no cover
-        return iter(self.criteria)
 
-    # ---------------------------------------------------------------- repr / str
-    def __repr__(self):           # pragma: no cover
-        inner = ", ".join(c.name for c in self.criteria)
-        return f"Specification({inner})"
-
-    __str__ = __repr__
+__all__ = ["Specification"]
