@@ -75,6 +75,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from contextlib import contextmanager
 from typing import (
     Callable,
     Dict,
@@ -317,6 +318,22 @@ def handle_empty_curve(
         raise ValueError(f"{who}: empty curve")
 
     return np.asarray([], dtype=float), np.asarray([], dtype=np.dtype(y_dtype))
+
+
+@contextmanager
+def _maybe_disable_validate(component: object, assume_prepared: bool):
+    """
+    Временно отключить validate у компонента, если assume_prepared=True.
+    """
+    if not assume_prepared or not hasattr(component, "validate"):
+        yield
+        return
+    prev = getattr(component, "validate")
+    try:
+        setattr(component, "validate", False)
+        yield
+    finally:
+        setattr(component, "validate", prev)
 
 
 # =============================================================================
@@ -772,6 +789,10 @@ class BaseCriterion:
     - возвращает CriterionResult для отчётности и диагностики.
 
     Валидация совместимости единиц выполняется один раз при создании экземпляра Criterion и не влияет на скорость последующих вычислений.
+
+    Параметр assume_prepared=True отключает повторные проверки/сортировки
+    в Transform/Aggregator с атрибутом validate, предполагая что Selector
+    уже подготовил кривую (1-D, sorted).
     """
 
     def __init__(
@@ -783,6 +804,7 @@ class BaseCriterion:
         transform: Optional[BaseTransform] = None,
         weight: float = 1.0,
         name: str = "",
+        assume_prepared: bool = False,
     ):
         self.selector = selector
         self.transform = transform
@@ -794,6 +816,7 @@ class BaseCriterion:
             raise ValueError("weight must be >= 0")
 
         self.name = name or getattr(selector, "name", "crit")
+        self.assume_prepared = bool(assume_prepared)
 
         #Получаем начальные единицы от селектора
         freq_unit, value_unit = self._initial_units()
@@ -870,12 +893,13 @@ class BaseCriterion:
         freq, vals = self.selector(net)
 
         if self.transform is not None:
-            freq, vals = self.transform.apply(
-                freq,
-                vals,
-                freq_unit=self._freq_unit,
-                value_unit=self._selector_value_unit,
-            )
+            with _maybe_disable_validate(self.transform, self.assume_prepared):
+                freq, vals = self.transform.apply(
+                    freq,
+                    vals,
+                    freq_unit=self._freq_unit,
+                    value_unit=self._selector_value_unit,
+                )
 
         return freq, vals, self._freq_unit, self._value_unit_after_transform
 
@@ -898,7 +922,8 @@ class BaseCriterion:
         во время вычисления дополнительных проверок не выполняется.
         """
         freq, vals, freq_unit, value_unit = self._curve_with_units(net)
-        return float(self.agg.aggregate(freq, vals, freq_unit=freq_unit, value_unit=value_unit))
+        with _maybe_disable_validate(self.agg, self.assume_prepared):
+            return float(self.agg.aggregate(freq, vals, freq_unit=freq_unit, value_unit=value_unit))
 
     def _resolved_units(self) -> Tuple[str, str]:
         """
