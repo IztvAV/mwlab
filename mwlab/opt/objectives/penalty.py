@@ -22,7 +22,7 @@ Penalty & Feasible-Yield objectives for surrogate-based optimization
        J(x) = penalty(x) − α · I{spec.is_ok(net)} · Y_local(x)
 
    где:
-     • `penalty(x) = spec.penalty(surrogate.predict(x), reduce)` — неотрицательный штраф;
+     • `penalty(x) = spec.penalty(surrogate.predict(x), reduction)` — неотрицательный штраф;
      • `I{…}` — индикатор выполнимости *в центральной точке* (без MC);
      • `Y_local(x)` — локальный yield, оцененный методом Монте-Карло
        в окрестности `x` (см. ниже).
@@ -54,7 +54,7 @@ Penalty & Feasible-Yield objectives for surrogate-based optimization
     - обязан реализовывать `predict(x) -> rf.Network` и **желательно**
       `batch_predict(list[dict]) -> list[rf.Network]`.
 * `spec` : `mwlab.opt.objectives.specification.Specification`
-    - обязан предоставлять `is_ok(net)` и `penalty(net, reduce=...)`.
+    - обязан предоставлять `is_ok(net)` и `penalty(net, reduction=...)`.
 
 Зависимости
 -----------
@@ -119,7 +119,7 @@ from mwlab.opt.design.samplers import get_sampler, BaseSampler
 # ────────────────────────────────────────────────────────────────────────────
 
 PointDict = Dict[str, float]
-ReduceMode = str  # {'sum','mean','max'}
+ReductionMode = str  # {'sum','mean','max'}
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -162,7 +162,7 @@ class PenaltyObjective:
         Модель X→S. Должна поддерживать predict(), желательно batch_predict().
     spec : Specification
         Спецификация (не мутируется; guard-bands не поддерживаются).
-    reduce : {'sum','mean','max'}, default='sum'
+    reduction : {'sum','mean','max'}, default='sum'
         Агрегация штрафов по критериям.
     large_penalty : float, default=1e9
         Что возвращать, если surrogate/decoding упал на конкретной точке.
@@ -173,12 +173,12 @@ class PenaltyObjective:
         *,
         surrogate: BaseSurrogate,
         spec: Specification,
-        reduce: ReduceMode = "sum",
+        reduction: ReductionMode = "sum",
         large_penalty: float = 1e9,
     ):
         self.sur = surrogate
         self.spec = spec
-        self.reduce = str(reduce)
+        self.reduction = str(reduction)
         self.large_penalty = float(large_penalty)
 
     # ---------------------------------------------------------------- single
@@ -190,7 +190,7 @@ class PenaltyObjective:
             net = self.sur.predict(x)
             if not _is_network(net):
                 raise TypeError("surrogate.predict() вернул объект, не похожий на rf.Network")
-            return float(self.spec.penalty(net, reduce=self.reduce))
+            return float(self.spec.penalty(net, reduction=self.reduction))
         except Exception as e:  # pragma: no cover
             warnings.warn(
                 f"[PenaltyObjective] ошибка оценки точки {dict(x)}: {e!r} → возвращаю large_penalty",
@@ -218,7 +218,7 @@ class PenaltyObjective:
             try:
                 if not _is_network(net):
                     raise TypeError("batch_predict: элемент не похож на rf.Network")
-                out[i] = float(self.spec.penalty(net, reduce=self.reduce))
+                out[i] = float(self.spec.penalty(net, reduction=self.reduction))
             except Exception:
                 out[i] = self.large_penalty
         return out
@@ -235,7 +235,7 @@ class PenaltyObjective:
                 raise TypeError("surrogate.predict() вернул объект, не похожий на rf.Network")
             rep = self.spec.report(net)
             # добавим верхний уровень удобных полей
-            rep["__objective__"] = float(self.spec.penalty(net, reduce=self.reduce))
+            rep["__objective__"] = float(self.spec.penalty(net, reduction=self.reduction))
             rep["__spec_name__"] = str(self.spec.name)
             return rep
         except Exception as e:  # pragma: no cover
@@ -252,7 +252,7 @@ class PenaltyObjective:
 
     # ---------------------------------------------------------------- repr
     def __repr__(self) -> str:  # pragma: no cover
-        return f"PenaltyObjective(reduce={self.reduce})"
+        return f"PenaltyObjective(reduction={self.reduction})"
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -266,7 +266,7 @@ class FeasibleYieldObjective:
         J(x) = penalty(x) - alpha * I{is_ok(x)} * Y_local(x)
 
     Где:
-      • penalty(x) = spec.penalty(surrogate.predict(x), reduce)
+      • penalty(x) = spec.penalty(surrogate.predict(x), reduction)
         — неотрицательный штраф (у softplus-компараторов > 0).
       • I{is_ok(x)} — индикатор выполнимости в центральной точке (без MC).
       • Y_local(x) — доля pass по локальным технологическим допускам вокруг x
@@ -312,7 +312,7 @@ class FeasibleYieldObjective:
         Вес поощрения yield (масштабируется относительно penalty).
     y_clip_eps : float, default=0.0
         Небольшой клип Y в [y_clip_eps, 1 - y_clip_eps] для численной устойчивости.
-    reduce : {'sum','mean','max'}, default='sum'
+    reduction : {'sum','mean','max'}, default='sum'
         Агрегация штрафов в spec.penalty.
     large_penalty : float, default=1e9
         Возврат при сбоях surrogate/decoding.
@@ -344,7 +344,7 @@ class FeasibleYieldObjective:
         rng: Optional[int] = 2025,
         alpha: float = 0.1,
         y_clip_eps: float = 0.0,
-        reduce: ReduceMode = "sum",
+        reduction: ReductionMode = "sum",
         large_penalty: float = 1e9,
     ):
         # --- базовые сущности
@@ -383,7 +383,7 @@ class FeasibleYieldObjective:
             raise ValueError("y_clip_eps must be in [0, 0.5)")
 
         # --- прочее
-        self.reduce = str(reduce)
+        self.reduction = str(reduction)
         self.large_penalty = float(large_penalty)
 
     # ────────────────────────────────────────────────────────────
@@ -529,7 +529,7 @@ class FeasibleYieldObjective:
             if not _is_network(net):
                 raise TypeError("surrogate.predict() вернул объект, не похожий на rf.Network")
 
-            p = float(self.spec.penalty(net, reduce=self.reduce))
+            p = float(self.spec.penalty(net, reduction=self.reduction))
             if not self.spec.is_ok(net):
                 return p  # infeasible: без MC
 
@@ -564,7 +564,7 @@ class FeasibleYieldObjective:
             try:
                 if not _is_network(net):
                     raise TypeError("batch_predict: элемент не похож на rf.Network")
-                pens[i] = float(self.spec.penalty(net, reduce=self.reduce))
+                pens[i] = float(self.spec.penalty(net, reduction=self.reduction))
                 feas_mask[i] = bool(self.spec.is_ok(net))
             except Exception:
                 pens[i] = math.inf
@@ -600,7 +600,7 @@ class FeasibleYieldObjective:
             net = self.sur.predict(x)
             if not _is_network(net):
                 raise TypeError("surrogate.predict() вернул объект, не похожий на rf.Network")
-            p = float(self.spec.penalty(net, reduce=self.reduce))
+            p = float(self.spec.penalty(net, reduction=self.reduction))
             feas = bool(self.spec.is_ok(net))
 
             if not feas:
@@ -624,7 +624,7 @@ class FeasibleYieldObjective:
 
     def __repr__(self) -> str:  # pragma: no cover
         return (f"FeasibleYieldObjective(alpha={self.alpha}, sampler={self.sampler_name}, "
-                f"n_mc={self.n_mc}, reduce={self.reduce})")
+                f"n_mc={self.n_mc}, reduction={self.reduction})")
 
 
 

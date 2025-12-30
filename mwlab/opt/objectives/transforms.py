@@ -102,6 +102,7 @@ from .base import (
     interp_linear,
     normalize_freq_unit,
     freq_unit_scale_to_hz,
+    temporarily_disable_validate,
     register_transform,
     sort_by_freq,
 )
@@ -202,17 +203,20 @@ class Compose(BaseTransform):
 
     - В unit-aware режиме apply(...) контекст единиц передаётся дальше по цепочке.
     - value_unit обновляется через out_value_unit(), если Transform его реализует.
+    - При validate=False отключает проверки validate у дочерних Transform-ов.
     """
 
-    def __init__(self, transforms: Sequence[BaseTransform]):
+    def __init__(self, transforms: Sequence[BaseTransform], *, validate: bool = True):
         self.transforms: Tuple[BaseTransform, ...] = tuple(transforms)
         self.name = "Compose"
+        self.validate = bool(validate)
 
     def __call__(self, freq: np.ndarray, vals: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        f, y = freq, vals
-        for tr in self.transforms:
-            f, y = tr(f, y)
-        return f, y
+        with temporarily_disable_validate(self.transforms, assume_prepared=not self.validate):
+            f, y = freq, vals
+            for tr in self.transforms:
+                f, y = tr(f, y)
+            return f, y
 
     def apply(
         self,
@@ -222,25 +226,26 @@ class Compose(BaseTransform):
         freq_unit: str,
         value_unit: str,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        f, y = freq, vals
-        fu = normalize_freq_unit(freq_unit)
-        vu = str(value_unit or "")
+        with temporarily_disable_validate(self.transforms, assume_prepared=not self.validate):
+            f, y = freq, vals
+            fu = normalize_freq_unit(freq_unit)
+            vu = str(value_unit or "")
 
-        for tr in self.transforms:
-            fn_apply = getattr(tr, "apply", None)
-            if not callable(fn_apply):
-                # В unit-aware режиме нельзя тихо деградировать в __call__ без контекста единиц.
-                raise TypeError(
-                    f"Compose.apply: transform {tr.__class__.__name__} не поддерживает apply(...). "
-                    "В unit-aware режиме все transforms должны реализовывать apply(...)."
-                )
+            for tr in self.transforms:
+                fn_apply = getattr(tr, "apply", None)
+                if not callable(fn_apply):
+                    # В unit-aware режиме нельзя тихо деградировать в __call__ без контекста единиц.
+                    raise TypeError(
+                        f"Compose.apply: transform {tr.__class__.__name__} не поддерживает apply(...). "
+                        "В unit-aware режиме все transforms должны реализовывать apply(...)."
+                    )
 
-            f, y = fn_apply(f, y, freq_unit=fu, value_unit=vu)
+                f, y = fn_apply(f, y, freq_unit=fu, value_unit=vu)
 
-            fn_out = getattr(tr, "out_value_unit", None)
-            vu = fn_out(vu, fu) if callable(fn_out) else vu
+                fn_out = getattr(tr, "out_value_unit", None)
+                vu = fn_out(vu, fu) if callable(fn_out) else vu
 
-        return f, y
+            return f, y
 
     def out_value_unit(self, in_unit: str, freq_unit: str) -> str:
         """
@@ -337,8 +342,9 @@ class BandTransform(BaseTransform):
 
     def __call__(self, freq: np.ndarray, vals: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         # Совместимость: в __call__ считаем, что band задан в тех же единицах, что и freq.
-        band = _convert_band(self.band, band_unit=None, freq_unit="Hz")
-        return self._apply_band(freq, vals, band)
+        # Никакой конверсии между единицами не выполняется: вызывающий код обязан
+        # задать band и freq в согласованных единицах.
+        return self._apply_band(freq, vals, self.band)
 
     def _apply_band(
         self,
@@ -1282,6 +1288,9 @@ class GroupDelayTransform(BaseTransform):
     ---------
     validate : bool, optional — структурные проверки (1-D, сортировка). По умолчанию True.
     """
+
+    # Чтобы Criterion валидировал совместимость единиц ДО вычислений
+    expects_value_unit = ("rad", "deg")
 
     def __init__(
         self,

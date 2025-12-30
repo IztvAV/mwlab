@@ -967,7 +967,7 @@ class UpIntAgg(_IntegralAggBase):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
-        validate: bool = False,
+        validate: bool = True,
     ):
         super().__init__(
             method=method,
@@ -1041,7 +1041,7 @@ class LoIntAgg(_IntegralAggBase):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
-        validate: bool = False,
+        validate: bool = True,
     ):
         super().__init__(
             method=method,
@@ -1120,7 +1120,7 @@ class RippleIntAgg(_IntegralAggBase):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
-        validate: bool = False,
+        validate: bool = True,
     ):
         super().__init__(
             method=method,
@@ -1329,9 +1329,12 @@ class _SignedAggBase(BaseAggregator):
         return ""
 
     def _prep_real(self, freq: np.ndarray, vals: np.ndarray, *, who: str) -> Tuple[np.ndarray, np.ndarray, Optional[float]]:
-        f, y = ensure_1d(freq, vals, who)
         if self.validate:
+            f, y = ensure_1d(freq, vals, who)
             f, y = sort_by_freq(f, y)
+        else:
+            f = np.asarray(freq)
+            y = np.asarray(vals)
 
         if np.iscomplexobj(y):
             raise TypeError(f"{who}: ожидаются вещественные значения; преобразуйте данные Transform-ом")
@@ -1383,7 +1386,7 @@ class SignedUpIntAgg(_SignedAggBase):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
-        validate: bool = False,
+        validate: bool = True,
     ):
         super().__init__(p,
                          method=method,
@@ -1451,7 +1454,7 @@ class SignedLoIntAgg(_SignedAggBase):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
-        validate: bool = False,
+        validate: bool = True,
     ):
         super().__init__(p,
                          method=method,
@@ -1520,7 +1523,7 @@ class SignedRippleIntAgg(_SignedAggBase):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
-        validate: bool = False,
+        validate: bool = True,
     ):
         super().__init__(p,
                          method=method,

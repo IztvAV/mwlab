@@ -115,7 +115,7 @@ class Specification(BaseSpecification):
     # Отчёт
     # -------------------------------------------------------------------------
     @staticmethod
-    def _reduce_penalties(values: np.ndarray, reduction: Reduction) -> float:
+    def _reduction_penalties(values: np.ndarray, reduction: Reduction) -> float:
         """
         Внутренняя свёртка штрафов без повторного пересчёта критериев.
 
@@ -173,7 +173,7 @@ class Specification(BaseSpecification):
 
         Служебные поля:
         - "__all_ok__"  : bool  (AND по ok)
-        - "__penalty__" : float (свёртка weighted_penalty по правилу reduce)
+        - "__penalty__" : float (свёртка weighted_penalty по правилу reduction)
         """
         results: List[CriterionResult] = self.evaluate(net)
 
@@ -200,7 +200,7 @@ class Specification(BaseSpecification):
             }
 
         rep["__all_ok__"] = bool(all(r.ok for r in results))
-        rep["__penalty__"] = self._reduce_penalties(penalties, reduction)
+        rep["__penalty__"] = self._reduction_penalties(penalties, reduction)
 
         return rep
 

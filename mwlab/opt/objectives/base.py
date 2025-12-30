@@ -321,19 +321,41 @@ def handle_empty_curve(
 
 
 @contextmanager
-def _maybe_disable_validate(component: object, assume_prepared: bool):
+def temporarily_disable_validate(
+    components: Union[object, Iterable[object]],
+    assume_prepared: bool,
+):
     """
-    Временно отключить validate у компонента, если assume_prepared=True.
+    Временно отключить validate у компонента(ов), если assume_prepared=True.
     """
-    if not assume_prepared or not hasattr(component, "validate"):
+    if not assume_prepared:
         yield
         return
-    prev = getattr(component, "validate")
+
+    items: Iterable[object]
+    if isinstance(components, (list, tuple, set)):
+        items = components
+    else:
+        items = (components,)
+
+    prev: List[Tuple[object, object]] = []
+    for component in items:
+        # Отключаем только если validate — именно булев флаг.
+        # Это защищает от случаев, когда validate является методом или property без setter.
+        val = getattr(component, "validate", None)
+        if isinstance(val, (bool, np.bool_)):
+            prev.append((component, val))
+            try:
+                setattr(component, "validate", False)
+            except Exception:
+                # Если атрибут нельзя перезаписать (например, read-only property),
+                # не ломаем вычисление.
+                prev.pop()
     try:
-        setattr(component, "validate", False)
         yield
     finally:
-        setattr(component, "validate", prev)
+        for component, value in prev:
+            setattr(component, "validate", value)
 
 
 # =============================================================================
@@ -341,7 +363,6 @@ def _maybe_disable_validate(component: object, assume_prepared: bool):
 # =============================================================================
 
 T = TypeVar("T")
-
 
 def normalize_alias(alias: str) -> str:
     """
@@ -893,7 +914,7 @@ class BaseCriterion:
         freq, vals = self.selector(net)
 
         if self.transform is not None:
-            with _maybe_disable_validate(self.transform, self.assume_prepared):
+            with temporarily_disable_validate(self.transform, self.assume_prepared):
                 freq, vals = self.transform.apply(
                     freq,
                     vals,
@@ -922,7 +943,7 @@ class BaseCriterion:
         во время вычисления дополнительных проверок не выполняется.
         """
         freq, vals, freq_unit, value_unit = self._curve_with_units(net)
-        with _maybe_disable_validate(self.agg, self.assume_prepared):
+        with temporarily_disable_validate(self.agg, self.assume_prepared):
             return float(self.agg.aggregate(freq, vals, freq_unit=freq_unit, value_unit=value_unit))
 
     def _resolved_units(self) -> Tuple[str, str]:
@@ -1087,6 +1108,7 @@ __all__ = [
     "OnEmpty",
     "norm_on_empty",
     "handle_empty_curve",
+    "temporarily_disable_validate",
     # registry
     "normalize_alias",
     "register_selector",
