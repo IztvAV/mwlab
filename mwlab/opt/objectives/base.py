@@ -74,11 +74,13 @@ Registry-pattern (авторегистрация по alias)
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from contextlib import contextmanager
 from typing import (
+    Any,
     Callable,
     Dict,
+    Generic,
     Iterable,
     List,
     Literal,
@@ -368,94 +370,235 @@ def normalize_alias(alias: str) -> str:
     """
     Нормализует alias для registry:
       - trim
-      - lower()
       - пробелы внутри -> '_'
+     Важно: алиасы/типы считаем case-sensitive (канонический вид задаёт registry).
     """
-    return str(alias).strip().lower().replace(" ", "_")
+    s = str(alias).strip()
+    if not s:
+        raise ValueError("alias не должен быть пустой строкой")
+    return s.replace(" ", "_")
 
-
-def _make_register(
-    reg: Dict[str, Type[T]],
-    kind: str,
-) -> Callable[[Union[str, Iterable[str]]], Callable[[Type[T]], Type[T]]]:
+@dataclass
+class _Registry(Generic[T]):
     """
-    Фабрика декораторов регистрации классов в реестр.
+    Внутренний реестр компонентов (Selector/Transform/Aggregator/Comparator).
 
-    Реестр хранит: alias -> class (НЕ экземпляр).
+    Зачем нужен отдельный класс, а не просто dict?
+    ---------------------------------------------
+    Для сериализации/десериализации (serde) нам важно:
+      1) alias -> class  (чтобы собрать объект из YAML/JSON)
+      2) class -> canonical alias (чтобы стабильно дампить обратно в YAML/JSON)
+      3) class -> все алиасы (для диагностики и обратной совместимости)
+
+    Канонический alias
+    ------------------
+    Каноническим считается ПЕРВЫЙ alias, указанный в декораторе @register_*().
+    Например:
+        @register_selector(("s_mag", "sdb", "smag"))
+    => canonical = "s_mag"
+    Именно его следует использовать при dump().
     """
 
-    def _decor(alias: Union[str, Iterable[str]]):
-        aliases_raw = [alias] if isinstance(alias, str) else list(alias)
-        aliases = [normalize_alias(a) for a in aliases_raw]
+    kind: str
+    alias_to_cls: Dict[str, Type[T]] = field(default_factory=dict)
+    cls_to_aliases: Dict[Type[T], Tuple[str, ...]] = field(default_factory=dict)
+    cls_to_canonical: Dict[Type[T], str] = field(default_factory=dict)
+
+    def register(self, aliases: Union[str, Iterable[str]]) -> Callable[[Type[T]], Type[T]]:
+        """
+        Зарегистрировать класс по одному alias или по списку alias-ов.
+
+        Важно:
+        - все alias нормализуются через normalize_alias()
+        - первый alias становится каноническим (для dump)
+        - конфликт alias (alias уже занят другим классом) -> ошибка при импорте
+        """
+        raw = [aliases] if isinstance(aliases, str) else list(aliases)
+        if not raw:
+            raise ValueError(f"{self.kind}: список aliases пуст")
+
+        norm = tuple(normalize_alias(a) for a in raw)
+        canonical = norm[0]
 
         def _wrap(cls: Type[T]) -> Type[T]:
-            for name in aliases:
-                if name in reg:
-                    raise KeyError(f"{kind.capitalize()} alias '{name}' already exists")
-                reg[name] = cls
-            setattr(cls, "_aliases", aliases)
+            # 1) Проверяем коллизии alias -> другой класс
+            for a in norm:
+                if a in self.alias_to_cls and self.alias_to_cls[a] is not cls:
+                    other = self.alias_to_cls[a]
+                    raise KeyError(
+                        f"{self.kind.capitalize()} alias '{a}' already exists "
+                        f"(registered for {other.__name__}), cannot reuse for {cls.__name__}"
+                    )
+
+            # 2) alias -> class
+            for a in norm:
+                self.alias_to_cls[a] = cls
+
+            # 3) class -> aliases (на случай повторной регистрации/расширения алиасов)
+            prev = self.cls_to_aliases.get(cls, tuple())
+            merged = tuple(dict.fromkeys(prev + norm))  # сохраняем порядок, убираем дубли
+            self.cls_to_aliases[cls] = merged
+
+            # 4) class -> canonical alias (фиксируем один раз)
+            self.cls_to_canonical.setdefault(cls, canonical)
+
+            # 5) Для удобства интроспекции сохраняем информацию на самом классе
+            #    (совместимо с текущей практикой в mwlab).
+            setattr(cls, "_aliases", list(merged))
+            setattr(cls, "_canonical_alias", self.cls_to_canonical[cls])
+
             return cls
 
         return _wrap
 
-    return _decor
+    def resolve_cls(self, alias: str) -> Type[T]:
+        """Получить класс по alias (без создания экземпляра)."""
+        key = normalize_alias(alias)
+        if key not in self.alias_to_cls:
+            available = sorted(self.alias_to_cls.keys())
+            raise KeyError(f"{self.kind.capitalize()} '{alias}' not found. Available: {available}")
+        return self.alias_to_cls[key]
+
+    def get(self, alias: str, **kw) -> T:
+        """
+        Создать экземпляр по alias.
+
+        **kw передаются в конструктор класса.
+        """
+        cls = self.resolve_cls(alias)
+        return cls(**kw)  # type: ignore[misc]
+
+    def canonical(self, obj_or_cls: Union[T, Type[T]]) -> str:
+        """Вернуть канонический alias для класса/экземпляра."""
+        cls: Type[T] = obj_or_cls if isinstance(obj_or_cls, type) else obj_or_cls.__class__
+        if cls not in self.cls_to_canonical:
+            raise KeyError(f"{self.kind}: class {cls.__name__} is not registered")
+        return self.cls_to_canonical[cls]
+
+    def aliases_of(self, obj_or_cls: Union[T, Type[T]]) -> Tuple[str, ...]:
+        """Вернуть все алиасы, зарегистрированные для класса/экземпляра."""
+        cls: Type[T] = obj_or_cls if isinstance(obj_or_cls, type) else obj_or_cls.__class__
+        return self.cls_to_aliases.get(cls, tuple())
+
+    def list_aliases(self) -> List[str]:
+        """Список всех известных alias (отсортированный)."""
+        return sorted(self.alias_to_cls.keys())
 
 
-_SELECTOR_REG: Dict[str, Type["BaseSelector"]] = {}
-_TRANSFORM_REG: Dict[str, Type["BaseTransform"]] = {}
-_AGGREGATOR_REG: Dict[str, Type["BaseAggregator"]] = {}
-_COMPARATOR_REG: Dict[str, Type["BaseComparator"]] = {}
-
-register_selector = _make_register(_SELECTOR_REG, "selector")
-register_transform = _make_register(_TRANSFORM_REG, "transform")
-register_aggregator = _make_register(_AGGREGATOR_REG, "aggregator")
-register_comparator = _make_register(_COMPARATOR_REG, "comparator")
+# --- Конкретные реестры для четырёх видов компонентов ---
+_SELECTOR_REG = _Registry["BaseSelector"]("selector")
+_TRANSFORM_REG = _Registry["BaseTransform"]("transform")
+_AGGREGATOR_REG = _Registry["BaseAggregator"]("aggregator")
+_COMPARATOR_REG = _Registry["BaseComparator"]("comparator")
 
 
-def _get_from_registry(reg: Dict[str, Type[T]], kind: str, alias: str, **kw) -> T:
-    """
-    Унифицированная фабрика получения экземпляра по alias.
-
-    - alias нормализуется
-    - **kw передаются в конструктор класса
-    """
-    key = normalize_alias(alias)
-    if key not in reg:
-        available = sorted(reg.keys())
-        raise KeyError(f"{kind.capitalize()} '{alias}' not found. Available: {available}")
-    return reg[key](**kw)  # type: ignore[misc]
+# --- Декораторы регистрации (совместимы с текущим API) ---
+register_selector = _SELECTOR_REG.register
+register_transform = _TRANSFORM_REG.register
+register_aggregator = _AGGREGATOR_REG.register
+register_comparator = _COMPARATOR_REG.register
 
 
+# --- Фабрики создания экземпляров по alias (совместимы с текущим API) ---
 def get_selector(alias: str, **kw) -> "BaseSelector":
-    return _get_from_registry(_SELECTOR_REG, "selector", alias, **kw)
+    return _SELECTOR_REG.get(alias, **kw)
 
 
 def get_transform(alias: str, **kw) -> "BaseTransform":
-    return _get_from_registry(_TRANSFORM_REG, "transform", alias, **kw)
+    return _TRANSFORM_REG.get(alias, **kw)
 
 
 def get_aggregator(alias: str, **kw) -> "BaseAggregator":
-    return _get_from_registry(_AGGREGATOR_REG, "aggregator", alias, **kw)
+    return _AGGREGATOR_REG.get(alias, **kw)
 
 
 def get_comparator(alias: str, **kw) -> "BaseComparator":
-    return _get_from_registry(_COMPARATOR_REG, "comparator", alias, **kw)
+    return _COMPARATOR_REG.get(alias, **kw)
 
 
 def list_selectors() -> List[str]:
-    return sorted(_SELECTOR_REG.keys())
+    return _SELECTOR_REG.list_aliases()
 
 
 def list_transforms() -> List[str]:
-    return sorted(_TRANSFORM_REG.keys())
+    return _TRANSFORM_REG.list_aliases()
 
 
 def list_aggregators() -> List[str]:
-    return sorted(_AGGREGATOR_REG.keys())
+    return _AGGREGATOR_REG.list_aliases()
 
 
 def list_comparators() -> List[str]:
-    return sorted(_COMPARATOR_REG.keys())
+    return _COMPARATOR_REG.list_aliases()
+
+
+# --- Дополнительный API для serde (дамп/лоад) и диагностики ---
+def resolve_type(kind: str, alias: str) -> Type[Any]:
+    """
+    Вернуть класс компонента по (kind, alias), не создавая экземпляр.
+
+    kind: selector|transform|aggregator|comparator
+    """
+    k = str(kind).strip().lower()
+    if k == "selector":
+        return _SELECTOR_REG.resolve_cls(alias)
+    if k == "transform":
+        return _TRANSFORM_REG.resolve_cls(alias)
+    if k == "aggregator":
+        return _AGGREGATOR_REG.resolve_cls(alias)
+    if k == "comparator":
+        return _COMPARATOR_REG.resolve_cls(alias)
+    raise ValueError("kind должен быть selector|transform|aggregator|comparator")
+
+
+def canonical_type(kind: str, obj_or_cls: Any) -> str:
+    """
+    Вернуть канонический alias для дампа (стабильный `type` в YAML/JSON).
+    """
+    k = str(kind).strip().lower()
+    if k == "selector":
+        return _SELECTOR_REG.canonical(obj_or_cls)
+    if k == "transform":
+        return _TRANSFORM_REG.canonical(obj_or_cls)
+    if k == "aggregator":
+        return _AGGREGATOR_REG.canonical(obj_or_cls)
+    if k == "comparator":
+        return _COMPARATOR_REG.canonical(obj_or_cls)
+    raise ValueError("kind должен быть selector|transform|aggregator|comparator")
+
+
+def aliases_of(kind: str, obj_or_cls: Any) -> Tuple[str, ...]:
+    """
+    Вернуть все alias-ы, зарегистрированные для компонента.
+    Полезно для отчётов, подсказок и обратной совместимости.
+    """
+    k = str(kind).strip().lower()
+    if k == "selector":
+        return _SELECTOR_REG.aliases_of(obj_or_cls)
+    if k == "transform":
+        return _TRANSFORM_REG.aliases_of(obj_or_cls)
+    if k == "aggregator":
+        return _AGGREGATOR_REG.aliases_of(obj_or_cls)
+    if k == "comparator":
+        return _COMPARATOR_REG.aliases_of(obj_or_cls)
+    raise ValueError("kind должен быть selector|transform|aggregator|comparator")
+
+
+def known_types(kind: str) -> Tuple[str, ...]:
+    """
+    Список всех известных `type` (alias) для данного kind.
+    """
+    k = str(kind).strip().lower()
+    if k == "selector":
+        return tuple(_SELECTOR_REG.list_aliases())
+    if k == "transform":
+        return tuple(_TRANSFORM_REG.list_aliases())
+    if k == "aggregator":
+        return tuple(_AGGREGATOR_REG.list_aliases())
+    if k == "comparator":
+        return tuple(_COMPARATOR_REG.list_aliases())
+    raise ValueError("kind должен быть selector|transform|aggregator|comparator")
+
 
 
 # =============================================================================
@@ -1115,6 +1258,10 @@ __all__ = [
     "register_transform",
     "register_aggregator",
     "register_comparator",
+    "resolve_type",
+    "canonical_type",
+    "aliases_of",
+    "known_types",
     "get_selector",
     "get_transform",
     "get_aggregator",

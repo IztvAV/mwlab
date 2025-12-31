@@ -196,7 +196,7 @@ def _convert_fw(
 # =============================================================================
 # Compose — последовательная композиция Transform-ов
 # =============================================================================
-
+@register_transform(("Compose", "compose"))
 class Compose(BaseTransform):
     """
     Последовательная композиция Transform-ов в один объект.
@@ -280,7 +280,7 @@ class Compose(BaseTransform):
 # BandTransform — обрезка диапазона + включение границ интерполяцией
 # =============================================================================
 
-@register_transform(("band", "BandTransform"))
+@register_transform(("BandTransform", "band"))
 class BandTransform(BaseTransform):
     """
     Обрезка кривой по диапазону частот band=(f1, f2).
@@ -422,7 +422,7 @@ class BandTransform(BaseTransform):
 # DedupFreqTransform — нормализация частотной оси (сортировка + дубликаты)
 # =============================================================================
 
-@register_transform(("dedup_freq", "deduplicate_freq", "DedupFreqTransform"))
+@register_transform(("DedupFreqTransform", "dedup_freq", "deduplicate_freq"))
 class DedupFreqTransform(BaseTransform):
     """
     Нормализация частотной оси: сортировка + обработка дубликатов частоты.
@@ -506,11 +506,23 @@ class DedupFreqTransform(BaseTransform):
 
         return np.asarray(uniq_f, dtype=float), np.asarray(y_new, dtype=y_dt)
 
+    def apply(
+        self,
+        freq: np.ndarray,
+        vals: np.ndarray,
+        *,
+        freq_unit: str,
+        value_unit: str,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        # DedupFreq не зависит от единиц; unit-aware режим просто прокидываем.
+        _ = (freq_unit, value_unit)
+        return self(freq, vals)
+
 # =============================================================================
 # SmoothPointsTransform — сглаживание по точкам (оконное усреднение по NS точкам)
 # =============================================================================
 
-@register_transform(("smooth_points", "smooth", "SmoothPointsTransform"))
+@register_transform(("SmoothPointsTransform", "smooth_points", "smooth"))
 class SmoothPointsTransform(BaseTransform):
     """
     Сглаживание по числу точек (оконное среднее по индексу).
@@ -591,7 +603,7 @@ class SmoothPointsTransform(BaseTransform):
 # SmoothApertureTransform — сглаживание по частотной апертуре FW
 # =============================================================================
 
-@register_transform(("smooth_aperture", "smooth_fw", "SmoothApertureTransform"))
+@register_transform(("SmoothApertureTransform", "smooth_aperture", "smooth_fw"))
 class SmoothApertureTransform(BaseTransform):
     """
     Сглаживание по частотной апертуре FW (окно фиксированной ширины по частоте).
@@ -766,7 +778,7 @@ class SmoothApertureTransform(BaseTransform):
 # ResampleTransform — ресэмплинг на равномерную сетку из num_points
 # =============================================================================
 
-@register_transform(("resample", "num_points", "ResampleTransform"))
+@register_transform(("ResampleTransform", "resample", "num_points"))
 class ResampleTransform(BaseTransform):
     """
     Ресэмплинг кривой на равномерную сетку по частоте (между f[0] и f[-1]).
@@ -873,7 +885,7 @@ def _compute_shift_ref(f: np.ndarray, y: np.ndarray, ref: ShiftRef, f0: Optional
 # ShiftTransform — сдвиг уровня: y'(f) = y(f) - y_ref
 # =============================================================================
 
-@register_transform(("shift", "yshifter", "ShiftTransform"))
+@register_transform(("ShiftTransform", "shift", "yshifter"))
 class ShiftTransform(BaseTransform):
     """
     Сдвиг уровня: y'(f) = y(f) - y_ref.
@@ -924,7 +936,7 @@ class ShiftTransform(BaseTransform):
 # ShiftByRefInBandTransform — ref вычисляется только по band, shift применяется ко всей кривой
 # =============================================================================
 
-@register_transform(("shift_in_band", "shift_by_ref_in_band", "ShiftByRefInBandTransform"))
+@register_transform(("ShiftByRefInBandTransform", "shift_in_band", "shift_by_ref_in_band"))
 class ShiftByRefInBandTransform(BaseTransform):
     """
     Сдвиг уровня, где опорное значение y_ref вычисляется только в заданном диапазоне band,
@@ -1021,7 +1033,7 @@ class ShiftByRefInBandTransform(BaseTransform):
 # SignTransform — явное изменение знака
 # =============================================================================
 
-@register_transform(("sign", "SignTransform"))
+@register_transform(("SignTransform", "sign"))
 class SignTransform(BaseTransform):
     """
     Явное изменение знака: y -> sign * y, где sign ∈ {+1, -1}.
@@ -1064,7 +1076,7 @@ class SignTransform(BaseTransform):
 # FiniteTransform — обработка NaN/Inf
 # =============================================================================
 
-@register_transform(("finite", "FiniteTransform"))
+@register_transform(("FiniteTransform", "finite"))
 class FiniteTransform(BaseTransform):
     """
     Политика обработки невалидных значений (NaN/Inf) в кривой.
@@ -1151,7 +1163,7 @@ class FiniteTransform(BaseTransform):
 # DerivativeTransform — численная производная dy/df
 # =============================================================================
 
-@register_transform(("derivative", "diff", "DerivativeTransform"))
+@register_transform(("DerivativeTransform", "derivative", "diff"))
 class DerivativeTransform(BaseTransform):
     """
     Численная производная dy/df по частоте.
@@ -1261,7 +1273,7 @@ class DerivativeTransform(BaseTransform):
 # GroupDelayTransform — ГВЗ как производная фазы по частоте в Гц
 # =============================================================================
 
-@register_transform(("group_delay", "gd", "GroupDelayTransform"))
+@register_transform(("GroupDelayTransform", "group_delay", "gd"))
 class GroupDelayTransform(BaseTransform):
     """
     Групповое время запаздывания (ГВЗ) по фазовой характеристике.
@@ -1379,7 +1391,7 @@ class GroupDelayTransform(BaseTransform):
 # ApertureSlopeTransform — «крутизна» через апертуру FW
 # =============================================================================
 
-@register_transform(("aperture_slope", "slope_fw", "ApertureSlopeTransform"))
+@register_transform(("ApertureSlopeTransform", "aperture_slope", "slope_fw"))
 class ApertureSlopeTransform(BaseTransform):
     """
     «Крутизна» через апертуру FW: (y(fr) - y(fl)) / (fr - fl).

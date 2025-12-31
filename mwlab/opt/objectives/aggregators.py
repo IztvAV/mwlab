@@ -554,7 +554,7 @@ class _SimpleAggBase(BaseAggregator):
 
 
 
-@register_aggregator("max")
+@register_aggregator(("MaxAgg", "max"))
 class MaxAgg(_SimpleAggBase):
     """Максимум по кривой."""
     def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
@@ -564,7 +564,7 @@ class MaxAgg(_SimpleAggBase):
         return float(np.max(y))
 
 
-@register_aggregator("min")
+@register_aggregator(("MinAgg", "min"))
 class MinAgg(_SimpleAggBase):
     """Минимум по кривой."""
     def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
@@ -574,7 +574,7 @@ class MinAgg(_SimpleAggBase):
         return float(np.min(y))
 
 
-@register_aggregator("mean")
+@register_aggregator(("MeanAgg", "mean"))
 class MeanAgg(_SimpleAggBase):
     """Среднее арифметическое."""
     def __call__(self, freq: np.ndarray, vals: np.ndarray) -> float:
@@ -584,7 +584,7 @@ class MeanAgg(_SimpleAggBase):
         return float(np.mean(y))
 
 
-@register_aggregator("std")
+@register_aggregator(("StdAgg", "std"))
 class StdAgg(_SimpleAggBase):
     """
     Стандартное отклонение (population std, ddof=0).
@@ -598,7 +598,7 @@ class StdAgg(_SimpleAggBase):
         return float(np.std(y, ddof=0))
 
 
-@register_aggregator("ripple")
+@register_aggregator(("RippleAgg", "ripple"))
 class RippleAgg(_SimpleAggBase):
     """
     Размах: max - min.
@@ -612,7 +612,7 @@ class RippleAgg(_SimpleAggBase):
         return float(np.max(y) - np.min(y))
 
 
-@register_aggregator(("rms", "RMSAgg"))
+@register_aggregator(("RMSAgg", "rms"))
 class RMSAgg(_SimpleAggBase):
     """
     Среднеквадратичное значение:
@@ -627,7 +627,7 @@ class RMSAgg(_SimpleAggBase):
         return float(np.sqrt(np.mean(y * y)))
 
 
-@register_aggregator(("abs_max", "AbsMaxAgg"))
+@register_aggregator(("AbsMaxAgg", "abs_max"))
 class AbsMaxAgg(_SimpleAggBase):
     """
     Максимум модуля |y|.
@@ -650,7 +650,7 @@ class AbsMaxAgg(_SimpleAggBase):
             return empty
         return float(np.max(y))
 
-@register_aggregator(("abs_mean", "AbsMeanAgg"))
+@register_aggregator(("AbsMeanAgg", "abs_mean"))
 class AbsMeanAgg(_SimpleAggBase):
     """
     Среднее модуля |y|.
@@ -672,7 +672,7 @@ class AbsMeanAgg(_SimpleAggBase):
             return empty
         return float(np.mean(y))
 
-@register_aggregator(("quantile", "QuantileAgg"))
+@register_aggregator(("QuantileAgg", "quantile"))
 class QuantileAgg(_SimpleAggBase):
     """
     Квантиль q (0..1), например q=0.95 — 95% квантиль.
@@ -687,8 +687,13 @@ class QuantileAgg(_SimpleAggBase):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         complex_mode: ComplexMode = "raise",
+        validate: bool = True,
     ):
-        super().__init__(finite_policy=finite_policy, on_empty=on_empty, complex_mode=complex_mode)
+        super().__init__(
+            finite_policy=finite_policy,
+            on_empty=on_empty,
+            complex_mode=complex_mode,
+            validate=validate)
         self.q = float(q)
         if not (0.0 <= self.q <= 1.0):
             raise ValueError("QuantileAgg.q должен быть в диапазоне [0, 1]")
@@ -700,7 +705,7 @@ class QuantileAgg(_SimpleAggBase):
         return float(np.quantile(y, self.q))
 
 
-@register_aggregator(("percentile", "PercentileAgg"))
+@register_aggregator(("PercentileAgg", "percentile"))
 class PercentileAgg(QuantileAgg):
     """
     Перцентиль p (0..100), например p=95 — 95-й перцентиль.
@@ -715,18 +720,24 @@ class PercentileAgg(QuantileAgg):
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         complex_mode: ComplexMode = "raise",
+        validate: bool = True,
     ):
         pp = float(p)
         if not (0.0 <= pp <= 100.0):
             raise ValueError("PercentileAgg.p должен быть в диапазоне [0, 100]")
-        super().__init__(q=pp / 100.0, finite_policy=finite_policy, on_empty=on_empty, complex_mode=complex_mode)
+        super().__init__(
+            q=pp / 100.0,
+            finite_policy=finite_policy,
+            on_empty=on_empty,
+            complex_mode=complex_mode,
+            validate=validate)
 
 
 # =============================================================================
 # 3) ТОЧЕЧНЫЙ АГРЕГАТОР: ValueAtAgg
 # =============================================================================
 
-@register_aggregator(("value_at", "at_freq", "ValueAtAgg"))
+@register_aggregator(("ValueAtAgg", "value_at", "at_freq"))
 class ValueAtAgg(BaseAggregator):
     """
     Значение кривой в заданной частоте f0 (линейная интерполяция по частоте).
@@ -940,7 +951,7 @@ class _IntegralAggBase(BaseAggregator):
         raise NotImplementedError
 
 
-@register_aggregator(("upint", "UpIntAgg"))
+@register_aggregator(("UpIntAgg", "upint"))
 class UpIntAgg(_IntegralAggBase):
     """
     Интегральная мера верхних нарушений для ограничений вида:
@@ -1018,7 +1029,7 @@ class UpIntAgg(_IntegralAggBase):
         return raw / Z
 
 
-@register_aggregator(("loint", "LoIntAgg"))
+@register_aggregator(("LoIntAgg","loint"))
 class LoIntAgg(_IntegralAggBase):
     """
     Интегральная мера нижних нарушений для ограничений вида:
@@ -1090,7 +1101,7 @@ class LoIntAgg(_IntegralAggBase):
         return raw / Z
 
 
-@register_aggregator(("rippleint", "RippleIntAgg"))
+@register_aggregator(("RippleIntAgg", "rippleint"))
 class RippleIntAgg(_IntegralAggBase):
     """
     Интегральная мера «неравномерности» относительно опорной линии target(f).
@@ -1367,7 +1378,7 @@ class _SignedAggBase(BaseAggregator):
         raise NotImplementedError
 
 
-@register_aggregator(("signed_upint", "SignedUpIntAgg"))
+@register_aggregator(("SignedUpIntAgg", "signed_upint"))
 class SignedUpIntAgg(_SignedAggBase):
     """
     Signed-версия ограничения vals <= limit(f).
@@ -1435,7 +1446,7 @@ class SignedUpIntAgg(_SignedAggBase):
         )
 
 
-@register_aggregator(("signed_loint", "SignedLoIntAgg"))
+@register_aggregator(("SignedLoIntAgg", "signed_loint"))
 class SignedLoIntAgg(_SignedAggBase):
     """
     Signed-версия ограничения vals >= limit(f).
@@ -1503,7 +1514,7 @@ class SignedLoIntAgg(_SignedAggBase):
         )
 
 
-@register_aggregator(("signed_rippleint", "SignedRippleIntAgg"))
+@register_aggregator(("SignedRippleIntAgg", "signed_rippleint"))
 class SignedRippleIntAgg(_SignedAggBase):
     """
     Signed-«рябь» относительно target линии с допуском deadzone.

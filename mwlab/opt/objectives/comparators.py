@@ -245,7 +245,7 @@ def _penalty_one_sided(
 # Жёсткие компараторы: <= и >=
 # =============================================================================
 
-@register_comparator(("le", "<="))
+@register_comparator(("LEComparator", "le", "<="))
 class LEComparator(BaseComparator):
     """
     Жёсткое ограничение: value <= limit.
@@ -295,7 +295,7 @@ class LEComparator(BaseComparator):
         return 0.0 if v <= self.limit else 1.0
 
 
-@register_comparator(("ge", ">="))
+@register_comparator(("GEComparator", "ge", ">="))
 class GEComparator(BaseComparator):
     """
     Жёсткое ограничение: value >= limit.
@@ -344,7 +344,7 @@ class GEComparator(BaseComparator):
 # Мягкие одно-сторонние компараторы (степенной / hinge / softplus / huber)
 # =============================================================================
 
-@register_comparator(("soft_le", "power_le"))
+@register_comparator(("SoftLEComparator", "soft_le", "power_le"))
 class SoftLEComparator(LEComparator):
     """
     Мягкое ограничение value <= limit со степенным штрафом:
@@ -387,7 +387,7 @@ class SoftLEComparator(LEComparator):
         return _penalty_one_sided(v - self.limit, kind="power", margin=self.margin, power=self.power)
 
 
-@register_comparator(("soft_ge", "power_ge"))
+@register_comparator(("SoftGEComparator", "soft_ge", "power_ge"))
 class SoftGEComparator(GEComparator):
     """
     Мягкое ограничение value >= limit со степенным штрафом:
@@ -428,7 +428,7 @@ class SoftGEComparator(GEComparator):
         return _penalty_one_sided(self.limit - v, kind="power", margin=self.margin, power=self.power)
 
 
-@register_comparator("hinge_le")
+@register_comparator(("HingeLEComparator", "hinge_le"))
 class HingeLEComparator(LEComparator):
     """
     Hinge (ReLU) штраф для value <= limit:
@@ -469,7 +469,7 @@ class HingeLEComparator(LEComparator):
         return _penalty_one_sided(v - self.limit, kind="hinge", scale=sc)
 
 
-@register_comparator("hinge_ge")
+@register_comparator(("HingeGEComparator", "hinge_ge"))
 class HingeGEComparator(GEComparator):
     """
     Hinge (ReLU) штраф для value >= limit:
@@ -506,7 +506,7 @@ class HingeGEComparator(GEComparator):
         return _penalty_one_sided(self.limit - v, kind="hinge", scale=sc)
 
 
-@register_comparator("softplus_le")
+@register_comparator(("SoftPlusLEComparator", "softplus_le"))
 class SoftPlusLEComparator(LEComparator):
     """
     Гладкий hinge (softplus) для value <= limit:
@@ -552,7 +552,7 @@ class SoftPlusLEComparator(LEComparator):
         )
 
 
-@register_comparator("softplus_ge")
+@register_comparator(("SoftPlusGEComparator", "softplus_ge"))
 class SoftPlusGEComparator(GEComparator):
     """
     Гладкий hinge (softplus) для value >= limit:
@@ -597,7 +597,7 @@ class SoftPlusGEComparator(GEComparator):
         )
 
 
-@register_comparator("huber_le")
+@register_comparator(("HuberLEComparator", "huber_le"))
 class HuberLEComparator(LEComparator):
     """
     Huber-штраф для value <= limit по положительной части (value - limit).
@@ -633,7 +633,7 @@ class HuberLEComparator(LEComparator):
         return _penalty_one_sided(v - self.limit, kind="huber", delta=self.delta)
 
 
-@register_comparator("huber_ge")
+@register_comparator(("HuberGEComparator", "huber_ge"))
 class HuberGEComparator(GEComparator):
     """
     Huber-штраф для value >= limit по положительной части (limit - value).
@@ -671,7 +671,7 @@ class HuberGEComparator(GEComparator):
 # Окно (коридор) low..high и алиас "target ± tol"
 # =============================================================================
 
-@register_comparator(("window", "corridor", "WindowComparator"))
+@register_comparator(("WindowComparator", "window", "corridor"))
 class WindowComparator(BaseComparator):
     """
     Коридор (окно): low <= value <= high.
@@ -769,7 +769,7 @@ class WindowComparator(BaseComparator):
         return float(p_left + p_right)
 
 
-@register_comparator(("target", "TargetComparator"))
+@register_comparator(("TargetComparator", "target"))
 class TargetComparator(WindowComparator):
     """
     Удержание значения около target с допуском ±tol.

@@ -18,7 +18,7 @@ Selector отвечает на вопрос: «**какую именно** ча�
 - `freq` — частотная ось **в единицах `selector.freq_unit`** (канонический вид:
   "Hz", "kHz", "MHz", "GHz"),
 - `vals` — значения кривой **в семантических единицах `selector.value_unit`**
-  (например: "dB", "lin", "rad", "deg", "complex").
+  (например: "db", "lin", "rad", "deg", "complex").
 
 Далее в пайплайне:
     Selector -> Transform -> Aggregator -> Comparator
@@ -54,7 +54,7 @@ Selector **не должен** внедрять инженерные согла�
 
 Численные особенности
 ---------------------
-- Для величин в dB при |S|=0 возможны `-inf`. Это считается нормальным: политику
+- Для величин в db при |S|=0 возможны `-inf`. Это считается нормальным: политику
   обработки NaN/Inf задавайте Transform-ом (например, FiniteTransform).
 - Для производных и derived-метрик (ГВЗ, «крутизна») обычно применяют сначала
   сглаживание/ресэмплинг/finite-policy, и только затем дифференцирование.
@@ -68,7 +68,7 @@ Selector **не должен** внедрять инженерные согла�
    - согласованная сортировка одной частотной оси и нескольких массивов.
 2) Базовые S-селекторы:
    - SComplexSelector: комплексный S_mn(f)
-   - SMagSelector: |S_mn| в lin или dB
+   - SMagSelector: |S_mn| в lin или db
    - PhaseSelector: фаза arg(S_mn) в rad/deg (unwrap опционально)
 3) Пример derived-селектора:
    - AxialRatioSelector: демонстрационный расчёт Axial Ratio по S31/S41
@@ -232,7 +232,7 @@ def _sort_freq_and_apply(
 # 1) SComplexSelector — комплексный S-параметр
 # =============================================================================
 
-@register_selector(("s_complex", "s", "sparam"))
+@register_selector(("SComplexSelector", "s_complex", "s", "sparam"))
 class SComplexSelector(BaseSelector):
     """
     Комплексный S-параметр S_mn(f).
@@ -293,13 +293,13 @@ class SComplexSelector(BaseSelector):
         return freq, s_mn
 
 # =============================================================================
-# 2) SMagSelector — |S_mn| в lin или в dB (стандартное определение)
+# 2) SMagSelector — |S_mn| в lin или в db (стандартное определение)
 # =============================================================================
 
-@register_selector(("s_mag", "sdb", "smag"))
+@register_selector(("SMagSelector", "s_mag", "sdb", "smag"))
 class SMagSelector(BaseSelector):
     """
-    Магнитуда |S_mn| в линейном масштабе или в dB.
+    Магнитуда |S_mn| в линейном масштабе или в db.
 
     Если db=True, возвращается стандартное:
         20*log10(|S|)
@@ -342,8 +342,8 @@ class SMagSelector(BaseSelector):
         self.db = bool(db)
 
         self.freq_unit = normalize_freq_unit(freq_unit)
-        self.value_unit = "dB" if self.db else "lin"
-        self.name = name or f"S{m}{n}_{'dB' if self.db else 'mag'}"
+        self.value_unit = "db" if self.db else "lin"
+        self.name = name or f"S{m}{n}_{'db' if self.db else 'mag'}"
         self.validate = bool(validate)
 
     def __call__(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
@@ -373,7 +373,7 @@ class SMagSelector(BaseSelector):
 # 3) PhaseSelector — фаза S_mn(f)
 # =============================================================================
 
-@register_selector(("phase", "phase_s"))
+@register_selector(("PhaseSelector", "phase", "phase_s"))
 class PhaseSelector(BaseSelector):
     """
     Фазовая характеристика arg(S_mn(f)).
@@ -460,7 +460,7 @@ class PhaseSelector(BaseSelector):
 # 4) AxialRatioSelector — демонстрационный derived-селектор
 # =============================================================================
 
-@register_selector(("axial_ratio", "ar"))
+@register_selector(("AxialRatioSelector", "axial_ratio", "ar"))
 class AxialRatioSelector(BaseSelector):
     """
     Демонстрационный derived-селектор: Axial Ratio по S31/S41 (например, RHCP/LHCP).
@@ -475,14 +475,14 @@ class AxialRatioSelector(BaseSelector):
 
     Возвращает:
       - AR_lin (если db=False)
-      - AR_dB  = 20 log10(AR_lin) (если db=True)
+      - AR_db  = 20 log10(AR_lin) (если db=True)
 
     Parameters
     ----------
     band : (float, float) | None
         Диапазон частот в единицах freq_unit.
     db : bool
-        Возвращать ли AR в dB.
+        Возвращать ли AR в db.
     freq_unit : str
         Единицы частоты на выходе.
     name : str | None
@@ -506,8 +506,8 @@ class AxialRatioSelector(BaseSelector):
         self.db = bool(db)
 
         self.freq_unit = normalize_freq_unit(freq_unit)
-        self.value_unit = "dB" if self.db else "lin"
-        self.name = name or f"AxialRatio_{'dB' if self.db else 'lin'}"
+        self.value_unit = "db" if self.db else "lin"
+        self.name = name or f"AxialRatio_{'db' if self.db else 'lin'}"
         self.validate = bool(validate)
 
     def __call__(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
@@ -551,7 +551,7 @@ class AxialRatioSelector(BaseSelector):
         else:
             vals = ar_lin
 
-        # Здесь сознательно НЕ удаляем -inf в dB (это тоже валидная информация).
+        # Здесь сознательно НЕ удаляем -inf в db (это тоже валидная информация).
         # Фильтруем только явные NaN по частоте/значениям; Inf оставляем как есть.
         ok = np.isfinite(freq) & ~np.isnan(vals)
         freq = np.asarray(freq[ok], dtype=float)
