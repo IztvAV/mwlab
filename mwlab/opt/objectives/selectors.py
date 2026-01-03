@@ -89,12 +89,12 @@ from typing import Optional, Sequence, Tuple
 import numpy as np
 import skrf as rf
 
+from .registry import register_selector
 from .base import (
     BaseSelector,
     convert_freq_from_hz,
     ensure_1d,
     normalize_freq_unit,
-    register_selector,
     sort_by_freq,
 )
 
@@ -266,7 +266,12 @@ class SComplexSelector(BaseSelector):
         name: Optional[str] = None,
         validate: bool = True,
     ):
-        self.m, self.n = _ports_to_0based(m, n)
+        # ВАЖНО для serde:
+        # - m/n храним в 1-based виде (канонический инженерный формат для YAML/JSON)
+        # - 0-based индексы используем только внутренне
+        self.m = int(m)
+        self.n = int(n)
+        self._m0, self._n0 = _ports_to_0based(self.m, self.n)
         self.band = band
 
         self.freq_unit = normalize_freq_unit(freq_unit)
@@ -276,10 +281,10 @@ class SComplexSelector(BaseSelector):
 
     def __call__(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
         if self.validate:
-            _ensure_port_exists(net, self.m, self.n, "SComplexSelector")
+            _ensure_port_exists(net, self._m0, self._n0, "SComplexSelector")
 
         f_hz = np.asarray(net.frequency.f, dtype=float)
-        s_mn = np.asarray(net.s[:, self.m, self.n], dtype=np.complex128)
+        s_mn = np.asarray(net.s[:, self._m0, self._n0], dtype=np.complex128)
 
         if self.validate:
             f_hz, (s_mn,) = _sort_freq_and_apply(f_hz, [s_mn])
@@ -337,7 +342,10 @@ class SMagSelector(BaseSelector):
         name: Optional[str] = None,
         validate: bool = True,
     ):
-        self.m, self.n = _ports_to_0based(m, n)
+        # serde: m/n храним 1-based, вычисления делаем через внутренние 0-based индексы
+        self.m = int(m)
+        self.n = int(n)
+        self._m0, self._n0 = _ports_to_0based(self.m, self.n)
         self.band = band
         self.db = bool(db)
 
@@ -348,14 +356,14 @@ class SMagSelector(BaseSelector):
 
     def __call__(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
         if self.validate:
-            _ensure_port_exists(net, self.m, self.n, "SMagSelector")
+            _ensure_port_exists(net, self._m0, self._n0, "SMagSelector")
 
         f_hz = np.asarray(net.frequency.f, dtype=float)
 
         # scikit-rf:
         # - net.s_mag -> |S| (lin)
         # - net.s_db  -> 20 log10 |S|
-        y = net.s_db[:, self.m, self.n] if self.db else net.s_mag[:, self.m, self.n]
+        y = net.s_db[:, self._m0, self._n0] if self.db else net.s_mag[:, self._m0, self._n0]
         y = np.asarray(y, dtype=np.float64)
 
         if self.validate:
@@ -418,7 +426,10 @@ class PhaseSelector(BaseSelector):
         name: Optional[str] = None,
         validate: bool = True,
     ):
-        self.m, self.n = _ports_to_0based(m, n)
+        # serde: m/n храним 1-based; для net.s используем внутренние индексы 0-based
+        self.m = int(m)
+        self.n = int(n)
+        self._m0, self._n0 = _ports_to_0based(self.m, self.n)
         self.band = band
         self.unwrap = bool(unwrap)
 
@@ -434,10 +445,10 @@ class PhaseSelector(BaseSelector):
 
     def __call__(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
         if self.validate:
-            _ensure_port_exists(net, self.m, self.n, "PhaseSelector")
+            _ensure_port_exists(net, self._m0, self._n0, "PhaseSelector")
 
         f_hz = np.asarray(net.frequency.f, dtype=float)
-        s_mn = np.asarray(net.s[:, self.m, self.n], dtype=np.complex128)
+        s_mn = np.asarray(net.s[:, self._m0, self._n0], dtype=np.complex128)
 
         if self.validate:
             f_hz, (s_mn,) = _sort_freq_and_apply(f_hz, [s_mn])

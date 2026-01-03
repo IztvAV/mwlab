@@ -91,6 +91,7 @@ from typing import Optional, Sequence, Tuple, Union, Literal
 
 import numpy as np
 
+from .registry import register_transform
 from .base import (
     BaseTransform,
     OnEmpty,
@@ -103,7 +104,6 @@ from .base import (
     normalize_freq_unit,
     freq_unit_scale_to_hz,
     temporarily_disable_validate,
-    register_transform,
     sort_by_freq,
 )
 
@@ -1100,7 +1100,7 @@ class FiniteTransform(BaseTransform):
         on_empty: str = "raise",
         validate: bool = True,
     ):
-        self.mode = str(mode).lower()
+        self.mode = str(mode).strip().lower()
         if self.mode not in ("drop", "raise", "fill"):
             raise ValueError("FiniteTransform.mode должен быть 'drop'|'raise'|'fill'")
 
@@ -1188,12 +1188,18 @@ class DerivativeTransform(BaseTransform):
         on_empty: str = "raise",
         validate: bool = True,
     ):
-        self.method = str(method).lower()
+        self.method = str(method).strip().lower()
         if self.method not in ("diff", "gradient"):
             raise ValueError("DerivativeTransform.method должен быть 'diff' или 'gradient'")
 
-        self.basis = str(basis)
-        if self.basis not in ("native", "Hz"):
+        # Serde-friendly: допускаем разные регистры, но храним канонически.
+        b_raw = str(basis).strip()
+        b = b_raw.lower()
+        if b == "native":
+            self.basis = "native"
+        elif b == "hz":
+            self.basis = "Hz"
+        else:
             raise ValueError("DerivativeTransform.basis должен быть 'native' или 'Hz'")
 
         self.abs_value = bool(abs_value)

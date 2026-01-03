@@ -58,7 +58,7 @@ from typing import Iterable
 # Базы и реестры/фабрики (ядро API)
 # ---------------------------------------------------------------------------
 
-from .base import (
+from .registry import (
     # реестры/регистрация
     register_selector,
     register_transform,
@@ -69,6 +69,21 @@ from .base import (
     get_transform,
     get_aggregator,
     get_comparator,
+    # диагностика/serde-утилиты
+    list_selectors,
+    list_transforms,
+    list_aggregators,
+    list_comparators,
+    resolve_type,
+    canonical_type,
+    aliases_of,
+    known_types,
+    known_canonical_types,
+    list_types,
+    list_canonical_types,
+)
+
+from .base import (
     # базовые абстракции
     BaseSelector,
     BaseTransform,
@@ -132,6 +147,18 @@ __all__ = [
     "get_transform",
     "get_aggregator",
     "get_comparator",
+    # --- диагностика/serde ---
+    "list_selectors",
+    "list_transforms",
+    "list_aggregators",
+    "list_comparators",
+    "resolve_type",
+    "canonical_type",
+    "aliases_of",
+    "known_types",
+    "known_canonical_types",
+    "list_types",
+    "list_canonical_types",
     # --- базовые абстракции ---
     "BaseSelector",
     "BaseTransform",

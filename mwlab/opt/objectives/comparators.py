@@ -57,7 +57,8 @@ from typing import Optional, Tuple, Union, Literal
 
 import numpy as np
 
-from .base import BaseComparator, register_comparator
+from .registry import register_comparator
+from .base import BaseComparator
 
 
 # =============================================================================
@@ -455,7 +456,7 @@ class HingeLEComparator(LEComparator):
             finite_policy=finite_policy,
             non_finite_penalty=non_finite_penalty,
         )
-        self.scale_param = scale
+        self.scale = scale
 
     def penalty(self, value: float) -> float:
         v = float(value)
@@ -465,7 +466,7 @@ class HingeLEComparator(LEComparator):
                 non_finite_penalty=self.non_finite_penalty,
             )
             return p
-        sc = _resolve_scale_for_limit(self.limit, self.scale_param)
+        sc = _resolve_scale_for_limit(self.limit, self.scale)
         return _penalty_one_sided(v - self.limit, kind="hinge", scale=sc)
 
 
@@ -492,7 +493,7 @@ class HingeGEComparator(GEComparator):
             finite_policy=finite_policy,
             non_finite_penalty=non_finite_penalty,
         )
-        self.scale_param = scale
+        self.scale = scale
 
     def penalty(self, value: float) -> float:
         v = float(value)
@@ -502,7 +503,7 @@ class HingeGEComparator(GEComparator):
                 non_finite_penalty=self.non_finite_penalty,
             )
             return p
-        sc = _resolve_scale_for_limit(self.limit, self.scale_param)
+        sc = _resolve_scale_for_limit(self.limit, self.scale)
         return _penalty_one_sided(self.limit - v, kind="hinge", scale=sc)
 
 
@@ -532,7 +533,7 @@ class SoftPlusLEComparator(LEComparator):
             finite_policy=finite_policy,
             non_finite_penalty=non_finite_penalty,
         )
-        self.scale_param = scale
+        self.scale = scale
         self.beta = _require_positive("beta", beta)
 
     def penalty(self, value: float) -> float:
@@ -543,7 +544,7 @@ class SoftPlusLEComparator(LEComparator):
                 non_finite_penalty=self.non_finite_penalty,
             )
             return p
-        sc = _resolve_scale_for_limit(self.limit, self.scale_param)
+        sc = _resolve_scale_for_limit(self.limit, self.scale)
         return _penalty_one_sided(
             v - self.limit,
             kind="softplus",
@@ -576,7 +577,7 @@ class SoftPlusGEComparator(GEComparator):
             finite_policy=finite_policy,
             non_finite_penalty=non_finite_penalty,
         )
-        self.scale_param = scale
+        self.scale = scale
         self.beta = _require_positive("beta", beta)
 
     def penalty(self, value: float) -> float:
@@ -588,12 +589,12 @@ class SoftPlusGEComparator(GEComparator):
             )
             return p
 
-        sc = _resolve_scale_for_limit(self.limit, self.scale_param)
+        sc = _resolve_scale_for_limit(self.limit, self.scale)
         return _penalty_one_sided(
             self.limit - v,
             kind="softplus",
-            scale = sc,
-            beta = self.beta,
+            scale=sc,
+            beta=self.beta,
         )
 
 
@@ -715,7 +716,7 @@ class WindowComparator(BaseComparator):
         if self.mode not in ("hard", "hinge", "softplus", "huber"):
             raise ValueError("mode должен быть 'hard'|'hinge'|'softplus'|'huber'")
 
-        self.scale_param = scale
+        self.scale = scale
         self.beta = _require_positive("beta", beta)
         self.delta = _require_positive("delta", delta)
 
@@ -752,7 +753,7 @@ class WindowComparator(BaseComparator):
         right_res = v - self.high  # хотим <= 0
 
         if self.mode in ("hinge", "softplus"):
-            sc = _resolve_scale_for_window(self.low, self.high, self.scale_param)
+            sc = _resolve_scale_for_window(self.low, self.high, self.scale)
             if self.mode == "hinge":
                 p_left = _penalty_one_sided(left_res, kind="hinge", scale=sc)
                 p_right = _penalty_one_sided(right_res, kind="hinge", scale=sc)
@@ -793,6 +794,10 @@ class TargetComparator(WindowComparator):
     ):
         t = float(target)
         w = _require_positive("tol", tol)
+        # Важно для serde: TargetComparator.__init__ имеет параметры target/tol,
+        # значит объект обязан их хранить, иначе BaseComparator.serde_params() упадёт.
+        self.target = t
+        self.tol = w
         super().__init__(
             low=t - w,
             high=t + w,

@@ -80,10 +80,11 @@ on_empty:
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Union, Literal, Tuple
+from typing import Optional, Sequence, Union, Literal, Tuple, Any
 
 import numpy as np
 
+from .registry import register_aggregator
 from .base import (
     BaseAggregator,
     ensure_1d,
@@ -91,7 +92,6 @@ from .base import (
     interp_at_scalar,
     normalize_freq_unit,
     freq_unit_scale_to_hz,
-    register_aggregator,
 )
 
 # =============================================================================
@@ -115,6 +115,48 @@ _EMPTY_POLICIES: Tuple[str, ...] = ("raise", "nan", "zero")
 _COMPLEX_MODES: Tuple[str, ...] = ("raise", "abs", "real", "imag")
 _INTEGRAL_METHODS: Tuple[str, ...] = ("mean", "trapz")
 _FREQ_BASIS: Tuple[str, ...] = ("native", "Hz")
+
+
+def _canonicalize_line_spec(line: Any, *, who: str) -> LineSpec:
+    """
+    Привести LineSpec к каноническому JSON/YAML-friendly виду:
+      - float (константа), или
+      - список точек [[f, y], ...] со строго возрастающей частотой.
+
+    Зачем:
+    - пользователь может передать tuple/np.ndarray/np.float64 и т.п.;
+    - для dump нужно гарантировать только python-примитивы.
+    """
+    # 1) Константа
+    if isinstance(line, (int, float, np.number)):
+        return float(line)
+
+    # 2) Табличное задание (не строка!)
+    if isinstance(line, str):
+        raise TypeError(f"{who}: строка не является допустимым LineSpec (ожидается число или [(f,y),...])")
+
+    pts = list(line)  # type: ignore[arg-type]
+    if len(pts) < 2:
+        raise ValueError(f"{who}: табличная линия должна содержать минимум 2 точки [(f, y), ...]")
+
+    fx: list[float] = []
+    fy: list[float] = []
+    for p in pts:
+        if not isinstance(p, (list, tuple)) or len(p) != 2:
+            raise ValueError(f"{who}: каждая точка линии должна иметь вид (f, y)")
+        fx.append(float(p[0]))
+        fy.append(float(p[1]))
+
+    # Канонизируем: сортировка и строгая монотонность
+    idx = np.argsort(np.asarray(fx, dtype=float))
+    fx_arr = np.asarray(fx, dtype=float)[idx]
+    fy_arr = np.asarray(fy, dtype=float)[idx]
+
+    if np.any(np.diff(fx_arr) == 0.0):
+        raise ValueError(f"{who}: в табличной линии обнаружены повторяющиеся значения частоты")
+
+    # Возвращаем именно list[list[float]] (канонический YAML/JSON вид)
+    return [[float(fx_arr[i]), float(fy_arr[i])] for i in range(fx_arr.size)]
 
 
 def _handle_empty_scalar(on_empty: str, who: str) -> float:
@@ -725,6 +767,7 @@ class PercentileAgg(QuantileAgg):
         pp = float(p)
         if not (0.0 <= pp <= 100.0):
             raise ValueError("PercentileAgg.p должен быть в диапазоне [0, 100]")
+        self.p = pp
         super().__init__(
             q=pp / 100.0,
             finite_policy=finite_policy,
@@ -988,7 +1031,7 @@ class UpIntAgg(_IntegralAggBase):
             basis=basis,
             validate=validate,
         )
-        self.limit = limit
+        self.limit = _canonicalize_line_spec(limit, who="UpIntAgg.limit")
         self.p = int(p)
         if self.p <= 0:
             raise ValueError("p должен быть положительным целым")
@@ -1062,7 +1105,7 @@ class LoIntAgg(_IntegralAggBase):
             basis=basis,
             validate=validate,
         )
-        self.limit = limit
+        self.limit = _canonicalize_line_spec(limit, who="LoIntAgg.limit")
         self.p = int(p)
         if self.p <= 0:
             raise ValueError("p должен быть положительным целым")
@@ -1141,7 +1184,12 @@ class RippleIntAgg(_IntegralAggBase):
             basis=basis,
             validate=validate,
         )
-        self.target = target
+        # Канонизируем табличный target, но оставляем строковые режимы ("mean"/"median"/"linear") как есть.
+        if isinstance(target, str) or isinstance(target, (int, float, np.number)):
+            self.target = target
+        else:
+            self.target = _canonicalize_line_spec(target, who="RippleIntAgg.target")  # type: ignore[arg-type]
+
         self.deadzone = float(max(0.0, deadzone))
         self.p = int(p)
         if self.p <= 0:
@@ -1408,7 +1456,7 @@ class SignedUpIntAgg(_SignedAggBase):
                          basis=basis,
                          validate=validate,
                          )
-        self.limit = limit
+        self.limit = _canonicalize_line_spec(limit, who="SignedUpIntAgg.limit")
 
     def aggregate(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str, value_unit: str) -> float:
         return self._compute(freq, vals, freq_unit=freq_unit)
@@ -1476,7 +1524,7 @@ class SignedLoIntAgg(_SignedAggBase):
                          basis=basis,
                          validate=validate,
                          )
-        self.limit = limit
+        self.limit = _canonicalize_line_spec(limit, who="SignedLoIntAgg.limit")
 
     def aggregate(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str, value_unit: str) -> float:
         return self._compute(freq, vals, freq_unit=freq_unit)
@@ -1545,7 +1593,11 @@ class SignedRippleIntAgg(_SignedAggBase):
                          basis=basis,
                          validate=validate,
                          )
-        self.target = target
+        if isinstance(target, str) or isinstance(target, (int, float, np.number)):
+            self.target = target
+        else:
+            self.target = _canonicalize_line_spec(target, who="SignedRippleIntAgg.target")  # type: ignore[arg-type]
+
         self.deadzone = float(max(0.0, deadzone))
 
     def aggregate(self, freq: np.ndarray, vals: np.ndarray, *, freq_unit: str, value_unit: str) -> float:
