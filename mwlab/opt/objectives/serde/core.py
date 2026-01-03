@@ -670,7 +670,7 @@ def _build_transform(
         # Разбираем как ComponentSpec, но transforms — особый ключ
         type_str, params, meta = _parse_componentspec(mp, path, strict=strict)
 
-    # transforms поле обязательно
+        # transforms поле обязательно
         if "transforms" not in params:
             raise SchemaError(path=path.key("params").key("transforms"), message="Compose.params.transforms обязателен")
         tr_list_node = params["transforms"]
@@ -893,7 +893,11 @@ def _build_criterion(
         )
     except ValueError as e:
         # Надёжная классификация через UnitMismatchError (подкласс ValueError из base.py).
-        if isinstance(e, UnitMismatchError) or getattr(e, "kind", None) == "UnitMismatch" or getattr(e, None) == "UnitMismatch":
+        if (
+                isinstance(e, UnitMismatchError)
+                or getattr(e, "kind", None) == "UnitMismatch"
+                or getattr(e, "__mwlab_kind__", None) == "UnitMismatch"
+        ):
             raise UnitMismatch(path=path, message=f"Несовместимость единиц в Criterion '{name}': {e}", cause=e) from e
         raise InvalidValue(path=path, message=f"Ошибка построения Criterion '{name}': {e}", cause=e) from e
     except Exception as e:
