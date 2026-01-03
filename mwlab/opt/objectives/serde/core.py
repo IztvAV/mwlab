@@ -329,6 +329,28 @@ def _normalize_unit_like_strings(params: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _canonical_compose_type() -> Optional[str]:
+    """
+    Вернуть канонический type для transform.Compose (с учётом алиасов/реестра),
+    либо None, если Compose не зарегистрирован.
+    """
+    if not has_type("transform", "Compose"):
+        return None
+    return canonicalize_alias("transform", "Compose")
+
+def _is_compose_type(type_str: str) -> bool:
+    """
+    True, если type_str (возможно алиас) соответствует transform.Compose.
+    """
+    canon_compose = _canonical_compose_type()
+    if canon_compose is None:
+        return False
+    try:
+        return canonicalize_alias("transform", type_str) == canon_compose
+    except Exception:
+        return False
+
+
 # =============================================================================
 # Работа с defaults
 # =============================================================================
@@ -377,6 +399,16 @@ def _merge_defaults(defaults: Mapping[str, Any], params: Mapping[str, Any]) -> D
     for k, v in params.items():
         out[k] = v
     return out
+
+
+def _filter_params_for_cls(cls: type, params: Mapping[str, Any]) -> Dict[str, Any]:
+    """
+    Оставить только те параметры, которые принимает конструктор cls (kwargs).
+    Используется для безопасного применения defaults к "контейнерам" (например Compose),
+    чтобы defaults.transform не ломал сборку цепочек из-за UnknownParam.
+    """
+    allowed = set(_signature_expected_params(cls))
+    return {k: v for k, v in params.items() if k in allowed}
 
 
 # =============================================================================
@@ -506,7 +538,7 @@ def _build_component(
     - node: ComponentSpec dict
     - defaults: defaults для соответствующего вида (selector/transform/...)
     """
-    type_str, params, _meta = _parse_componentspec(node, path, strict=strict)
+    type_str, params, meta = _parse_componentspec(node, path, strict=strict)
 
     # Проверка существования type в registry
     if not has_type(kind, type_str):
@@ -557,8 +589,15 @@ def _build_component(
             cause=e,
         ) from e
 
-    return obj
+    # meta (ComponentSpec.meta): сохраняем в объекте, если возможно (round-trip-friendly)
+    if meta is not None:
+        try:
+            setattr(obj, "meta", meta)
+        except Exception:
+            # если объект "слотовый/замороженный" — игнорируем (MVP)
+            pass
 
+    return obj
 
 def _build_transform(
     node: Any,
@@ -594,13 +633,7 @@ def _build_transform(
             )
             transforms.append(tr)
 
-        # Канонизируем в Compose
-        compose_spec = {
-            "type": "Compose",
-            "params": {"transforms": [_dump_component_dict(tr, explicit=True, canonical_transforms=False) for tr in transforms]},
-        }
-        # При сборке Compose мы хотим использовать реальные объекты transforms,
-        # поэтому пойдём особым путём: построим Compose напрямую.
+        # Канонизируем в Compose (создаём объект напрямую из transforms-объектов)
         return _build_compose_from_objects(
             transforms,
             path,
@@ -611,13 +644,13 @@ def _build_transform(
 
     # Обычный dict ComponentSpec
     mp = _ensure_mapping(node, path, what="Criterion.transform")
-    # Если это Compose с transforms как ComponentSpec list — собираем аккуратно
+    # Если это Compose (в т.ч. алиас) с transforms как ComponentSpec list — собираем аккуратно
     t_val = mp.get("type", None)
-    if isinstance(t_val, str) and t_val.strip() == "Compose":
+    if isinstance(t_val, str) and _is_compose_type(t_val.strip()):
         # Разбираем как ComponentSpec, но transforms — особый ключ
-        type_str, params, _meta = _parse_componentspec(mp, path, strict=strict)
+        type_str, params, meta = _parse_componentspec(mp, path, strict=strict)
 
-        # transforms поле обязательно
+    # transforms поле обязательно
         if "transforms" not in params:
             raise SchemaError(path=path.key("params").key("transforms"), message="Compose.params.transforms обязателен")
         tr_list_node = params["transforms"]
@@ -642,7 +675,7 @@ def _build_transform(
         compose_params = dict(params)
         compose_params.pop("transforms", None)
 
-        return _build_compose_from_objects(
+        obj = _build_compose_from_objects(
             transforms,
             path,
             defaults_transform=defaults_transform,
@@ -650,6 +683,13 @@ def _build_transform(
             require_canonical_types=require_canonical_types,
             extra_params=compose_params,
         )
+        # meta из ComponentSpec для Compose
+        if meta is not None:
+            try:
+                setattr(obj, "meta", meta)
+            except Exception:
+                pass
+        return obj
 
     # Иначе — одиночный transform как компонент
     return _build_component(
@@ -680,7 +720,8 @@ def _build_compose_from_objects(
 
     extra_params: дополнительные params для Compose (например, validate=True).
     """
-    if not has_type("transform", "Compose"):
+    canon_compose = _canonical_compose_type()
+    if canon_compose is None:
         hints = suggest_types("transform", "Compose", canonical_only=True)
         raise UnknownType(
             path=path.key("type"),
@@ -688,26 +729,23 @@ def _build_compose_from_objects(
             hints=hints,
         )
 
-    canonical = canonicalize_alias("transform", "Compose")
-    if require_canonical_types and canonical != "Compose":
-        # Вряд ли случится, но если каноническое имя не "Compose", то строго требуем канон.
-        raise InvalidValue(
-            path=path,
-            message=f"Требуется канонический type='{canonical}' для Compose.",
-        )
-
-    cls = resolve_type("transform", canonical)
+    cls = resolve_type("transform", canon_compose)
 
     # Сформируем параметры Compose: defaults.transform + extra_params + transforms
-    params = {}
-    params.update(defaults_transform)
+    # ВАЖНО: defaults.transform предназначены для leaf-трансформов и могут содержать
+    # параметры, которые Compose не принимает. Поэтому:
+    # - defaults применяем только по пересечению с сигнатурой Compose (без ошибок),
+    # - user-supplied extra_params проверяем строго (ошибки должны быть видны).
+    params: Dict[str, Any] = {}
+    params.update(_filter_params_for_cls(cls, defaults_transform))
     if extra_params:
-        params.update(extra_params)
+        params.update(dict(extra_params))
+
     # Важно: параметр transforms должен быть реальными объектами, а не dict-ами.
     params["transforms"] = list(transforms)
 
     # Проверка сигнатуры: Compose должен принимать transforms
-    _validate_params_against_signature(cls, params, path=path.key("params") if "params" in path.to_string() else path)
+    _validate_params_against_signature(cls, params, path=path.key("params"))
 
     try:
         obj = cls(**params)
@@ -837,8 +875,17 @@ def _build_criterion(
         # Здесь ловятся и unit mismatch, и другие валидаторы, встроенные в BaseCriterion.
         # По контракту unit mismatch — отдельный kind.
         msg = str(e)
-        # Эвристика: если в сообщении есть "единиц" / "freq_unit" / "value_unit", считаем UnitMismatch.
-        if ("единиц" in msg) or ("freq_unit" in msg) or ("value_unit" in msg) or ("Unit" in msg):
+        # ВАЖНО: не определяем UnitMismatch по тексту сообщения (это хрупко).
+        # Пытаемся распознать структурно (по типу/атрибутам), иначе считаем InvalidValue.
+        exc_name = type(e).__name__.lower()
+        is_unit_mismatch = (
+            "unitmismatch" in exc_name
+            or "unit_mismatch" in exc_name
+            or getattr(e, "kind", None) == "UnitMismatch"
+            or getattr(e, "__mwlab_kind__", None) == "UnitMismatch"
+            or bool(getattr(e, "unit_mismatch", False))
+        )
+        if is_unit_mismatch:
             raise UnitMismatch(path=path, message=f"Несовместимость единиц в Criterion '{name}': {e}", cause=e) from e
         raise InvalidValue(path=path, message=f"Ошибка построения Criterion '{name}': {e}", cause=e) from e
     except Exception as e:
@@ -1097,11 +1144,18 @@ def _dump_component_dict(
             # Если не смогли — оставляем explicit
             pass
 
-    out = {"type": type_name}
+    out: Dict[str, Any] = {"type": type_name}
     if params_full:
         out["params"] = params_full
     else:
         out["params"] = {}  # канонично хранить params (по контракту может отсутствовать, но так проще)
+
+    # meta (ComponentSpec.meta): round-trip-friendly
+    if hasattr(obj, "meta"):
+        meta_val = getattr(obj, "meta")
+        if meta_val is not None:
+            out["meta"] = _to_json_friendly(meta_val, SerdePath.root().key("meta"))
+
     return out
 
 
@@ -1128,11 +1182,59 @@ def _dump_transform_field(
         return None
 
     if not canonical_transforms:
+        # Особый случай: Compose часто хранит transforms как объекты, и может
+        # не уметь отдавать их в serde_params(). Чтобы dump по умолчанию был надёжным,
+        # делаем устойчивый dump Compose-цепочки, если объект действительно Compose.
+        try:
+            kind = getattr(transform_obj, "__mwlab_kind__", None)
+            if kind == "transform":
+                canon_compose = _canonical_compose_type()
+                tname = canonical_type("transform", transform_obj)
+                if canon_compose is not None and tname == canon_compose:
+                    chain: List[Any]
+                    if hasattr(transform_obj, "iter_transforms") and callable(getattr(transform_obj, "iter_transforms")):
+                        chain = list(transform_obj.iter_transforms())
+                    elif hasattr(transform_obj, "transforms"):
+                        chain = list(getattr(transform_obj, "transforms"))
+                    else:
+                        raise InvalidValue(path=SerdePath.root().key("transform"), message="Compose не предоставляет iter_transforms()/transforms")
+
+                    transforms_specs = [_dump_component_dict(t, explicit=explicit, canonical_transforms=False) for t in chain]
+
+                    # Доп. параметры Compose (если доступны) — сохраняем, но убираем transforms.
+                    extra_params: Dict[str, Any] = {}
+                    if hasattr(transform_obj, "serde_params") and callable(getattr(transform_obj, "serde_params")):
+                        raw = transform_obj.serde_params() or {}
+                        if not isinstance(raw, dict):
+                            raise InvalidValue(path=SerdePath.root().key("transform").key("params"), message="Compose.serde_params() должен возвращать dict")
+                        raw = dict(raw)
+                        raw.pop("transforms", None)
+                        extra_params = cast(Dict[str, Any], _to_json_friendly(raw, SerdePath.root().key("transform").key("params")))
+                        extra_params = _normalize_unit_like_strings(extra_params)
+
+                    params = dict(extra_params)
+                    params["transforms"] = transforms_specs
+                    out: Dict[str, Any] = {"type": tname, "params": params}
+
+                    # meta
+                    if hasattr(transform_obj, "meta"):
+                        mv = getattr(transform_obj, "meta")
+                        if mv is not None:
+                            out["meta"] = _to_json_friendly(mv, SerdePath.root().key("transform").key("meta"))
+                    return out
+        except SerdeError:
+            raise
+        except Exception:
+            # fallback to generic dump below
+            pass
+
         return _dump_component_dict(transform_obj, explicit=explicit, canonical_transforms=canonical_transforms)
+
 
     # canonical_transforms=True: всегда Compose
     # Требуется, чтобы Compose был зарегистрирован (иначе невозможно гарантировать канон).
-    if not has_type("transform", "Compose"):
+    canon_compose = _canonical_compose_type()
+    if canon_compose is None:
         hints = suggest_types("transform", "Compose", canonical_only=True)
         raise UnknownType(
             path=SerdePath.root().key("transform").key("type"),
@@ -1147,7 +1249,7 @@ def _dump_transform_field(
         chain = [transform_obj]
 
     transforms_specs = [_dump_component_dict(t, explicit=explicit, canonical_transforms=False) for t in chain]
-    return {"type": "Compose", "params": {"transforms": transforms_specs}}
+    return {"type": canon_compose, "params": {"transforms": transforms_specs}}
 
 
 def dump_spec_dict(
