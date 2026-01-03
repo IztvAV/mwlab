@@ -93,6 +93,21 @@ from typing import (
 import numpy as np
 import skrf as rf
 
+# ---------------------------------------------------------------------
+# Serde-critical exception: structural unit mismatch
+# ---------------------------------------------------------------------
+class UnitMismatchError(ValueError):
+    """
+    Структурная ошибка несовместимости единиц в цепочке компонентов.
+
+    ВАЖНО:
+    - Наследуется от ValueError (обратная совместимость).
+    - Используется serde для надёжной классификации ошибки как UnitMismatch.
+    """
+    kind: str = "UnitMismatch"
+    __mwlab_kind__: str = "UnitMismatch"
+
+
 # =============================================================================
 # Частотные единицы: нормализация и конвертеры
 # =============================================================================
@@ -801,13 +816,13 @@ def validate_expected_units(
     vu = normalize_value_unit(actual_value_unit)
 
     if expected_freq is not None and fu not in expected_freq:
-        raise ValueError(
+        raise UnitMismatchError(
             f"{who}: несовместимые единицы частоты для {component_name}: "
             f"получено freq_unit='{fu}', ожидается одно из {list(expected_freq)}"
         )
 
     if expected_value is not None and vu not in expected_value:
-        raise ValueError(
+        raise UnitMismatchError(
             f"{who}: несовместимые единицы/семантика значений для {component_name}: "
             f"получено value_unit='{actual_value_unit}', ожидается одно из {list(expected_value)}"
         )
@@ -1127,6 +1142,7 @@ __all__ = [
     "parse_expected_freq_units",
     "parse_expected_value_units",
     "validate_expected_units",
+    "UnitMismatchError",
     # empty curve helper
     "OnEmpty",
     "norm_on_empty",

@@ -35,13 +35,14 @@ mwlab.opt.objectives.serde.core
 from __future__ import annotations
 
 from dataclasses import is_dataclass, asdict
+import copy
 import json
 import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple, Union, cast
 
 # --- mwlab imports (ядро подсистемы objectives) ---
-from ..base import BaseCriterion, constructor_kw_params, normalize_freq_unit
+from ..base import BaseCriterion, constructor_kw_params, normalize_freq_unit, UnitMismatchError
 from ..registry import (
     canonical_type,
     canonicalize_alias,
@@ -75,6 +76,18 @@ try:
 except Exception:  # pragma: no cover
     yaml = None  # PyYAML не обязателен для JSON
 
+if yaml is not None:
+    # Сделать YAML ближе к JSON-подмножеству:
+    # отключаем неявный резолвер timestamp, чтобы даты не превращались в datetime/date.
+    class _MWLabSafeLoader(yaml.SafeLoader):  # type: ignore[misc]
+        pass
+
+    # Важно: yaml_implicit_resolvers — class-level dict, делаем deepcopy чтобы не менять глобально SafeLoader.
+    _MWLabSafeLoader.yaml_implicit_resolvers = copy.deepcopy(getattr(yaml.SafeLoader, "yaml_implicit_resolvers", {}))
+    for ch, resolvers in list(_MWLabSafeLoader.yaml_implicit_resolvers.items()):
+        _MWLabSafeLoader.yaml_implicit_resolvers[ch] = [
+            r for r in resolvers if r and r[0] != "tag:yaml.org,2002:timestamp"
+        ]
 
 # =============================================================================
 # Константы контракта v1
@@ -266,6 +279,13 @@ def _walk_and_validate_primitives(
         return node
     if isinstance(node, float):
         if not math.isfinite(node):
+            _raise_non_finite(path, node)
+        return node
+    # complex может появиться после декодирования __complex__ маркера
+    if isinstance(node, complex):
+        re_v = float(node.real)
+        im_v = float(node.imag)
+        if not (math.isfinite(re_v) and math.isfinite(im_v)):
             _raise_non_finite(path, node)
         return node
     if isinstance(node, str):
@@ -872,20 +892,8 @@ def _build_criterion(
             assume_prepared=assume_prepared,
         )
     except ValueError as e:
-        # Здесь ловятся и unit mismatch, и другие валидаторы, встроенные в BaseCriterion.
-        # По контракту unit mismatch — отдельный kind.
-        msg = str(e)
-        # ВАЖНО: не определяем UnitMismatch по тексту сообщения (это хрупко).
-        # Пытаемся распознать структурно (по типу/атрибутам), иначе считаем InvalidValue.
-        exc_name = type(e).__name__.lower()
-        is_unit_mismatch = (
-            "unitmismatch" in exc_name
-            or "unit_mismatch" in exc_name
-            or getattr(e, "kind", None) == "UnitMismatch"
-            or getattr(e, "__mwlab_kind__", None) == "UnitMismatch"
-            or bool(getattr(e, "unit_mismatch", False))
-        )
-        if is_unit_mismatch:
+        # Надёжная классификация через UnitMismatchError (подкласс ValueError из base.py).
+        if isinstance(e, UnitMismatchError) or getattr(e, "kind", None) == "UnitMismatch" or getattr(e, None) == "UnitMismatch":
             raise UnitMismatch(path=path, message=f"Несовместимость единиц в Criterion '{name}': {e}", cause=e) from e
         raise InvalidValue(path=path, message=f"Ошибка построения Criterion '{name}': {e}", cause=e) from e
     except Exception as e:
@@ -926,8 +934,10 @@ def load_spec_dict(
     root = SerdePath.root()
     mp = _ensure_mapping(doc, root, what="Документ спецификации")
 
-    # Сначала строгая проверка примитивности и запретов NaN/Inf во всём документе
-    validated_doc = _walk_and_validate_primitives(mp, root, decode_complex=True)
+    # Сначала строгая проверка примитивности и запретов NaN/Inf во всём документе.
+    # ВАЖНО: здесь НЕ декодируем __complex__ (иначе complex "протечёт" в следующий проход валидации params).
+    validated_doc = _walk_and_validate_primitives(mp, root, decode_complex=False)
+
     assert isinstance(validated_doc, dict)
     mp = validated_doc
 
@@ -1249,8 +1259,34 @@ def _dump_transform_field(
         chain = [transform_obj]
 
     transforms_specs = [_dump_component_dict(t, explicit=explicit, canonical_transforms=False) for t in chain]
-    return {"type": canon_compose, "params": {"transforms": transforms_specs}}
 
+    # ВАЖНО: canonical_transforms не должен приводить к потере информации.
+    # Если исходный объект реально Compose, сохраняем его дополнительные params и meta.
+    extra_params: Dict[str, Any] = {}
+    is_compose_obj = False
+    try:
+        is_compose_obj = (getattr(transform_obj, "__mwlab_kind__", None) == "transform" and canonical_type("transform", transform_obj) == canon_compose)
+    except Exception:
+        is_compose_obj = False
+
+    if is_compose_obj and hasattr(transform_obj, "serde_params") and callable(getattr(transform_obj, "serde_params")):
+        raw = transform_obj.serde_params() or {}
+        if not isinstance(raw, dict):
+            raise InvalidValue(path=SerdePath.root().key("transform").key("params"), message="Compose.serde_params() должен возвращать dict")
+        raw = dict(raw)
+        raw.pop("transforms", None)
+        extra_params = cast(Dict[str, Any], _to_json_friendly(raw, SerdePath.root().key("transform").key("params")))
+        extra_params = _normalize_unit_like_strings(extra_params)
+
+    params = dict(extra_params)
+    params["transforms"] = transforms_specs
+
+    out: Dict[str, Any] = {"type": canon_compose, "params": params}
+    if is_compose_obj and hasattr(transform_obj, "meta"):
+        mv = getattr(transform_obj, "meta")
+        if mv is not None:
+            out["meta"] = _to_json_friendly(mv, SerdePath.root().key("transform").key("meta"))
+    return out
 
 def dump_spec_dict(
     spec: Any,
@@ -1418,7 +1454,8 @@ def loads_yaml(text: str, *, strict: bool = True, require_canonical_types: bool 
         raise ImportError("PyYAML не установлен: YAML serde недоступен. Установите пакет 'PyYAML'.")
 
     try:
-        data = yaml.safe_load(text)
+        # Используем loader без timestamp-resolver: YAML остаётся JSON-подмножеством по типам.
+        data = yaml.load(text, Loader=_MWLabSafeLoader)  # type: ignore[arg-type]
     except Exception as e:
         raise SchemaError(path=SerdePath.root(), message=f"Ошибка парсинга YAML: {e}", cause=e) from e
 
