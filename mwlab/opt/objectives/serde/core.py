@@ -670,6 +670,18 @@ def _build_transform(
         # Разбираем как ComponentSpec, но transforms — особый ключ
         type_str, params, meta = _parse_componentspec(mp, path, strict=strict)
 
+        # В режиме require_canonical_types запрещаем алиасы для Compose,
+        # как и для остальных компонентов.
+        canonical = canonicalize_alias("transform", type_str)
+        if require_canonical_types and canonical != type_str:
+            raise InvalidValue(
+                path=path.key("type"),
+                message=(
+                    f"transform.type='{type_str}' не является каноническим. "
+                    f"Используйте '{canonical}'."
+                ),
+            )
+
         # transforms поле обязательно
         if "transforms" not in params:
             raise SchemaError(path=path.key("params").key("transforms"), message="Compose.params.transforms обязателен")
@@ -1353,9 +1365,15 @@ def dump_spec_dict(
         if not math.isfinite(weight_f):
             _raise_non_finite(p.key("weight"), weight_f)
 
+        # assume_prepared участвует в семантике BaseCriterion и должен
+        # сохраняться/восстанавливаться при round-trip, поэтому пишем его
+        # явно для каждого критерия.
+        assume_prepared = getattr(c, "assume_prepared", False)
+
         item: Dict[str, Any] = {
             "name": c_name,
             "weight": weight_f,
+            "assume_prepared": bool(assume_prepared),
         }
 
         # selector/transform/aggregator/comparator
