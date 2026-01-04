@@ -61,8 +61,8 @@ from typing import Optional, Sequence
 import torch
 from torch import nn
 
-from .cm_schema import ParamSchema
-from .cm_core import (
+from mwlab.filters.cm_schema import ParamSchema
+from mwlab.filters.cm_core import (
     solve_sparams,
     CoreSpec,
     DEFAULT_DEVICE,

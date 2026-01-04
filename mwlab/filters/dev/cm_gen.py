@@ -58,8 +58,8 @@ from mwlab.opt.design.space import (
     ContinuousVar,
 )
 
-from .cm_schema import ParamSchema
-from .cm_core import (
+from mwlab.filters.cm_schema import ParamSchema
+from mwlab.filters.cm_core import (
     solve_sparams,
     CoreSpec,
     DT_R,
