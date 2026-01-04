@@ -702,26 +702,31 @@ def map_freq_unit(unit: Any) -> str:
     return mapping.get(u, "MHz")
 
 
-def map_time_unit(unit: Any) -> str:
+def resolve_time_unit(unit: Any) -> Tuple[str, float]:
     """
     PVF хранит единицы времени как 'nano/micro/milli' или 'ns/us/ms'.
 
-    Возвращаем строку для mwlab: 's', 'ms', 'us', 'ns'.
-    По умолчанию — 'ns'.
+    В mwlab GroupDelayTransform поддерживает только 's' и 'ns', поэтому:
+    - выбираем допустимую единицу,
+    - возвращаем коэффициент пересчёта PVF->выбранная_единица.
+
+    Возвращает (out_unit, scale), где:
+      out_unit: "s" | "ns"
+      scale   : множитель для значений (PVF_value * scale -> out_unit)
     """
     u = str(unit or "").strip().lower()
-    mapping = {
-        "s": "s",
-        "sec": "s",
-        "second": "s",
-        "nano": "ns",
-        "ns": "ns",
-        "micro": "us",
-        "us": "us",
-        "milli": "ms",
-        "ms": "ms",
+    mapping: Dict[str, Tuple[str, float]] = {
+        "s": ("s", 1.0),
+        "sec": ("s", 1.0),
+        "second": ("s", 1.0),
+        "nano": ("ns", 1.0),
+        "ns": ("ns", 1.0),
+        "micro": ("ns", 1.0e3),
+        "us": ("ns", 1.0e3),
+        "milli": ("ns", 1.0e6),
+        "ms": ("ns", 1.0e6),
     }
-    return mapping.get(u, "ns")
+    return mapping.get(u, ("ns", 1.0))
 
 
 # =============================================================================
@@ -895,6 +900,16 @@ def _unique_name(desired: str, used: Dict[str, int]) -> str:
     return f"{base}__{used[base]}"
 
 
+def _scale_time_value(value: float, plot_type: str, time_scale: float) -> float:
+    """
+    Применить масштаб времени для GD/*2, если Units.Time не в ns/s.
+    """
+    pt = (plot_type or "").strip()
+    if pt in ("GD", "*2"):
+        return value * time_scale
+    return value
+
+
 def pvf_to_mwlab_dict(
     objects: Sequence[PvfObject],
     *,
@@ -918,7 +933,7 @@ def pvf_to_mwlab_dict(
     resolved_vars = resolve_pvf_variables(variables_raw) if variables_raw else {}
 
     freq_unit = map_freq_unit(units.get("Frequency", "mega"))
-    time_unit = map_time_unit(units.get("Time", "nano"))
+    time_unit, time_scale = resolve_time_unit(units.get("Time", "nano"))
 
     # --- ISSPlot(Slope): извлекаем slope окна по PlotType ---
     slope_windows: Dict[str, float] = {}
@@ -999,6 +1014,8 @@ def pvf_to_mwlab_dict(
             x2 = eval_numeric(d.get("X2"), resolved_vars, what=f"{crit_name}.X2")
             y1 = eval_numeric(d.get("Y1"), resolved_vars, what=f"{crit_name}.Y1")
             y2 = eval_numeric(d.get("Y2"), resolved_vars, what=f"{crit_name}.Y2")
+            y1 = _scale_time_value(y1, plot_type, time_scale)
+            y2 = _scale_time_value(y2, plot_type, time_scale)
 
             # MVP: поддерживаем только плоскую линию
             if y1 != y2:
@@ -1047,6 +1064,7 @@ def pvf_to_mwlab_dict(
             x1 = eval_numeric(d.get("X1"), resolved_vars, what=f"{crit_name}.X1")
             x2 = eval_numeric(d.get("X2"), resolved_vars, what=f"{crit_name}.X2")
             thr = eval_numeric(d.get("Threshold"), resolved_vars, what=f"{crit_name}.Threshold")
+            thr = _scale_time_value(thr, plot_type, time_scale)
 
             transforms.append(
                 {
