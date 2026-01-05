@@ -94,6 +94,7 @@ import shlex
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union, cast
 
+from ..registry import canonicalize_alias
 
 # =============================================================================
 # Ошибки конвертера
@@ -777,7 +778,7 @@ def selector_spec_for_plot(plot_type: str, attachments: Any, freq_unit: str) -> 
 
     if pt in ("GD", "Phase", "*2"):
         return {
-            "type": "PhaseSelector",
+            "type": canonicalize_alias("selector", "PhaseSelector"),
             "params": {
                 "m": m,
                 "n": n,
@@ -789,7 +790,7 @@ def selector_spec_for_plot(plot_type: str, attachments: Any, freq_unit: str) -> 
 
     # По умолчанию считаем, что это модуль S-параметра в dB
     return {
-        "type": "SMagSelector",
+        "type": canonicalize_alias("selector", "SMagSelector"),
         "params": {
             "m": m,
             "n": n,
@@ -816,7 +817,7 @@ def base_transforms_for_plot(
     if pt in ("GD", "*2"):
         transforms.append(
             {
-                "type": "GroupDelayTransform",
+                "type": canonicalize_alias("transform", "GroupDelayTransform"),
                 "params": {
                     "out_unit": time_unit,
                 },
@@ -830,7 +831,7 @@ def base_transforms_for_plot(
             )
         transforms.append(
             {
-                "type": "ApertureSlopeTransform",
+                "type": canonicalize_alias("transform", "ApertureSlopeTransform"),
                 "params": {
                     "fw": float(slope_fw),
                 },
@@ -877,7 +878,7 @@ def yshifter_transform(
     x2 = eval_numeric(yshifter.get("X2"), variables, what="YShifter.X2")
 
     return {
-        "type": "ShiftByRefInBandTransform",
+        "type": canonicalize_alias("transform", "ShiftByRefInBandTransform"),
         "params": {
             "band": [x1, x2],
             "ref": ref,
@@ -1036,7 +1037,7 @@ def pvf_to_mwlab_dict(
             if x1 != x2:
                 transforms.append(
                     {
-                        "type": "BandTransform",
+                        "type": canonicalize_alias("transform", "BandTransform"),
                         "params": {
                             "band": [x1, x2],
                             "band_unit": freq_unit,
@@ -1044,11 +1045,14 @@ def pvf_to_mwlab_dict(
                         },
                     }
                 )
-                aggregator = {"type": ("max" if is_upper else "min"), "params": {}}
+                aggregator = {
+                    "type": canonicalize_alias("aggregator", "max" if is_upper else "min"),
+                    "params": {},
+                }
             else:
                 # Точка: берём значение в f0
                 aggregator = {
-                    "type": "ValueAtAgg",
+                    "type": canonicalize_alias("aggregator", "ValueAtAgg"),
                     "params": {
                         "f0": x1,
                         "f0_unit": freq_unit,
@@ -1056,7 +1060,7 @@ def pvf_to_mwlab_dict(
                 }
 
             comparator = {
-                "type": ("le" if is_upper else "ge"),
+                "type": canonicalize_alias("comparator", "le" if is_upper else "ge"),
                 "params": {"limit": y1},
             }
 
@@ -1068,7 +1072,7 @@ def pvf_to_mwlab_dict(
 
             transforms.append(
                 {
-                    "type": "BandTransform",
+                    "type": canonicalize_alias("transform", "BandTransform"),
                     "params": {
                         "band": [x1, x2],
                         "band_unit": freq_unit,
@@ -1077,8 +1081,8 @@ def pvf_to_mwlab_dict(
                 }
             )
 
-            aggregator = {"type": "ripple", "params": {}}
-            comparator = {"type": "le", "params": {"limit": thr}}
+            aggregator = {"type": canonicalize_alias("aggregator", "ripple"), "params": {}}
+            comparator = {"type": canonicalize_alias("comparator", "le"), "params": {"limit": thr}}
 
         # transform поле в mwlab может быть:
         # - отсутствовать (None)
@@ -1089,19 +1093,24 @@ def pvf_to_mwlab_dict(
             "weight": 1.0,              # PVF обычно не задаёт веса — ставим 1.0
             "assume_prepared": False,   # безопасное значение по умолчанию
             "selector": selector,
-            "aggregator": aggregator,
-            "comparator": comparator,
-            "meta": {
-                "pvf": {
-                    "obj_id": o.obj_id,
-                    "class": cls,
-                    "plot_type": plot_type,
-                }
-            },
         }
 
         if transforms:
             crit["transform"] = transforms if len(transforms) > 1 else transforms[0]
+
+        crit.update(
+            {
+                "aggregator": aggregator,
+                "comparator": comparator,
+                "meta": {
+                    "pvf": {
+                        "obj_id": o.obj_id,
+                        "class": cls,
+                        "plot_type": plot_type,
+                    }
+                },
+            }
+        )
 
         criteria.append(crit)
 
