@@ -53,5 +53,10 @@ try:
 except ImportError:                # pragma: no cover
     pass
 
-__all__ = ["BaseSurrogate", "NNSurrogate", "GPSurrogate",
-           "RBFSurrogate", "get_surrogate", "register"]
+__all__ = [
+    "BaseSurrogate",
+    "NNSurrogate",
+    "GPSurrogate",
+    "RBFSurrogate",
+    "get_surrogate",
+    "register"]
