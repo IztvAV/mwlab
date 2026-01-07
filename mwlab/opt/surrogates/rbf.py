@@ -7,23 +7,17 @@ RBFSurrogate – тонкая обертка над `sklearn.gaussian_process.RB
 """
 
 from __future__ import annotations
+
 from .base import BaseSurrogate
-from . import register
+from .registry import register
 
 try:
     from sklearn.gaussian_process import GaussianProcessRegressor  # noqa: F401
 except ModuleNotFoundError:  # pragma: no cover
     raise ImportError("RBFSurrogate требует scikit-learn. pip install mwlab[rbf]")
 
-
-# ────────────────────────────────────────────────────────────────────────────
-#                            RBFSurrogate
-# ────────────────────────────────────────────────────────────────────────────
-
 @register("rbf", "sklearn_gp")
 class RBFSurrogate(BaseSurrogate):
-    """Заглушка под RBF/Kriging surrogate на scikit-learn."""
-
     supports_uncertainty = True
 
     def __init__(self, *args, **kwargs):

@@ -19,11 +19,11 @@ CMFilter — суррогат «coupling matrix → S-параметры» на 
    в каких единицах пользователь передал f_grid (Hz/kHz/MHz/GHz).
    Это убирает типовые ошибки единиц и делает кэширование Ω корректным.
 
-3) **Lazy import scikit-rf**
-   Модуль НЕ требует scikit-rf для расчётов:
-     - output="torch"/"numpy" работает без skrf.
-     - skrf нужен только когда реально требуется rf.Network / rf.Frequency.
-   Если skrf не установлен и нужен network-выход — бросаем понятный ImportError.
+3) **Выход в формате NetworkLike (без scikit-rf)**
+   Выход "netlike" возвращает лёгкий объект mwlab.opt.objectives.network_like.SParamView:
+     - net.frequency.f (в Гц),
+     - net.s / net.s_mag / net.s_db (лениво в NumPy),
+   что делает его прямым входом для objectives/Specification без зависимости от rf.Network.
 
 Примечание про Filter._omega(...)
 --------------------------------
@@ -37,13 +37,15 @@ CMFilter — суррогат «coupling matrix → S-параметры» на 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Sequence, List, Optional, Tuple, Union, Literal, TYPE_CHECKING
+from typing import Any, Dict, Mapping, Sequence, List, Optional, Tuple, Union, Literal
 
 import numpy as np
 import torch
 
+from .registry import register
 from mwlab.opt.surrogates.base import BaseSurrogate
-from mwlab.opt.surrogates import register
+
+from mwlab.opt.objectives.network_like import SParamView
 
 from mwlab.filters.topologies import Topology
 from mwlab.filters.cm_schema import ParamSchema
@@ -51,16 +53,11 @@ from mwlab.filters.cm_core import CoreSpec, solve_sparams
 from mwlab.filters.cm import CouplingMatrix  # нужен для создания Filter и для from_filter()
 from mwlab.filters.devices import Filter
 
-
-if TYPE_CHECKING:  # чтобы типы были, но skrf не был обязательной зависимостью
-    import skrf as rf
-
-
 # -----------------------------------------------------------------------------
 #                                  Типы
 # -----------------------------------------------------------------------------
 
-OutputKind = Literal["network", "numpy", "torch"]
+OutputKind = Literal["netlike", "numpy", "torch"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +72,7 @@ class CMFilterMeta:
 
 
 # -----------------------------------------------------------------------------
-#                      Локальные утилиты (единицы, skrf)
+#                      Локальные утилиты (единицы)
 # -----------------------------------------------------------------------------
 
 # Мини-таблица множителей единиц. Держим локально, чтобы не зависеть
@@ -100,40 +97,9 @@ def _to_hz(vals: np.ndarray, unit: str) -> np.ndarray:
     return np.asarray(vals, dtype=float) * _UNIT_MULT[key]
 
 
-def _try_import_skrf():
-    """
-    Пытаемся импортировать scikit-rf.
-    Возвращаем модуль или None (без исключения).
-    """
-    try:
-        import skrf as rf  # type: ignore
-        return rf
-    except ModuleNotFoundError:
-        return None
-
-
-def _require_skrf():
-    """
-    Жёсткий импорт scikit-rf: если нет — кидаем понятный ImportError.
-    """
-    rf = _try_import_skrf()
-    if rf is None:
-        raise ImportError(
-            "Эта операция требует установленный пакет 'scikit-rf'. "
-            "Установите его, например: pip install scikit-rf"
-        )
-    return rf
-
-
-def _is_rf_frequency(obj: Any) -> bool:
-    """
-    Проверка "obj является rf.Frequency" через isinstance, но с lazy import.
-    Если skrf не установлен — всегда False.
-    """
-    rf = _try_import_skrf()
-    if rf is None:
-        return False
-    return isinstance(obj, rf.Frequency)  # type: ignore[attr-defined]
+def _has_attr_frequency_f(obj: Any) -> bool:
+    """Duck-check: объект похож на частотную ось, если у него есть атрибут .f."""
+    return hasattr(obj, "f")
 
 
 # -----------------------------------------------------------------------------
@@ -153,7 +119,7 @@ class CMFilter(BaseSurrogate):
     - Выход выбирается параметром output:
         * "torch"   -> torch.Tensor complex64
         * "numpy"   -> np.ndarray complex64
-        * "network" -> skrf.Network (требует scikit-rf)
+        * "netlike" -> mwlab.opt.objectives.network_like.SParamView (NetworkLike)
     """
 
     supports_uncertainty: bool = False
@@ -185,7 +151,7 @@ class CMFilter(BaseSurrogate):
         method: str = "auto",
         fix_sign: bool = False,
         # формат выхода
-        output: OutputKind = "network",
+        output: OutputKind = "netlike",
     ):
         if topo.ports != 2:
             raise ValueError("CMFilter поддерживает только 2-портовые устройства (topo.ports == 2)")
@@ -210,16 +176,14 @@ class CMFilter(BaseSurrogate):
         #   - f_grid_hz:   те же частоты в Гц (для вычисления Ω)
         self.unit = str(unit)
 
-        self._rf_freq_obj: Optional[Any] = None  # если пользователь дал rf.Frequency — используем его как есть
-        if _is_rf_frequency(f_grid):
-            # rf.Frequency всегда хранит f в Гц
-            self._rf_freq_obj = f_grid
-            self.f_grid_hz = np.asarray(f_grid.f, dtype=float)
-            # единица для "красивого" вывода — то, что внутри rf.Frequency (если есть)
+        # Поддерживаем duck-typed частотную ось с .f (например, skrf.Frequency),
+        # но не завязываемся на scikit-rf как зависимость.
+        if _has_attr_frequency_f(f_grid):
+            f_hz = np.asarray(getattr(f_grid, "f"), dtype=float).reshape(-1)
+            if f_hz.ndim != 1:
+                raise ValueError("f_grid.f должен быть 1-D массивом частот в Гц")
+            self.f_grid_hz = f_hz
             self.unit = str(getattr(f_grid, "unit", self.unit))
-            # при этом числовой "user" массив удобнее хранить в тех же единицах, что и rf.Frequency
-            # но rf.Frequency.from_f ожидает значения в unit, а f_grid.f уже в Hz,
-            # поэтому для объекта rf.Frequency мы НЕ пересоздаём сетку — используем f_grid напрямую.
             self.f_grid_user = None
         else:
             arr = np.asarray(f_grid, dtype=float)
@@ -243,6 +207,9 @@ class CMFilter(BaseSurrogate):
 
         # qu_scale (LP/HP:1, BP/BR:FBW) нужен для перевода Q -> qu
         self._qu_scale = float(self._filter._qu_scale())
+
+        # Кэш fixed qu по device (для include_qu='none' и Q_fixed-вектора)
+        self._qu_fixed_by_device: Dict[str, torch.Tensor] = {}
 
         self.meta = CMFilterMeta(
             kind=self._filter.kind,
@@ -332,6 +299,11 @@ class CMFilter(BaseSurrogate):
         # Кэш переноса base_vec на GPU/другие девайсы (чтобы не делать .to(device) постоянно).
         self._base_vec_by_device: Dict[str, torch.Tensor] = {"cpu": self._base_vec_cpu}
 
+        # Если fixed qu — вектор, кэшируем CPU-тензор сразу и дальше переносим по device по требованию.
+        if isinstance(getattr(self, "_qu_fixed_cpu", None), np.ndarray):
+            self._qu_fixed_by_device["cpu"] = torch.as_tensor(self._qu_fixed_cpu, dtype=torch.float32,
+                                                              device="cpu")  # type: ignore[arg-type]
+
         # -------------------- кэш omega (CPU + перенос по устройствам) --------------------
         self._omega_cpu: torch.Tensor = self._compute_omega_cpu()
         self._omega_by_device: Dict[str, torch.Tensor] = {"cpu": self._omega_cpu}
@@ -343,9 +315,6 @@ class CMFilter(BaseSurrogate):
             method=self.method,
             fix_sign=self.fix_sign,
         )
-
-        # -------------------- кэши для network-выхода --------------------
-        self._rf_frequency_cached: Optional[Any] = None
 
     # ----------------------------------------------------------------- helpers: fixed Q -> qu
     def _compute_qu_fixed_cpu(self, Q_fixed: Union[float, Sequence[float], np.ndarray]) -> Union[float, np.ndarray]:
@@ -377,13 +346,17 @@ class CMFilter(BaseSurrogate):
         if isinstance(self._qu_fixed_cpu, float):
             return self._qu_fixed_cpu
 
-        # вектор -> перенос на device
+        # вектор -> перенос на device (кэшируем)
         dev = str(device)
-        arr = self._qu_fixed_cpu
-        t_cpu = torch.as_tensor(arr, dtype=torch.float32, device="cpu")
-        if dev == "cpu":
-            return t_cpu
-        return t_cpu.to(dev)
+        if dev in self._qu_fixed_by_device:
+            return self._qu_fixed_by_device[dev]
+        # гарантированно есть cpu-версия в init, но на всякий случай:
+        t_cpu = self._qu_fixed_by_device.get("cpu")
+        if t_cpu is None:
+            t_cpu = torch.as_tensor(self._qu_fixed_cpu, dtype=torch.float32, device="cpu")  # type: ignore[arg-type]
+            self._qu_fixed_by_device["cpu"] = t_cpu
+        self._qu_fixed_by_device[dev] = t_cpu.to(dev)
+        return self._qu_fixed_by_device[dev]
 
     # ----------------------------------------------------------------- helpers: base qu/phases -> params dict
     def _apply_base_qu_to_params(self, params: Dict[str, float], base_qu: Union[float, Sequence[float], np.ndarray]) -> None:
@@ -662,8 +635,10 @@ class CMFilter(BaseSurrogate):
         ports = self.topo.ports
 
         # Если фазовые блоки не включены в схему, но пользователь пытается их задать — это ошибка.
-        schema_has_a = self.schema.slices["phase_a"].stop > self.schema.slices["phase_a"].start
-        schema_has_b = self.schema.slices["phase_b"].stop > self.schema.slices["phase_b"].start
+        sl_a = self.schema.slices.get("phase_a", slice(0, 0))
+        sl_b = self.schema.slices.get("phase_b", slice(0, 0))
+        schema_has_a = sl_a.stop > sl_a.start
+        schema_has_b = sl_b.stop > sl_b.start
 
         wants_a = ("phase_a" in x) or any(f"phase_a{i}" in x for i in range(1, ports + 1))
         wants_b = ("phase_b" in x) or any(f"phase_b{i}" in x for i in range(1, ports + 1))
@@ -699,65 +674,43 @@ class CMFilter(BaseSurrogate):
                 if k in x:
                     vec[self._idx[k]] = float(x[k])
 
-    # ----------------------------------------------------------------- rf helpers
-    def _rf_frequency(self):
-        """
-        Возвращает объект rf.Frequency для создания rf.Network.
-        Ленивая зависимость: импортим skrf только здесь.
-        """
-        rf = _require_skrf()
-
-        if self._rf_freq_obj is not None:
-            return self._rf_freq_obj
-
-        if self._rf_frequency_cached is None:
-            # Здесь важно: rf.Frequency.from_f ожидает числа в единицах `unit`.
-            # Поэтому используем f_grid_user (если сетка была численной).
-            if self.f_grid_user is None:
-                # Теоретически сюда не должны попасть (rf_freq_obj задан выше),
-                # но оставим защиту.
-                self._rf_frequency_cached = rf.Frequency.from_f(self.f_grid_hz, unit="hz")
-            else:
-                self._rf_frequency_cached = rf.Frequency.from_f(
-                    np.asarray(self.f_grid_user, dtype=float),
-                    unit=str(self.unit).lower(),
-                )
-
-        return self._rf_frequency_cached
-
     def _to_numpy(self, S_t: torch.Tensor) -> np.ndarray:
         """torch.Tensor -> np.ndarray complex64"""
-        return S_t.detach().cpu().numpy()
+        out = S_t.detach().cpu().numpy()
+        # solve_sparams обычно даёт complex64, но явно фиксируем контракт.
+        return np.asarray(out, dtype=np.complex64, order="C")
 
-    def _to_network(self, S_t: torch.Tensor):
-        """torch.Tensor -> rf.Network (требует scikit-rf)"""
-        rf = _require_skrf()
-        S_np = self._to_numpy(S_t)
-        return rf.Network(frequency=self._rf_frequency(), s=S_np)
+    def _to_netlike(self, s_any: Any) -> SParamView:
+        """
+        Преобразовать S (torch|numpy) в лёгкий NetworkLike для objectives.
+        Частотная ось — всегда self.f_grid_hz (Гц).
+        """
+        return SParamView(s_any, self.f_grid_hz, cache=True)
 
     # ----------------------------------------------------------------- low-level compute (torch)
     def _predict_s_torch_single(self, x: Mapping[str, float]) -> torch.Tensor:
         """
         Расчёт S(Ω) для одной точки -> torch.Tensor complex64 формы (F,2,2).
         """
-        dev = self.device
-        vec = self._vector_from_x(x, dev)
-        M_real, qu, phase_a, phase_b = self.schema.assemble(vec, device=dev)
+        with torch.inference_mode():
+            dev = self.device
+            vec = self._vector_from_x(x, dev)
+            M_real, qu, phase_a, phase_b = self.schema.assemble(vec, device=dev)
 
-        omega = self._omega(dev)  # (F,)
-        if self.include_qu == "none":
-            qu = self._qu_fixed(dev)
+            omega = self._omega(dev)  # (F,)
+            if self.include_qu == "none":
+                qu = self._qu_fixed(dev)
 
-        S = solve_sparams(
-            self._core_spec,
-            M_real,
-            omega,
-            qu=qu,
-            phase_a=phase_a,
-            phase_b=phase_b,
-            device=dev,
-        )
-        return S
+            S = solve_sparams(
+                self._core_spec,
+                M_real,
+                omega,
+                qu=qu,
+                phase_a=phase_a,
+                phase_b=phase_b,
+                device=dev,
+            )
+            return S
 
     def _predict_s_torch_batch(self, xs: Sequence[Mapping[str, float]]) -> torch.Tensor:
         """
@@ -766,48 +719,25 @@ class CMFilter(BaseSurrogate):
 
         Здесь выигрываем за счёт того, что solve_sparams работает батчево.
         """
-        dev = self.device
-        vecs = self._vectors_from_xs(xs, dev)
-        M_real, qu, phase_a, phase_b = self.schema.assemble(vecs, device=dev)
+        with torch.inference_mode():
+            dev = self.device
+            vecs = self._vectors_from_xs(xs, dev)
+            M_real, qu, phase_a, phase_b = self.schema.assemble(vecs, device=dev)
 
-        omega = self._omega(dev)  # (F,)
-        if self.include_qu == "none":
-            qu = self._qu_fixed(dev)
+            omega = self._omega(dev)  # (F,)
+            if self.include_qu == "none":
+                qu = self._qu_fixed(dev)
 
-        S = solve_sparams(
-            self._core_spec,
-            M_real,
-            omega,
-            qu=qu,
-            phase_a=phase_a,
-            phase_b=phase_b,
-            device=dev,
-        )
-        return S  # (B,F,2,2)
-
-    # ----------------------------------------------------------------- public convenience: network
-    def predict_network(self, x: Mapping[str, float]):
-        """
-        Всегда возвращает rf.Network.
-        Требует установленный scikit-rf.
-        """
-        S_t = self._predict_s_torch_single(x)
-        return self._to_network(S_t)
-
-    def batch_predict_network(self, xs: Sequence[Mapping[str, float]]):
-        """
-        Всегда возвращает list[rf.Network].
-        Требует установленный scikit-rf.
-        """
-        rf = _require_skrf()
-        if not xs:
-            return []
-
-        S_b = self._predict_s_torch_batch(xs)  # (B,F,2,2)
-        S_np = self._to_numpy(S_b)             # (B,F,2,2)
-        freq = self._rf_frequency()
-
-        return [rf.Network(frequency=freq, s=S_np[i]) for i in range(S_np.shape[0])]
+            S = solve_sparams(
+                self._core_spec,
+                M_real,
+                omega,
+                qu=qu,
+                phase_a=phase_a,
+                phase_b=phase_b,
+                device=dev,
+            )
+            return S  # (B,F,2,2)
 
     # ----------------------------------------------------------------- BaseSurrogate API
     def predict(self, x: Mapping[str, float], *, return_std: bool = False):
@@ -825,8 +755,8 @@ class CMFilter(BaseSurrogate):
             return S_t
         if self.output == "numpy":
             return self._to_numpy(S_t)
-        if self.output == "network":
-            return self._to_network(S_t)
+        if self.output == "netlike":
+            return self._to_netlike(S_t)
 
         raise ValueError(f"Unknown output kind: {self.output!r}")
 
@@ -836,13 +766,13 @@ class CMFilter(BaseSurrogate):
 
         - output="torch"  -> torch.Tensor (B,F,2,2)
         - output="numpy"  -> np.ndarray   (B,F,2,2)
-        - output="network"-> list[rf.Network]
+        - output="netlike"-> list[NetworkLike] (SParamView)
         """
         if return_std:
             raise NotImplementedError("CMFilter does not support uncertainty (σ).")
 
         if not xs:
-            if self.output == "network":
+            if self.output == "netlike":
                 return []
             if self.output == "numpy":
                 return np.zeros((0, self.f_grid_hz.size, 2, 2), dtype=np.complex64)
@@ -850,15 +780,17 @@ class CMFilter(BaseSurrogate):
                 return torch.zeros((0, self.f_grid_hz.size, 2, 2), dtype=torch.complex64)
             raise ValueError(f"Unknown output kind: {self.output!r}")
 
-        if self.output == "network":
-            return self.batch_predict_network(xs)
-
         S_b = self._predict_s_torch_batch(xs)  # (B,F,2,2)
 
         if self.output == "torch":
             return S_b
         if self.output == "numpy":
             return self._to_numpy(S_b)
+        if self.output == "netlike":
+            # Важно: чтобы не гонять .cpu().numpy() по одной штуке на каждый пример,
+            # делаем конверсию один раз на батч, затем нарезаем view-ами.
+            S_np = self._to_numpy(S_b)  # (B,F,2,2)
+            return [self._to_netlike(S_np[i]) for i in range(S_np.shape[0])]
 
         raise ValueError(f"Unknown output kind: {self.output!r}")
 
@@ -866,20 +798,48 @@ class CMFilter(BaseSurrogate):
         """
         Проверка спецификации по предсказаниям.
 
-        Для совместимости со старым стилем Specification предполагаем,
-        что spec.is_ok(...) ожидает rf.Network, поэтому здесь всегда строим Network.
+        Здесь намеренно НЕ полагаемся на self.output:
+        - Specification/Selectors работают с NetworkLike (SParamView),
+          поэтому всегда создаём netlike-объект.
         """
         from collections.abc import Mapping as _Mapping
 
         # одиночная точка
         if isinstance(xs, _Mapping):
-            net = self.predict_network(xs)
+            S_t = self._predict_s_torch_single(xs)
+            net = self._to_netlike(S_t)
             return bool(spec.is_ok(net))
 
         # батч
-        nets = self.batch_predict_network(xs)
-        return np.fromiter((spec.is_ok(net) for net in nets), dtype=bool)
+        S_b = self._predict_s_torch_batch(xs)
+        S_np = self._to_numpy(S_b)
+        return np.fromiter(
+            (bool(spec.is_ok(self._to_netlike(S_np[i]))) for i in range(S_np.shape[0])),
+            dtype=bool,
+            count=S_np.shape[0],
+        )
 
+    def penalty_spec(self, xs, spec, *, reduction: Literal["sum", "mean", "max"] = "sum"):
+        """
+        Штраф по спецификации по предсказаниям.
+
+        Аналогично passes_spec(...): всегда работаем через NetworkLike (SParamView),
+        без зависимости от rf.Network и без привязки к self.output.
+        """
+        from collections.abc import Mapping as _Mapping
+
+        if isinstance(xs, _Mapping):
+            S_t = self._predict_s_torch_single(xs)
+            net = self._to_netlike(S_t)
+            return float(spec.penalty(net, reduction=reduction))
+
+        S_b = self._predict_s_torch_batch(xs)
+        S_np = self._to_numpy(S_b)
+        return np.fromiter(
+            (float(spec.penalty(self._to_netlike(S_np[i]), reduction=reduction)) for i in range(S_np.shape[0])),
+            dtype=float,
+            count=S_np.shape[0],
+        )
     # -------------------------------------------------------------------- property filter
     @property
     def filter(self) -> Filter:
@@ -911,7 +871,7 @@ class CMFilter(BaseSurrogate):
             device: str = "cpu",
             method: str = "auto",
             fix_sign: bool = False,
-            output: OutputKind = "network",
+            output: OutputKind = "netlike",
     ) -> "CMFilter":
         """
         Создать CMFilter из существующего Filter.

@@ -71,6 +71,17 @@ class Specification(BaseSpecification):
             raise ValueError("Specification: список criteria пуст")
         super().__init__(criteria=criteria, name=name)
 
+        # Проверка уникальности имён и защиты служебных ключей
+        names = [c.name for c in self.criteria]
+        reserved = {"__all_ok__", "__penalty__"}
+        for nm in names:
+            if nm in reserved:
+                raise ValueError(f"Specification: имя критерия '{nm}' зарезервировано")
+        if len(set(names)) != len(names):
+            # Можно сделать и мягче (автосуффиксы), но лучше падать явно
+            dup = sorted({n for n in names if names.count(n) > 1})
+            raise ValueError(f"Specification: имена критериев должны быть уникальны, дубликаты: {dup}")
+
     # -------------------------------------------------------------------------
     # Основные операции
     # -------------------------------------------------------------------------

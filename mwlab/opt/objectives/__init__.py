@@ -13,7 +13,7 @@ yield-ориентированные цели.
 ------------------------------------
     Selector -> Transform -> Aggregator -> Comparator -> Criterion (склейка цепочки в объект вычисления)
 
-- Selector извлекает частотную зависимость из источника данных (обычно rf.Network).
+- Selector извлекает из `NetworkLike` частотную зависимость: `(freq, values)`
 - Transform выполняет предобработку (band, сглаживание, ресэмплинг, производные и т.п.).
 - Aggregator сворачивает кривую в скаляр.
 - Comparator интерпретирует скаляр как ограничение/штраф.
@@ -56,6 +56,7 @@ from typing import Iterable
 # ---------------------------------------------------------------------------
 # Базы и реестры/фабрики (ядро API)
 # ---------------------------------------------------------------------------
+from .network_like import NetworkLike, FrequencyLike, FrequencyView, SParamView
 
 from .registry import (
     # реестры/регистрация
@@ -137,6 +138,11 @@ from .penalty import PenaltyObjective, FeasibleYieldObjective
 # ---------------------------------------------------------------------------
 
 __all__ = [
+    # --- NetworkLike / view-контейнеры ---
+    "NetworkLike",
+    "FrequencyLike",
+    "FrequencyView",
+    "SParamView",
     # --- фабрики и регистры ---
     "register_selector",
     "register_transform",

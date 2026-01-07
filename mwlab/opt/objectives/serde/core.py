@@ -13,7 +13,7 @@ mwlab.opt.objectives.serde.core
 - Собираем объекты через registry:
     Selector / Transform / Aggregator / Comparator
 - Строим BaseCriterion (или совместимый Criterion) и Specification.
-- При сборке BaseCriterion выполняется "dry" unit-aware валидация цепочки (без rf.Network),
+- При сборке BaseCriterion выполняется "dry" unit-aware валидация цепочки (без NetworkLike),
   что соответствует контракту (UnitMismatch ловим заранее).
 
 Ограничения MVP (осознанно)

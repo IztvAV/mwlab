@@ -133,22 +133,34 @@ def _ports_to_0based(m: int, n: int) -> Tuple[int, int]:
 
 def _ensure_port_exists(net: NetworkLike, m0: int, n0: int, who: str) -> None:
     """
-    Проверить, что в сети достаточно портов для доступа к S[m0, n0].
+        Проверить, что в сети достаточно портов для доступа к S[m0, n0].
 
-    Это даёт понятную диагностику вместо низкоуровневого IndexError.
+        Это даёт понятную диагностику вместо низкоуровневого IndexError.
 
-    Параметры
-    ---------
-    net : NetworkLike
-        Сеть, совместимая со scikit-rf.
-    m0, n0 : int
-        Порты в 0-based индексации.
-    who : str
-        Имя вызывающего селектора для сообщения ошибки.
-    """
+        Параметры
+        ---------
+        net : NetworkLike
+            Сеть, совместимая со scikit-rf.
+        m0, n0 : int
+            Порты в 0-based индексации.
+        who : str
+            Имя вызывающего селектора для сообщения ошибки.
+        """
     nports = getattr(net, "nports", None)
+
     if nports is None:
-        # В редких случаях объект может не иметь поля nports; тогда не мешаем работе.
+        # fallback: пытаемся вычислить число портов из shape массива S
+        try:
+            s = getattr(net, "s", None)
+            if s is not None:
+                s = np.asarray(s)
+                if s.ndim >= 3:
+                    nports = int(s.shape[1])
+        except Exception:
+            nports = None
+
+    if nports is None:
+        # не удалось определить — не мешаем работе
         return
 
     nports_i = int(nports)
