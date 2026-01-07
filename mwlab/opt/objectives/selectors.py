@@ -8,7 +8,7 @@ mwlab.opt.objectives.selectors
 Зачем нужен этот модуль
 -----------------------
 Selector отвечает на вопрос: «**какую именно** частотную зависимость нужно извлечь из
-`skrf.Network`?». Он является **источником данных** для вычисления критериев.
+`NetworkLike`?». Он является **источником данных** для вычисления критериев.
 
 Каждый Selector возвращает пару 1-D массивов одинаковой длины:
 
@@ -37,7 +37,7 @@ Selector **не должен** внедрять инженерные согла�
 
 Соглашения по частоте
 ---------------------
-- Внутри `skrf.Network` частота хранится в Гц: `net.frequency.f`.
+- Внутри `NetworkLike` частота хранится в Гц: `net.frequency.f`.
 - На выходе Selector переводит частоту в `freq_unit` и по умолчанию приводит
   ось к монотонно возрастающей, чтобы downstream-компоненты могли полагаться на
   корректный порядок. Для «доверенных» сетей эти проверки можно отключить,
@@ -87,8 +87,8 @@ from __future__ import annotations
 from typing import Optional, Sequence, Tuple
 
 import numpy as np
-import skrf as rf
 
+from .network_like import NetworkLike
 from .registry import register_selector
 from .base import (
     BaseSelector,
@@ -131,7 +131,7 @@ def _ports_to_0based(m: int, n: int) -> Tuple[int, int]:
     return m - 1, n - 1
 
 
-def _ensure_port_exists(net: rf.Network, m0: int, n0: int, who: str) -> None:
+def _ensure_port_exists(net: NetworkLike, m0: int, n0: int, who: str) -> None:
     """
     Проверить, что в сети достаточно портов для доступа к S[m0, n0].
 
@@ -139,8 +139,8 @@ def _ensure_port_exists(net: rf.Network, m0: int, n0: int, who: str) -> None:
 
     Параметры
     ---------
-    net : rf.Network
-        Сеть scikit-rf.
+    net : NetworkLike
+        Сеть, совместимая со scikit-rf.
     m0, n0 : int
         Порты в 0-based индексации.
     who : str
@@ -279,7 +279,7 @@ class SComplexSelector(BaseSelector):
         self.name = name or f"S{m}{n}_complex"
         self.validate = bool(validate)
 
-    def __call__(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
+    def __call__(self, net: NetworkLike) -> Tuple[np.ndarray, np.ndarray]:
         if self.validate:
             _ensure_port_exists(net, self._m0, self._n0, "SComplexSelector")
 
@@ -354,7 +354,7 @@ class SMagSelector(BaseSelector):
         self.name = name or f"S{m}{n}_{'db' if self.db else 'mag'}"
         self.validate = bool(validate)
 
-    def __call__(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
+    def __call__(self, net: NetworkLike) -> Tuple[np.ndarray, np.ndarray]:
         if self.validate:
             _ensure_port_exists(net, self._m0, self._n0, "SMagSelector")
 
@@ -443,7 +443,7 @@ class PhaseSelector(BaseSelector):
         self.name = name or f"Phase_S{m}{n}_{self.unit}"
         self.validate = bool(validate)
 
-    def __call__(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
+    def __call__(self, net: NetworkLike) -> Tuple[np.ndarray, np.ndarray]:
         if self.validate:
             _ensure_port_exists(net, self._m0, self._n0, "PhaseSelector")
 
@@ -521,7 +521,7 @@ class AxialRatioSelector(BaseSelector):
         self.name = name or f"AxialRatio_{'db' if self.db else 'lin'}"
         self.validate = bool(validate)
 
-    def __call__(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
+    def __call__(self, net: NetworkLike) -> Tuple[np.ndarray, np.ndarray]:
         # AR использует S31 и S41 => требуется сеть как минимум с 4 портами.
         if self.validate:
             nports = getattr(net, "nports", None)

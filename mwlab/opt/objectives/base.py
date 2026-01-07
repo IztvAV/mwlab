@@ -12,14 +12,14 @@ mwlab.opt.objectives.base
 - **ограничений** (constraints): проверка выполнения требований (pass/fail),
 - **целевых функций** (objectives): вычисление штрафов/метрик для оптимизации,
 
-на основе S-параметров (`skrf.Network`) и производных характеристик
+на основе S-параметров (`NetworkLike`, совместимый с `skrf.Network`) и производных характеристик
 (АЧХ, ФЧХ, ГВЗ, производные, «крутизна», интегральные метрики и т.п.).
 
 Ключевая идея: ортогональные компоненты
 --------------------------------------
 Архитектура строится на композиции независимых компонентов:
 
-1) **Selector**    — извлекает из `skrf.Network` частотную зависимость: `(freq, values)`
+1) **Selector**    — извлекает из `NetworkLike` частотную зависимость: `(freq, values)`
 2) **Transform**   — преобразует кривую: `(freq, vals) -> (freq2, vals2)`
 3) **Aggregator**  — сворачивает кривую в скаляр: `(freq, vals) -> float`
 4) **Comparator**  — интерпретирует скаляр как pass/fail и/или штраф: `is_ok(value)`, `penalty(value)`
@@ -91,7 +91,8 @@ from typing import (
 )
 
 import numpy as np
-import skrf as rf
+
+from .network_like import NetworkLike
 
 # ---------------------------------------------------------------------
 # Serde-critical exception: structural unit mismatch
@@ -112,7 +113,7 @@ class UnitMismatchError(ValueError):
 # Частотные единицы: нормализация и конвертеры
 # =============================================================================
 #
-# Внутри `skrf.Network` частота хранится в Гц (Hz) и доступна как net.frequency.f.
+# Внутри `NetworkLike` частота хранится в Гц (Hz) и доступна как net.frequency.f.
 # В подсистеме objectives допускаются инженерные единицы: Hz/kHz/MHz/GHz.
 #
 
@@ -458,7 +459,7 @@ def _serde_params_from_obj(obj: object) -> Dict[str, Any]:
 
 class BaseSelector(ABC):
     """
-    Selector извлекает из `rf.Network` частотную зависимость: (freq, values).
+    Selector извлекает из `NetworkLike` частотную зависимость: (freq, values).
 
     Соглашения:
     - freq   : 1-D массив частот в единицах `self.freq_unit`
@@ -481,7 +482,7 @@ class BaseSelector(ABC):
     __serde_exclude__: Tuple[str, ...] = ()
 
     @abstractmethod
-    def __call__(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
+    def __call__(self, net: NetworkLike) -> Tuple[np.ndarray, np.ndarray]:
         ...
 
     def serde_params(self) -> Dict[str, Any]:
@@ -495,7 +496,7 @@ class BaseTransform(ABC):
     """
     Transform преобразует кривую (freq, vals) -> (freq2, vals2).
 
-    Transform работает только с массивами и не обращается к `rf.Network`.
+    Transform работает только с массивами и не обращается к `NetworkLike`.
 
     Контекст единиц
     --------------
@@ -943,7 +944,7 @@ class BaseCriterion:
         vu = str(getattr(self.selector, "value_unit", "") or "")
         return fu, vu
 
-    def _curve_with_units(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray, str, str]:
+    def _curve_with_units(self, net: NetworkLike) -> Tuple[np.ndarray, np.ndarray, str, str]:
         """
             Вернуть кривую после selector (+ transform, если он задан) и текущие единицы.
         """
@@ -960,7 +961,7 @@ class BaseCriterion:
 
         return freq, vals, self._freq_unit, self._value_unit_after_transform
 
-    def curve(self, net: rf.Network) -> Tuple[np.ndarray, np.ndarray]:
+    def curve(self, net: NetworkLike) -> Tuple[np.ndarray, np.ndarray]:
         """
         Вернуть кривую после selector (+ transform, если он задан).
 
@@ -970,7 +971,7 @@ class BaseCriterion:
         freq, vals, _, _ = self._curve_with_units(net)
         return freq, vals
 
-    def value(self, net: rf.Network) -> float:
+    def value(self, net: NetworkLike) -> float:
         """
         Скалярное значение критерия (до сравнения с порогом).
 
@@ -991,7 +992,7 @@ class BaseCriterion:
         """
         return self._freq_unit, self._final_value_unit
 
-    def evaluate(self, net: rf.Network) -> CriterionResult:
+    def evaluate(self, net: NetworkLike) -> CriterionResult:
         """
         Единый проход:
         1) посчитать value
@@ -1031,11 +1032,11 @@ class BaseCriterion:
             transform_chain=t_chain,
         )
 
-    def is_ok(self, net: rf.Network) -> bool:
+    def is_ok(self, net: NetworkLike) -> bool:
         v = float(self.value(net))
         return bool(self.comparator.is_ok(v))
 
-    def penalty(self, net: rf.Network) -> float:
+    def penalty(self, net: NetworkLike) -> float:
         v = float(self.value(net))
         raw = float(self.comparator.penalty(v))
         return self.weight * raw
@@ -1069,13 +1070,13 @@ class BaseSpecification:
         self.criteria: Tuple[BaseCriterion, ...] = tuple(criteria)
         self.name = str(name)
 
-    def evaluate(self, net: rf.Network) -> List[CriterionResult]:
+    def evaluate(self, net: NetworkLike) -> List[CriterionResult]:
         return [c.evaluate(net) for c in self.criteria]
 
-    def is_ok(self, net: rf.Network) -> bool:
+    def is_ok(self, net: NetworkLike) -> bool:
         return all(c.is_ok(net) for c in self.criteria)
 
-    def penalty(self, net: rf.Network, *, reduction: Reduction = "sum") -> float:
+    def penalty(self, net: NetworkLike, *, reduction: Reduction = "sum") -> float:
         """
         Метод использует Criterion.penalty(net) и не создаёт CriterionResult
         для каждого критерия. Для получения подробной информации по каждому

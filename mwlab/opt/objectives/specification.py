@@ -18,7 +18,7 @@ Specification = AND-набор Criterion-ов.
 Каждый Criterion — композиция:
     Selector ∘ Transform ∘ Aggregator ∘ Comparator
 
-- Selector извлекает кривую из `skrf.Network`
+- Selector извлекает кривую из `NetworkLike`
 - Transform (опционально) предварительно обрабатывает кривую
 - Aggregator сворачивает кривую в скаляр
 - Comparator интерпретирует скаляр как pass/fail и возвращает штраф
@@ -39,9 +39,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Sequence, Literal, Tuple
 
 import numpy as np
-import skrf as rf
 
 from .base import BaseCriterion, BaseSpecification, CriterionResult
+from .network_like import NetworkLike
 
 
 Reduction = Literal["sum", "mean", "max"]
@@ -74,7 +74,7 @@ class Specification(BaseSpecification):
     # -------------------------------------------------------------------------
     # Основные операции
     # -------------------------------------------------------------------------
-    def penalty(self, net: rf.Network, *, reduction: Reduction = "sum") -> float:
+    def penalty(self, net: NetworkLike, *, reduction: Reduction = "sum") -> float:
         """
         Суммарный штраф по спецификации.
 
@@ -100,7 +100,7 @@ class Specification(BaseSpecification):
     # -------------------------------------------------------------------------
     # Удобные “срезы” результатов
     # -------------------------------------------------------------------------
-    def values(self, net: rf.Network) -> Dict[str, float]:
+    def values(self, net: NetworkLike) -> Dict[str, float]:
         """
         Вернуть словарь «имя критерия -> агрегированное значение».
 
@@ -144,7 +144,7 @@ class Specification(BaseSpecification):
 
         raise ValueError(f"reduction должен быть одним из {_REDUCTION_MODES}")
 
-    def report(self, net: rf.Network, *, reduction: Reduction = "sum") -> Dict[str, Any]:
+    def report(self, net: NetworkLike, *, reduction: Reduction = "sum") -> Dict[str, Any]:
         """
         Подробный отчёт по всем критериям и сводные поля.
 
