@@ -296,7 +296,7 @@ class GlobalOptimizer:
             return PenaltyObjective(
                 surrogate=self.surrogate,
                 spec=self.cfg.spec,
-                reduce="sum",
+                reduction="sum",
                 large_penalty=1e12,
             )
 
@@ -322,7 +322,7 @@ class GlobalOptimizer:
             rng=self.cfg.fy_rng,
             alpha=self.cfg.fy_alpha,
             y_clip_eps=self.cfg.fy_y_clip_eps,
-            reduce="sum",
+            reduction="sum",
             large_penalty=1e12,
         )
 

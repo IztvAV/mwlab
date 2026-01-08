@@ -195,6 +195,23 @@ class CMFilter(BaseSurrogate):
         # -------------------- создаём Filter только для Ω↔f и qu_scale --------------------
         # Filter требует cm, но мы НЕ будем использовать cm для расчёта S (чтобы не мутировать и не тратить overhead).
         cm_dummy = CouplingMatrix(topo=self.topo, mvals={})
+        kind_u = str(kind).upper()
+        if kind_u in {"BP", "BR"}:
+            spec_cnt = sum(bool(x) for x in (
+                f_edges is not None,
+                (f0 is not None and bw is not None),
+                (f0 is not None and fbw is not None),
+            ))
+            if spec_cnt != 1:
+                raise ValueError(
+                    "CMFilter.__init__: for BP/BR provide exactly one of: "
+                    "f_edges | (f0+bw) | (f0+fbw). "
+                    f"Got: f_edges={'yes' if f_edges is not None else 'no'}, "
+                    f"f0={'yes' if f0 is not None else 'no'}, "
+                    f"bw={'yes' if bw is not None else 'no'}, "
+                    f"fbw={'yes' if fbw is not None else 'no'}"
+                )
+
         self._filter = Filter(
             cm_dummy,
             kind=kind,
@@ -925,13 +942,41 @@ class CMFilter(BaseSurrogate):
         # Для include_qu="none" base_qu не нужен (и даже нежелателен семантически)
         base_qu = None if include_qu_l == "none" else cm.qu
 
+        # --- выбрать ОДНУ комбинацию частотных параметров для конструктора Filter ---
+        kind_u = str(flt.kind).upper()
+        spec = getattr(flt, "_spec", None)  # "cut" | "edges" | "bw" | "fbw"
+
+        f_edges_arg = None
+        f0_arg = None
+        bw_arg = None
+        fbw_arg = None
+
+        if kind_u in {"BP", "BR"}:
+            if spec == "edges":
+                f_edges_arg = flt.f_edges
+            elif spec == "bw":
+                f0_arg = flt.f0
+                bw_arg = flt.bw
+            elif spec == "fbw":
+                f0_arg = flt.f0
+                fbw_arg = flt.fbw
+            else:
+                # fallback (на всякий случай): предпочитаем edges
+                f_edges_arg = flt.f_edges
+
+        elif kind_u in {"LP", "HP"}:
+            # Для LP/HP безопаснее передать только f0 (= f_cut) и НЕ передавать f_edges
+            f0_arg = flt.f0
+        else:
+            raise ValueError(f"Unsupported filter kind in from_filter: {flt.kind!r}")
+
         return cls(
             topo=cm.topo,
             kind=flt.kind,
-            f_edges=flt.f_edges,
-            f0=flt.f0,
-            bw=flt.bw,
-            fbw=flt.fbw,
+            f_edges=f_edges_arg,
+            f0=f0_arg,
+            bw=bw_arg,
+            fbw=fbw_arg,
             f_grid=f_grid,
             unit=unit,
             include_qu=include_qu,
@@ -945,7 +990,6 @@ class CMFilter(BaseSurrogate):
             fix_sign=fix_sign,
             output=output,
         )
-
 
     # ---------------------------------------------------------------- repr
     def __repr__(self) -> str:  # pragma: no cover
