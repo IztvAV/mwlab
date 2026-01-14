@@ -181,8 +181,8 @@ def online_correct():
     # inference_model = work_model_wide.inference("saved_models/EAMU4-KuIMUXT2-BPFC4/best-epoch=28-train_loss=0.14318-val_loss=0.14503-val_r2=0.97508-val_mse=0.00196-val_mae=0.01912-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
     inference_model = work_model.inference(configs.MODEL_CHECKPOINT_PATH)
 
-    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
-    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
+    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
+    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
 
     fast_calc = FastMN2toSParamCalculation(matrix_order=work_model.orig_filter.coupling_matrix.matrix_order,
                                            wlist=work_model.orig_filter.f_norm,
@@ -217,7 +217,7 @@ def online_correct():
     optim = torch.optim.AdamW(params=params, lr=0.0005370623202982373, weight_decay=1e-5)
     sch = torch.optim.lr_scheduler.StepLR(optim, step_size=100, gamma=0.09)
     phase_extractor = phase.PhaseLoadingExtractor(inference_model, work_model, work_model.orig_filter)
-    for i in range(len(tds)-1, len(tds)):
+    for i in range(0, 6):
         # i = random.randint(0, len(tds))
         start_time = time.time()
         orig_fil = tds[i][1]
