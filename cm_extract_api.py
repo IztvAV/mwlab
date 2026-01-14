@@ -128,9 +128,17 @@ def phase_extract(fil: rf.Network):
         w = work_model.orig_filter.f_norm
         a11 = calibration_res['phi1_c']
         a22 = calibration_res['phi2_c']
+
+        phi1 = -2.0 * (a11 + 0 * np.asarray(w))
+        phi2 = -2.0 * (a22 + 0 * np.asarray(w))
+        fil.s[:, 0, 0] = phase.apply_phase_one(fil.s[:, 0, 0], phi1)
+        fil.s[:, 1, 1] = phase.apply_phase_one(fil.s[:, 1, 1], phi2)
+        fil.s[:, 0, 1] = -phase.apply_phase_one(fil.s[:, 0, 1], 0.5 * (phi1 + phi2))
+        fil.s[:, 1, 0] = -phase.apply_phase_one(fil.s[:, 1, 0], 0.5 * (phi1 + phi2))
+
         b11 = calibration_res['b11_opt']
         b22 = calibration_res['b22_opt']
-        ntw_de = phase.apply_phase_for_ntw(fil, w, a11, b11, a22, b22)
+        ntw_de = phase.apply_phase_for_ntw(fil, w, 0, b11, 0, b22)
     return ntw_de
 
 
@@ -282,8 +290,8 @@ def prediction_with_online_correct(fil: rf.Network):
 
 def predict(fil: rf.Network):
     try:
-        # s, m = prediction_with_optim_correct(fil)
-        s, m = prediction_with_online_correct(fil)
+        s, m = prediction_with_optim_correct(fil)
+        # s, m = prediction_with_online_correct(fil)
         return s, m
     except Exception as e:
         raise ValueError(f"На сервере возникла ошибка: {e}") from e
