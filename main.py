@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 import cauchy_method
+import cm_extract_api
 import phase
 import skrf as rf
 import pandas as pd
@@ -150,7 +151,7 @@ def online_correct():
         return torch.stack(vals, dim=0)  # [n_links]
 
     configs = cfg.Configs.init_as_default("default.yml")
-    work_model = common.WorkModel(configs, SamplerTypes.SAMPLER_SOBOL)
+    work_model = common.WorkModel(configs, is_inference=True)
 
     codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
                                                  keys_for_analysis=[f"m_{r}_{c}" for r, c in
@@ -303,140 +304,6 @@ def online_correct():
     print(f"Mean error: {total_err/len(tds)}")
 
 
-def inherence_correct():
-    configs = cfg.Configs.init_as_default("default.yml")
-    work_model = common.WorkModel(configs, SamplerTypes.SAMPLER_SOBOL)
-    codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
-                                                 keys_for_analysis=[f"m_{r}_{c}" for r, c in
-                                                                    work_model.orig_filter.coupling_matrix.links] + [
-                                                                       "Q"] + ["f0"] + ["bw"] + ["a11"] + ["a22"] + [
-                                                                       "b11"] + ["b22"])
-    codec = codec
-    work_model.setup(
-        model_name="resnet_with_correction",
-        model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
-        dm_codec=codec
-    )
-
-    # Загружаем лучшую модель
-    inference_model = work_model.inference(configs.MODEL_CHECKPOINT_PATH)
-
-    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband")
-
-    fast_calc = FastMN2toSParamCalculation(matrix_order=work_model.orig_filter.coupling_matrix.matrix_order,
-                                           wlist=work_model.orig_filter.f_norm,
-                                           Q=work_model.orig_filter.Q,
-                                           fbw=work_model.orig_filter.fbw)
-    loss = CustomLosses("log_cosh")
-    codec_db = copy.deepcopy(codec)
-    codec_db.y_channels = ['S1_1.db', 'S1_2.db', 'S2_2.db']
-
-    # corr_model = MatrixCorrectionNet(m_dim=len(codec.x_keys), hidden_dim=1024, s_shape=(len(codec_db.y_channels), 301))
-    # # corr_model = CorrectionNet(s_shape=(3, 301), m_dim=len(codec.x_keys), hidden_dim=512)
-    # corr_model.train()
-    # total_err = 0
-    # optim = torch.optim.AdamW(params=corr_model.parameters(), lr=1e-5, weight_decay=1e-2)
-
-    # Инициализация перед циклом: стартуем с предсказания сети под текущую АЧХ
-    orig_fil = tds[0][1]
-    pred_prms = inference_model.predict_x(orig_fil)
-    pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms, work_model.codec)
-
-    prev_x = pred_fil.coupling_matrix.factors.detach()
-
-    # >>> new: аккумуляторы метрик по всем итерациям
-    total_L, total_fit, total_time = 0.0, 0.0, 0.0
-
-    for i in range(len(tds)):
-        orig_fil = tds[i][1]
-        ts = TouchstoneData(orig_fil)
-
-        # целевая АЧХ (dB)
-        s_target = codec_db.encode(ts)[1].unsqueeze(0)  # [1, C, L]
-
-        # >>> new: старт замера времени итерации
-        t0 = time.time()
-
-        # холодный старт + смешивание с прошлым
-        cold_prms = inference_model.predict_x(orig_fil)
-        cold_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, cold_prms, work_model.codec)
-        cold_x = cold_fil.coupling_matrix.factors.detach()
-
-        alpha = 0.5  # доля «памяти»
-        x0 = (alpha * prev_x + (1 - alpha) * cold_x).clone().detach().requires_grad_(True)
-
-        # (опционально) Q как параметр
-        q0 = torch.nn.Parameter(torch.tensor(
-            cold_fil.Q if hasattr(cold_fil, "Q") else work_model.orig_filter.Q,
-            dtype=torch.float32))
-        # gamma = torch.nn.Parameter(torch.tensor(1.0 / float(pred_fil.Q), dtype=torch.float32))
-        # gamma_prev = gamma.detach().clone()
-
-        opt = torch.optim.LBFGS([x0], lr=1, max_iter=10000, line_search_fn='strong_wolfe')
-        mu = 1e-2 # сила якоря к прошлой матрице
-        mu_gamma = 1e-2
-
-        fast = FastMN2toSParamCalculation(
-            matrix_order=pred_fil.coupling_matrix.matrix_order,
-            fbw=cold_fil.fbw,
-            Q=cold_fil.Q,  # стартовое Q (реальное число)
-            wlist=work_model.orig_filter.f_norm,  # ваша сетка частот (нормированная)
-        )
-
-        # delta_gamma_allow = (0.05 * gamma_prev.abs()).clamp_min(1e-12)  # 5% от прошлого γ
-        def closure():
-            opt.zero_grad()
-            M = CouplingMatrix.from_factors(x0, pred_fil.coupling_matrix.links, pred_fil.coupling_matrix.matrix_order)
-
-            # q0 = 1/gamma
-            # fast.update_Q(q0)
-            _, s11, s21, s22 = fast.RespM2(M, with_s22=True)
-            s_pred = torch.stack([MWFilter.to_db(s11), MWFilter.to_db(s21), MWFilter.to_db(s22)]).unsqueeze(0)
-
-            fit = loss(s_pred, s_target)
-            reg = mu * torch.mean((x0 - prev_x) ** 2)
-            # reg_gamma = mu_gamma * ((gamma - gamma_prev)** 2)
-            L = fit + reg
-            L.backward()
-            return L
-
-        opt.step(closure)
-
-        # >>> new: чистая оценка финального лосса и времени (без градиентов)
-        @torch.no_grad()
-        def eval_final():
-            M = CouplingMatrix.from_factors(x0, pred_fil.coupling_matrix.links, pred_fil.coupling_matrix.matrix_order)
-            # q0 = 1/gamma
-            # fast.update_Q(q0)  # или q0.detach()
-            _, s11, s21, s22 = fast.RespM2(M, with_s22=True)
-            s_pred = torch.stack([MWFilter.to_db(s11), MWFilter.to_db(s21), MWFilter.to_db(s22)]).unsqueeze(0)
-            fit = loss(s_pred, s_target)
-            reg = mu * torch.mean((x0 - prev_x) ** 2)
-            L = fit + reg
-            print(f"Extracted Q: {q0.item():.3f}")  # 👈 печатайте .item()
-            return fit.item(), reg.item(), L.item()
-        fit_val, reg_val, L_val = eval_final()
-        elapsed = time.time() - t0
-
-        # >>> new: печать и аккумуляция метрик
-        print(f"[{i}] FINAL: L={L_val:.6f} (fit={fit_val:.6f}, prox={reg_val:.6f}) | time={elapsed:.2f}s")
-        total_L += L_val
-        total_fit += fit_val
-        total_time += elapsed
-
-        with torch.no_grad():
-            # переносим как якорь на следующую итерацию
-            prev_x = x0.detach().clone()
-            tuned_prms = dict(zip(cold_prms.keys(), prev_x))
-            pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, tuned_prms, work_model.codec)
-            # pred_fil.coupling_matrix.plot_matrix()
-            inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
-
-    # >>> new: сводка по всему циклу
-    n = len(tds)
-    print(f"MEAN over {n} iters: L={total_L / n:.6f}, fit={total_fit / n:.6f}, time/iter={total_time / n:.2f}s")
-
-
 def fine_tune_model(origin_preds, inference_model: nn.Module, target_input: MWFilter, work_model: WorkModel, device='cuda', epochs=10, lr=1e-4, iterations=5):
     """
     model: обученная модель
@@ -531,53 +398,30 @@ def fine_tune_model(origin_preds, inference_model: nn.Module, target_input: MWFi
 
 def main():
     configs = cfg.Configs.init_as_default("default.yml")
-    work_model = common.WorkModel(configs, SamplerTypes.SAMPLER_SOBOL)
-    # common.plot_distribution(work_model.ds, num_params=len(work_model.ds_gen.origin_filter.coupling_matrix.links))
-    # plt.show()
-
-    codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
-                                                 keys_for_analysis=[f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links]+["Q"] + ["f0"] + ["bw"] + ["a11"] + ["a22"] + ["b11"] + ["b22"])
-                                                 # keys_for_analysis=[f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links])
-    # codec.y_channels = ['S1_1.real', 'S1_2.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S1_2.imag', 'S2_1.imag', 'S2_2.imag', 'S1_1.db', 'S1_2.db', 'S2_1.db', 'S2_2.db']
-    codec = codec
-
-    work_model.setup(
-        model_name="resnet_with_correction",
-        model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
-        dm_codec=codec
-    )
-
-    # synth_analyzer = TouchstoneDatasetAnalyzer(work_model.ds)
-    # fig = synth_analyzer.plot_s_stats(
-    #     port_out=2, port_in=1, metric='db', stats=['mean', 'std', 'min', 'max']
-    # )
-    # fig.suptitle("Статистика по синтетике S21 (дБ)")
-    # fig = synth_analyzer.plot_s_stats(
-    #     port_out=1, port_in=1, metric='db', stats=['mean', 'std', 'min', 'max']
-    # )
-    # fig.suptitle("Статистика по синтетике S11 (дБ)")
-    #
-
-    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband",
-    #                         s_tf=S_Resample(301))
-
-    # meas_analyzer = TouchstoneDatasetAnalyzer(tds)
-    # fig = meas_analyzer.plot_s_stats(
-    #     port_out=2, port_in=1, metric='db', stats=['mean', 'std', 'min', 'max']
-    # )
-    # fig.suptitle("Статистика по измерениям S21 (дБ)")
-    # fig = meas_analyzer.plot_s_stats(
-    #     port_out=1, port_in=1, metric='db', stats=['mean', 'std', 'min', 'max']
-    # )
-    # fig.suptitle("Статистика по измерениям S11 (дБ)")
-
-    # lit_model = work_model.train(
-    #     optimizer_cfg={"name": "AdamW", "lr": 0.0009400000000000001, "weight_decay": 1e-5},
-    #     scheduler_cfg={"name": "StepLR", "step_size": 25, "gamma": 0.09},
-    #     # optimizer_cfg={"name": "AdamW", "lr": 0.0005371, "weight_decay": 1e-5},
-    #     # scheduler_cfg={"name": "StepLR", "step_size": 30, "gamma": 0.01},
-    #     loss_fn=CustomLosses("sqrt_mse_with_l1", weight_decay=1, weights=None)
-    #     )
+    lit_model = cm_extract_api.train_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
+    # # work_model = common.WorkModel(configs, is_inference=False)
+    # # # common.plot_distribution(work_model.ds, num_params=len(work_model.ds_gen.origin_filter.coupling_matrix.links))
+    # # # plt.show()
+    # #
+    # # codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
+    # #                                              keys_for_analysis=[f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links]+["Q"] + ["f0"] + ["bw"] + ["a11"] + ["a22"] + ["b11"] + ["b22"])
+    # #                                              # keys_for_analysis=[f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links])
+    # # # codec.y_channels = ['S1_1.real', 'S1_2.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S1_2.imag', 'S2_1.imag', 'S2_2.imag', 'S1_1.db', 'S1_2.db', 'S2_1.db', 'S2_2.db']
+    # # codec = codec
+    # #
+    # # work_model.setup(
+    # #     model_name="resnet_with_correction",
+    # #     model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
+    # #     dm_codec=codec
+    # # )
+    # #
+    # # lit_model = work_model.train(
+    # #     optimizer_cfg={"name": "AdamW", "lr": 0.0009400000000000001, "weight_decay": 1e-5},
+    # #     scheduler_cfg={"name": "StepLR", "step_size": 25, "gamma": 0.09},
+    # #     # optimizer_cfg={"name": "AdamW", "lr": 0.0005371, "weight_decay": 1e-5},
+    # #     # scheduler_cfg={"name": "StepLR", "step_size": 30, "gamma": 0.01},
+    # #     loss_fn=CustomLosses("sqrt_mse_with_l1", weight_decay=1, weights=None)
+    # #     )
 
     # Загружаем лучшую модель
     # checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=12-val_loss=0.01266-train_loss=0.01224.ckpt",
@@ -604,6 +448,7 @@ def main():
     # TODO: РЕФАКТОРИНГ МЕТОДОВ WORK_MODEL!!!!!
     phase_extractor = phase.PhaseLoadingExtractor(inference_model, work_model, work_model.orig_filter)
 
+    codec = cm_extract_api.work_model.codec
     loss = nn.L1Loss()
     codec_db = copy.deepcopy(codec)
     codec_db.y_channels = ['S1_1.db', 'S2_1.db', 'S2_2.db']
@@ -815,7 +660,6 @@ def plot_pl_csv_wide(csv_path, outdir="artifacts_opt3"):
 if __name__ == "__main__":
     # csv_path = "lightning_logs/simple_opt_csv/version_0/metrics.csv"
     # plot_pl_csv_wide(csv_path)
-    # main()
-    online_correct()
-    # inherence_correct()
+    main()
+    # online_correct()
     plt.show()

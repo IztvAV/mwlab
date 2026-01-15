@@ -49,14 +49,16 @@ def create_origin_filter(configs: cfg.Configs, f_unit=None, resample_scale=301):
     return origin_filter
 
 
-def create_sampler(orig_filter: MWFilter, configs: cfg.Configs, with_one_param: bool=False):
+def create_sampler(orig_filter: MWFilter, configs: cfg.Configs, is_inference: bool, with_one_param: bool=False):
+    dataset_size = configs.APP_CONFIG.dataset.size.train if not is_inference else configs.APP_CONFIG.dataset.size.infer
+
     sampler_configs = {
         "pss_origin": configs.APP_CONFIG.dataset.pss_origin,
         "pss_shifts_delta": configs.APP_CONFIG.dataset.pss_sampler_delta,
         # "cm_shifts_delta": CMShifts(self_coupling=1.8, mainline_coupling=0.3, cross_coupling=9e-2, parasitic_coupling=5e-3),
         # "cm_shifts_delta": CMShifts(self_coupling=2.0, mainline_coupling=0.3, cross_coupling=5e-2, parasitic_coupling=5e-3),
         "cm_shifts_delta": configs.APP_CONFIG.dataset.matrix_sampler_delta,
-        "samplers_size": configs.APP_CONFIG.dataset.size,
+        "samplers_size": dataset_size,
     }
 
     print(f"Current sampler is: {configs.APP_CONFIG.dataset.sampler_type}")
@@ -96,7 +98,7 @@ def create_sampler(orig_filter: MWFilter, configs: cfg.Configs, with_one_param: 
     #     qs=samplers_all_params.qs
     # )
 
-    sampler_configs["samplers_size"] = int(configs.APP_CONFIG.dataset.size / 100)
+    sampler_configs["samplers_size"] = int(dataset_size / 100)
     samplers_with_one_params = CMTheoreticalDatasetGeneratorSamplers.create_samplers(orig_filter,
                                                                                          samplers_type=sampler_type(
                                                                                              one_param=True),
@@ -334,14 +336,14 @@ class MySafeCheckpoint(ModelCheckpoint):
 
 
 class WorkModel:
-    BEST_MODEL_FILENAME_SUFFIX = "-batch_size={batch_size}-base_dataset_size={base_dataset_size}-sampler={sampler_type}-cm_shifts={self_couplings};{mainline_couplings};{cross_couplings}-ps_origin={a11_o};{a22_o};{b11_o};{b22_o}-ps_shifts={a11_s};{a22_s};{b11_s};{b22_s}"
-    def __init__(self, configs: cfg.Configs, sampler_type=SamplerTypes.SAMPLER_SOBOL):
+    BEST_MODEL_FILENAME_SUFFIX = "-batch_size={batch_size}-train_dataset_size={train_dataset_size}-sampler={sampler_type}-cm_shifts={self_couplings};{mainline_couplings};{cross_couplings}-ps_origin={a11_o};{a22_o};{b11_o};{b22_o}-ps_shifts={a11_s};{a22_s};{b11_s};{b22_s}"
+    def __init__(self, configs: cfg.Configs, is_inference: bool):
         L.seed_everything(0)
         print("Создаем фильтр")
         self.orig_filter = create_origin_filter(configs, resample_scale=301)
         print("Создаем сэмплеры")
         self.configs = configs
-        self.samplers = create_sampler(self.orig_filter, configs)
+        self.samplers = create_sampler(self.orig_filter, configs, is_inference=is_inference)
         self.ds_gen = CMTheoreticalDatasetGenerator(
             path_to_save_dataset=os.path.join(self.configs.ENV_DATASET_PATH, self.samplers.cms.type.name, f"{len(self.samplers.cms)}"),
             backend_type='ram',
@@ -368,7 +370,7 @@ class WorkModel:
                                       filename="best-{epoch}-{train_loss:.5f}-{val_loss:.5f}-{val_r2:.5f}-{val_mse:.5f}-"
                                                                   "{val_mae:.5f}" + self.BEST_MODEL_FILENAME_SUFFIX.format(
                                                              batch_size=self.configs.BATCH_SIZE,
-                                                             base_dataset_size=self.configs.BASE_DATASET_SIZE,
+                                                             train_dataset_size=self.configs.TRAIN_DATASET_SIZE,
                                                              sampler_type=self.samplers.cms.type,
                                                              self_couplings=self.configs.APP_CONFIG.dataset.matrix_sampler_delta.self_coupling,
                                                              mainline_couplings=self.configs.APP_CONFIG.dataset.matrix_sampler_delta.mainline_coupling,

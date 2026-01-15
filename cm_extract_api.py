@@ -49,21 +49,38 @@ calibration_res: dict or None = None
 calibrated: bool = False
 
 
-class CorrectionNet(nn.Module):
-    def __init__(self, s_shape, m_dim, hidden_dim=256):
-        super().__init__()
-        s_dim = s_shape[0] * s_shape[1]  # 301 * 8 = 2408 or 301 * 4 = 1204
-        self.fc1 = nn.Linear(s_dim + m_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, m_dim)
+def _get_configs_from_manifest(manifest_path: str|os.PathLike|None=None) -> cfg.Configs:
+    if manifest_path is None:
+        print("Load default configs")
+        configs = cfg.Configs.init_as_default("D:\\Burlakov\\pyprojects\\mwlab\\default.yml")
+    else:
+        print(f"Load configs from: {manifest_path}")
+        configs = cfg.Configs(manifest_path)
+    return configs
 
-    def forward(self, s_params, matrix_pred):
-        s_params = s_params.view(s_params.size(0), -1)  # B x 2408 or B x 1204
-        x = torch.cat([s_params, matrix_pred], dim=1)
-        x = F.silu(self.fc1(x))
-        x = F.silu(self.fc2(x))
-        delta = self.fc3(x)
-        return matrix_pred + delta
+
+def train_model(manifest_path: str|os.PathLike|None=None):
+    configs = _get_configs_from_manifest(manifest_path)
+    work_model = common.WorkModel(configs, is_inference=False)
+    codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
+                                                 keys_for_analysis=[f"m_{r}_{c}" for r, c in
+                                                                    work_model.orig_filter.coupling_matrix.links] +
+                                                                   ["Q"] + ["f0"] + ["bw"] + ["a11"] +
+                                                                   ["a22"] + ["b11"] + ["b22"])
+    codec = codec
+    work_model.setup(
+        model_name="resnet_with_correction",
+        model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
+        dm_codec=codec
+    )
+
+    lit_model = work_model.train(
+        optimizer_cfg={"name": "AdamW", "lr": 0.0009400000000000001, "weight_decay": 1e-5},
+        scheduler_cfg={"name": "StepLR", "step_size": 25, "gamma": 0.09},
+        loss_fn=CustomLosses("sqrt_mse_with_l1", weight_decay=1, weights=None)
+    )
+
+    return lit_model
 
 
 
@@ -71,11 +88,8 @@ def load_model(manifest_path: str|os.PathLike|None=None):
     """ Пока в таком формате. В дальнейшем надо будет стандартизировать названия моделей """
     try:
         global work_model
-        if manifest_path is None:
-            configs = cfg.Configs.init_as_default("D:\\Burlakov\\pyprojects\\mwlab\\default.yml")
-        else:
-            configs = cfg.Configs(manifest_path)
-        work_model = common.WorkModel(configs, SamplerTypes.SAMPLER_SOBOL)
+        configs = _get_configs_from_manifest(manifest_path)
+        work_model = common.WorkModel(configs, is_inference=True)
         codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
                                                      keys_for_analysis=[f"m_{r}_{c}" for r, c in
                                                                         work_model.orig_filter.coupling_matrix.links] +
@@ -170,7 +184,6 @@ def prediction_with_optim_correct(fil: rf.Network):
     optim_filter = phase.apply_phase_for_ntw(optim_filter, w, *phase_opt)
     return optim_filter.s, optim_filter.coupling_matrix.matrix.numpy()
 
-pred_fil = None
 
 def prediction_with_online_correct(fil: rf.Network):
     def factors_from_preds(preds: dict, links: list, ref_tensor: torch.Tensor):
@@ -195,13 +208,7 @@ def prediction_with_online_correct(fil: rf.Network):
             vals.append(v)
         return torch.stack(vals, dim=0)  # [n_links]
 
-    global inference_model_ft, corr_optim, corr_fast_calc, pred_fil
-
-    if pred_fil is None:
-        pred_fil = fil
-    else:
-        delta = abs(pred_fil.s) - abs(fil.s)
-        pass
+    global inference_model_ft, corr_optim, corr_fast_calc
 
     codec = work_model.codec
 
@@ -295,121 +302,6 @@ def predict(fil: rf.Network):
         return s, m
     except Exception as e:
         raise ValueError(f"На сервере возникла ошибка: {e}") from e
-
-
-
-prev_x = None
-tuned_prms = None
-last_fil = None
-
-def inherence_correct(orig_fil: rf.Network):
-    global prev_x, tuned_prms, last_fil
-    codec = work_model.codec
-    fast_calc = FastMN2toSParamCalculation(matrix_order=work_model.orig_filter.coupling_matrix.matrix_order,
-                                           wlist=work_model.orig_filter.f_norm,
-                                           Q=work_model.orig_filter.Q,
-                                           fbw=work_model.orig_filter.fbw)
-    loss = CustomLosses("log_cosh")
-    # loss = nn.L1Loss()
-    codec_db = copy.deepcopy(codec)
-    codec_db.y_channels = ['S1_1.db', 'S1_2.db', 'S2_2.db']
-
-    # Инициализация перед циклом: стартуем с предсказания сети под текущую АЧХ
-    if prev_x is None:
-        pred_prms = inference_model.predict_x(orig_fil)
-        pred_fil = inference_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms, work_model.codec)
-        prev_x = pred_fil.coupling_matrix.factors.detach()
-    else:
-        pred_fil = last_fil
-
-    # >>> new: аккумуляторы метрик по всем итерациям
-    total_L, total_fit, total_time = 0.0, 0.0, 0.0
-
-    ts = TouchstoneData(orig_fil)
-
-    # целевая АЧХ (dB)
-    s_target = codec_db.encode(ts)[1].unsqueeze(0)  # [1, C, L]
-
-    # >>> new: старт замера времени итерации
-    t0 = time.time()
-
-    # холодный старт + смешивание с прошлым
-    cold_prms = inference_model.predict_x(orig_fil)
-    cold_fil = inference_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, cold_prms, work_model.codec)
-    cold_x = cold_fil.coupling_matrix.factors.detach()
-
-    alpha = 0.5  # доля «памяти»
-    x0 = (alpha * prev_x + (1 - alpha) * cold_x).clone().detach().requires_grad_(True)
-
-    # (опционально) Q как параметр
-    q0 = torch.nn.Parameter(torch.tensor(
-        pred_fil.Q if hasattr(pred_fil, "Q") else work_model.orig_filter.Q,
-        dtype=torch.float32))
-    # gamma = torch.nn.Parameter(torch.tensor(1.0 / float(pred_fil.Q), dtype=torch.float32))
-    # gamma_prev = gamma.detach().clone()
-
-    opt = torch.optim.LBFGS([x0], lr=1, max_iter=1000, line_search_fn='strong_wolfe')
-    mu = 1e-2  # сила якоря к прошлой матрице
-    mu_gamma = 1e-2
-
-    fast = FastMN2toSParamCalculation(
-        matrix_order=pred_fil.coupling_matrix.matrix_order,
-        fbw=work_model.orig_filter.fbw,
-        Q=pred_fil.Q,  # стартовое Q (реальное число)
-        wlist=work_model.orig_filter.f_norm,  # ваша сетка частот (нормированная)
-    )
-
-    # delta_gamma_allow = (0.1 * gamma_prev.abs()).clamp_min(1e-12)  # 5% от прошлого γ
-    def closure():
-        opt.zero_grad()
-        M = CouplingMatrix.from_factors(x0, pred_fil.coupling_matrix.links, pred_fil.coupling_matrix.matrix_order)
-
-        # q0 = 1/gamma
-        # fast.update_Q(q0)
-        _, s11, s21, s22 = fast.RespM2(M, with_s22=True)
-        s_pred = torch.stack([MWFilter.to_db(s11), MWFilter.to_db(s21), MWFilter.to_db(s22)]).unsqueeze(0)
-
-        fit = torch.sqrt(loss(s_pred, s_target))
-        reg = mu * torch.median(torch.abs(x0 - prev_x))
-        # reg_gamma = mu_gamma * ((gamma - gamma_prev)** 2)
-        L = fit + reg
-        L.backward()
-        return L
-
-    opt.step(closure)
-
-    # >>> new: чистая оценка финального лосса и времени (без градиентов)
-    @torch.no_grad()
-    def eval_final():
-        M = CouplingMatrix.from_factors(x0, pred_fil.coupling_matrix.links, pred_fil.coupling_matrix.matrix_order)
-        # q0 = 1/gamma
-        # fast.update_Q(q0)  # или q0.detach()
-        _, s11, s21, s22 = fast.RespM2(M, with_s22=True)
-        s_pred = torch.stack([MWFilter.to_db(s11), MWFilter.to_db(s21), MWFilter.to_db(s22)]).unsqueeze(0)
-        fit = loss(s_pred, s_target)
-        reg = mu * torch.median(torch.abs(x0 - prev_x))
-        L = fit + reg
-        print(f"Extracted Q: {q0.item():.3f}")  # 👈 печатайте .item()
-        return fit.item(), reg.item(), L.item()
-    fit_val, reg_val, L_val = eval_final()
-    elapsed = time.time() - t0
-
-    # >>> new: печать и аккумуляция метрик
-    print(f"FINAL: L={L_val:.6f} (fit={fit_val:.6f}, prox={reg_val:.6f}) | time={elapsed:.2f}s")
-    total_L += L_val
-    total_fit += fit_val
-    total_time += elapsed
-
-    with torch.no_grad():
-        # переносим как якорь на следующую итерацию
-        prev_x = x0.detach().clone()
-        tuned_prms = dict(zip(cold_prms.keys(), prev_x))
-        pred_fil = MWFilterBaseLMWithMetrics.create_filter_from_prediction(orig_fil, work_model.orig_filter, tuned_prms, work_model.codec)
-        # pred_fil._Q = 1/gamma
-        # pred_fil.coupling_matrix.plot_matrix()
-        # inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
-        last_fil = pred_fil
-    return pred_fil
 
 
 

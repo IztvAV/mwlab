@@ -1,26 +1,3 @@
-# import os
-#
-# F_START_MHZ = 11489.7
-# F_STOP_MHZ = 11590.7
-# # F_START_MHZ = 12695
-# # F_STOP_MHZ = 12755
-#
-# BATCH_SIZE = 32
-# BASE_DATASET_SIZE = 1_000
-# # FILTER_NAME = "EAMU4T1-BPFC2"
-# # FILTER_NAME = "ERV-KuIMUXT1-BPFC1"
-# # FILTER_NAME = "EAMU4-KuIMUXT3-BPFC1"
-# FILTER_NAME = "EAMU4-KuIMUXT2-BPFC2"
-# # FILTER_NAME = "EAMU4-KuIMUXT2-BPFC4"
-# # FILTER_NAME = "SCYA501-KuIMUXT5-BPFC3"
-#
-# ENV_DEFAULT_FILTER_PATH = os.path.join(os.getcwd(), "filters", "FilterData", FILTER_NAME)
-# ENV_ORIGIN_DATA_PATH = os.path.join(ENV_DEFAULT_FILTER_PATH, "origins_data")
-# ENV_DATASET_PATH = os.path.join(ENV_DEFAULT_FILTER_PATH, "datasets_data")
-# ENV_TUNE_DATASET_PATH = os.path.join(ENV_DEFAULT_FILTER_PATH, "tune_data")
-# ENV_SAVED_MODELS_PATH = os.path.join(ENV_DEFAULT_FILTER_PATH, "saved_models")
-
-
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,11 +51,16 @@ class PssSampler:
 
 
 @dataclass
+class DatasetSizeConfig:
+    train: int
+    infer: int
+
+@dataclass
 class DatasetConfig:
     matrix_sampler_delta: MatrixSamplerConfig
     pss_origin: PssSampler
     pss_sampler_delta: PssSampler
-    size: int  # раньше BASE_DATASET_SIZE
+    size: DatasetSizeConfig  # раньше BASE_DATASET_SIZE
     sampler_type: str
 
 
@@ -108,20 +90,6 @@ class AppConfig:
     inference: InferenceConfig
 
     base_dir: Path  # добавляем поле, чтобы потом легко получать ENV_* пути
-
-
-# =========
-# Функция загрузки manifest.yml
-# =========
-
-# =========
-# Формируем старые константы
-# =========
-
-
-# APP_CONFIG: AppConfig = init_manifest_configs(MANIFEST_PATH)
-
-# ---- Поля, которые раньше были константами в configs.py ----
 
 
 class Configs:
@@ -174,9 +142,10 @@ class Configs:
         matrix_sampler_cfg = MatrixSamplerConfig(**dataset_section["matrix_sampler_delta"])
         pss_origin_cfg = PssSampler(**dataset_section["pss_origin"])
         pss_sampler_cfg = PssSampler(**dataset_section["pss_sampler_delta"])
+        dataset_size_cfg = DatasetSizeConfig(**dataset_section['size'])
 
         dataset_cfg = DatasetConfig(
-            size=dataset_section["size"],
+            size=dataset_size_cfg,
             sampler_type=dataset_section["sampler_type"],
             matrix_sampler_delta=matrix_sampler_cfg,
             pss_origin=pss_origin_cfg,
@@ -209,9 +178,17 @@ class Configs:
     def BATCH_SIZE(self):
         return self.APP_CONFIG.inference.batch_size
 
+    # @property
+    # def BASE_DATASET_SIZE(self):
+    #     return self.APP_CONFIG.dataset.size
+
     @property
-    def BASE_DATASET_SIZE(self):
-        return self.APP_CONFIG.dataset.size
+    def TRAIN_DATASET_SIZE(self):
+        return self.APP_CONFIG.dataset.size.train
+
+    @property
+    def INFERENCE_DATASET_SIZE(self):
+        return self.APP_CONFIG.dataset.size.infer
 
     @property
     def FILTER_NAME(self):
