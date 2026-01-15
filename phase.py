@@ -1917,7 +1917,7 @@ def plot_phase_histograms(res_list, bins=50):
 
 def main():
     i = 0
-    work_model = common.WorkModel(configs.ENV_DATASET_PATH, configs.BASE_DATASET_SIZE, SamplerTypes.SAMPLER_SOBOL)
+    work_model = common.WorkModel(configs)
     # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband")
     tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted")
     tds_cst = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/cst")

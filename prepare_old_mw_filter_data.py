@@ -3,8 +3,6 @@ import os
 import skrf as rf
 
 from filters.filter import couplilng_matrix as cm
-import copy
-from filters.filter.mwfilter import MWFilter
 import mwlab
 import matplotlib.pyplot as plt
 
@@ -48,11 +46,11 @@ def main():
     parser.add_argument("-p", "--path_to_save", type=str, default=os.path.join(os.getcwd(), "filters", "origins", f"{FILTER_NAME}"), help="Путь для сохранения измененного файла")
 
     args = parser.parse_args()
-    filter_name = get_filter_name(path_to_s_parameters=args.freq_resp)
+    freq_resp_filename = get_filter_name(path_to_s_parameters=args.freq_resp)
     matrix = cm.CouplingMatrix.from_file(args.matrix)
     net = rf.Network(args.freq_resp)
 
-    path_to_save = os.path.join(args.path_to_save, filter_name+"_modify.s2p")
+    path_to_save = os.path.join(args.path_to_save, freq_resp_filename+"_modify.s2p")
     new_td = mwlab.TouchstoneData(
         network=rf.Network(frequency=net.frequency, s=net.s, z0=net.z0),
         params={"f0": args.center_freq, "bw": args.bandwidth, "Q": args.quality_factor, "N": matrix.matrix_order-2}

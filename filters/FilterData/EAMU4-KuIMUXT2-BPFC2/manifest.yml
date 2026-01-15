@@ -32,7 +32,9 @@ dataset:
     b11: 0.1
     b22: 0.1
   sampler_type: "sobol"   # sobol, lhs, std
-  size: 1000
+  size:
+    train: 300000
+    infer: 1000
 
 model:
   checkpoint: "best-epoch=27-train_loss=0.08527-val_loss=0.07506-val_r2=0.99731-val_mse=0.00021-val_mae=0.00531-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt"
