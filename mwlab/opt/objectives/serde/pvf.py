@@ -1084,6 +1084,13 @@ def pvf_to_mwlab_dict(
             aggregator = {"type": canonicalize_alias("aggregator", "ripple"), "params": {}}
             comparator = {"type": canonicalize_alias("comparator", "le"), "params": {"limit": thr}}
 
+        # --- ensure ApertureSlopeTransform is always the last transform ---
+        AP_SLOPE = canonicalize_alias("transform", "ApertureSlopeTransform")
+        if transforms:
+            slope = [t for t in transforms if t.get("type") == AP_SLOPE]
+            if slope:
+                transforms[:] = [t for t in transforms if t.get("type") != AP_SLOPE] + slope
+
         # transform поле в mwlab может быть:
         # - отсутствовать (None)
         # - dict ComponentSpec

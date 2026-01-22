@@ -499,6 +499,11 @@ def _build_target_line(
     if mode == "median":
         return np.full_like(v0, float(np.median(v0)), dtype=float), None
 
+    if mode == "center":
+        vv = np.asarray(v0, dtype=float)
+        c = 0.5 * (float(np.min(vv)) + float(np.max(vv)))
+        return np.full_like(v0, c, dtype=float), None
+
     if mode == "linear":
         # Линейная аппроксимация v0 ≈ a + b f
         if f.size < 2:
@@ -1159,6 +1164,8 @@ class RippleIntAgg(_IntegralAggBase):
     - float (константа),
     - "mean"   : константа mean(vals),
     - "median" : константа median(vals),
+    - "center" : константа, равная (min(vals) + max(vals)) / 2
+                 (центр диапазона значений),
     - "linear" : линейная аппроксимация vals ≈ a + b f,
     - табличное задание: последовательность точек [(f, y), ...] (линейная интерполяция).
     """
