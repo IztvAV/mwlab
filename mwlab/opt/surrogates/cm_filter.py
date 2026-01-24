@@ -49,9 +49,11 @@ from mwlab.opt.objectives.network_like import SParamView
 
 from mwlab.filters.topologies import Topology
 from mwlab.filters.cm_schema import ParamSchema
+from mwlab.filters.cm_param_tying import TiedParamSchema, mirror_perm_2port, build_tied_schema
 from mwlab.filters.cm_core import CoreSpec, solve_sparams
 from mwlab.filters.cm import CouplingMatrix  # нужен для создания Filter и для from_filter()
 from mwlab.filters.devices import Filter
+
 
 # -----------------------------------------------------------------------------
 #                                  Типы
@@ -146,6 +148,14 @@ class CMFilter(BaseSurrogate):
         base_qu: Optional[Union[float, Sequence[float], np.ndarray]] = None,  # это НОРМИРОВАННЫЙ qu
         base_phase_a: Optional[Union[float, Sequence[float], Mapping[int, float]]] = None,
         base_phase_b: Optional[Union[float, Sequence[float], Mapping[int, float]]] = None,
+        # --- параметрические симметрии / tying ---
+        # symmetry=None   -> поведение как раньше (полное пространство ParamSchema)
+        # symmetry="mirror" -> зеркальная симметрия (относительно побочной диагонали) для 2-портов
+        symmetry: Optional[str] = None,
+        tie_ports: bool = True,
+        tie_qu: bool = True,
+        tie_phases: bool = False,
+        validate_symmetry: bool = True,
         # torch/device параметры расчёта
         device: str = "cpu",
         method: str = "auto",
@@ -162,6 +172,8 @@ class CMFilter(BaseSurrogate):
         self.method = str(method)
         self.fix_sign = bool(fix_sign)
         self.output: OutputKind = output
+        # хранить в явном виде, чтобы было видно в логах/отладке
+        self.symmetry = (str(symmetry).strip().lower() if symmetry is not None else None) or None
 
         # Политика добротности:
         #   - "none": qu НЕ является параметром оптимизации, берём фиксированный Q_fixed (физический)
@@ -248,7 +260,7 @@ class CMFilter(BaseSurrogate):
         if base_phase_b is not None:
             include_phase = (*include_phase, "b")
 
-        # -------------------- ParamSchema: "единственный источник истины" по параметрам --------------------
+        # -------------------- ParamSchema: полное пространство параметров --------------------
         schema_include_qu = "none" if self.include_qu == "none" else self.include_qu  # type: ignore[assignment]
         self.schema: ParamSchema = ParamSchema.from_topology(
             self.topo,
@@ -256,14 +268,49 @@ class CMFilter(BaseSurrogate):
             include_phase=include_phase,
         )
 
-        # Быстрый мэп ключ->индекс в параметр-векторе.
-        self._idx: Dict[str, int] = {k: i for i, k in enumerate(self.schema.keys)}
+        # -------------------- (опционально) связывание параметров по симметрии --------------------
+        # ВАЖНО: tying — это слой НАД ParamSchema: мы меняем только параметризацию,
+        # но сохраняем assemble()/solve_sparams() в прежнем виде.
+        self._tied: Optional[TiedParamSchema] = None
+        if self.symmetry is not None:
+            if self.symmetry in {"mirror", "antidiag", "anti-diagonal", "anti_diagonal"}:
+                # КРИТИЧНО: строим tied-схему ПОВЕРХ уже созданной self.schema,
+                # чтобы не получить рассинхронизацию порядка/ключей при повторном
+                # ParamSchema.from_topology(...) (например, из-за недетерминированного topo.links).
+                perm = mirror_perm_2port(self.topo.order, tie_ports=bool(tie_ports))
+                self._tied = build_tied_schema(
+                    self.schema,
+                    perm,
+                    tie_M=True,
+                    tie_qu=bool(tie_qu),
+                    tie_phases=bool(tie_phases),
+                    validate_topology=bool(validate_symmetry),
+                    store_groups=False,
+                )
+            else:
+                raise ValueError(
+                    "CMFilter.__init__: неизвестный режим symmetry. "
+                    "Поддерживается: None | 'mirror'. "
+                    f"Получено: {symmetry!r}"
+                )
+
+        # -------------------- Индексация параметров для x --------------------
+        # Если tying включён, оптимизационный вектор живёт в free-space,
+        # а любые ключи из полной схемы мапятся в соответствующий free-индекс.
+        # Если tying выключен — всё как раньше: индексы по полной схеме.
+        if self._tied is None:
+            self._idx: Dict[str, int] = {k: i for i, k in enumerate(self.schema.keys)}
+            self._opt_size = self.schema.size
+        else:
+            # key_to_free покрывает ВСЕ ключи полной схемы, но возвращает индекс в free-space
+            self._idx = dict(self._tied.key_to_free)
+            self._opt_size = self._tied.free_size
 
         # Для удобства: набор ключей M* (чтобы быстро валидировать и применять overrides).
         # Замечание: schema.keys включает также qu и фазы, но нам часто нужно проверять именно блок M.
         self._m_keys = set(self.schema.keys[self.schema.slices["M"].start : self.schema.slices["M"].stop])
 
-        # -------------------- базовый параметр-вектор (CPU), который мы потом клонируем и правим --------------------
+        # -------------------- базовый параметр-вектор (CPU) в ОПТИМИЗАЦИОННОМ пространстве --------------------
         base_params: Dict[str, float] = {}
 
         # 1) Базовые mvals: разрешаем задавать не все (остальные станут 0).
@@ -274,7 +321,7 @@ class CMFilter(BaseSurrogate):
                     raise ValueError(f"base_mvals: ожидается ключ вида 'M<i>_<j>', получено {k!r}")
                 if k not in self._idx:
                     raise ValueError(
-                        f"base_mvals: ключ {k!r} отсутствует в ParamSchema. "
+                        f"base_mvals: ключ {k!r} отсутствует в схеме параметров. "
                         f"Проверьте, что индексы в пределах topo.size={self.topo.size}, "
                         f"и что это либо резонаторная диагональ, либо связь из topo.links."
                     )
@@ -303,15 +350,26 @@ class CMFilter(BaseSurrogate):
         if "b" in include_phase:
             self._apply_base_phase_to_params(base_params, "b", base_phase_b)
 
-        # Собираем базовый вектор.
+        # Собираем базовый вектор:
+        #   - если tying выключен -> полный вектор ParamSchema (как раньше),
+        #   - если tying включен  -> свободный (редуцированный) вектор.
         # strict=False: не требуем заполнения всех ключей (незаполненные -> 0).
-        self._base_vec_cpu: torch.Tensor = self.schema.pack(
-            base_params,
-            device="cpu",
-            dtype=torch.float32,
-            strict=False,
-            default=0.0,
-        ).detach()
+        if self._tied is None:
+            self._base_vec_cpu: torch.Tensor = self.schema.pack(
+                base_params,
+                device="cpu",
+                dtype=torch.float32,
+                strict=False,
+                default=0.0,
+            ).detach()
+        else:
+            self._base_vec_cpu = self._tied.pack(
+                base_params,
+                device="cpu",
+                dtype=torch.float32,
+                strict=False,
+                default=0.0,
+            ).detach()
 
         # Кэш переноса base_vec на GPU/другие девайсы (чтобы не делать .to(device) постоянно).
         self._base_vec_by_device: Dict[str, torch.Tensor] = {"cpu": self._base_vec_cpu}
@@ -332,6 +390,36 @@ class CMFilter(BaseSurrogate):
             method=self.method,
             fix_sign=self.fix_sign,
         )
+
+    # ----------------------------------------------------------------- assemble (opt-space -> blocks)
+    def _assemble(self, vec_opt: torch.Tensor, *, device: str):
+        """
+        Единая точка сборки блоков для solve_sparams:
+          - без tying: vec_opt это full-вектор ParamSchema
+          - с tying : vec_opt это free-вектор, который разворачивается в full перед assemble()
+        """
+        if self._tied is None:
+            return self.schema.assemble(vec_opt, device=device)
+        return self._tied.assemble(vec_opt, device=device)
+
+    # ----------------------------------------------------------------- helper: установить параметр с проверкой конфликтов
+    def _set_param_inplace(self, vec: torch.Tensor, key: str, val: float, *, seen: Optional[Dict[int, float]] = None) -> None:
+        """
+        Записать значение параметра в оптимизационный вектор (in-place).
+        Если включён tying, разные ключи могут попадать в один и тот же индекс.
+        Тогда seen используется для детектирования конфликтов.
+        """
+        idx = self._idx[key]
+        fval = float(val)
+        if seen is not None:
+            prev = seen.get(idx)
+            if prev is not None and prev != fval:
+                raise ValueError(
+                    f"Конфликт tied-параметров: ключ {key!r} пытается задать значение {fval}, "
+                    f"но тот же параметр уже был задан как {prev} (одна tied-группа)."
+                )
+            seen[idx] = fval
+        vec[idx] = fval
 
     # ----------------------------------------------------------------- helpers: fixed Q -> qu
     def _compute_qu_fixed_cpu(self, Q_fixed: Union[float, Sequence[float], np.ndarray]) -> Union[float, np.ndarray]:
@@ -494,7 +582,7 @@ class CMFilter(BaseSurrogate):
     # ----------------------------------------------------------------- x -> vec (single/batch)
     def _vector_from_x(self, x: Mapping[str, float], device: str) -> torch.Tensor:
         """
-        Собираем параметр-вектор (L,) для одной точки x:
+        Собираем параметр-вектор в оптимизационном пространстве для одной точки x:
           vec = base_vec + overrides(x)
 
         Важное правило:
@@ -502,6 +590,9 @@ class CMFilter(BaseSurrogate):
             чтобы не оптимизировать параметры вне топологии.
         """
         vec = self._base_vec(device).clone()
+        # seen нужен только при tying (чтобы ловить противоречия при одновременной
+        # подаче нескольких ключей из одной tied-группы)
+        seen: Optional[Dict[int, float]] = {} if (self._tied is not None) else None
 
         # 1) M-ключи: строго должны быть в схеме
         for k, v in x.items():
@@ -510,7 +601,7 @@ class CMFilter(BaseSurrogate):
             if k.startswith("M"):
                 if k not in self._m_keys:
                     raise ValueError(f"Неизвестный/запрещённый параметр матрицы связи: {k!r}")
-                vec[self._idx[k]] = float(v)
+                self._set_param_inplace(vec, k, float(v), seen=seen)
 
         # 2) qu/Q (если разрешено)
         if self.include_qu == "none":
@@ -521,10 +612,10 @@ class CMFilter(BaseSurrogate):
             if any(str(k).startswith(("qu_", "Q_")) for k in x.keys()):
                 raise ValueError("include_qu='none': параметры qu_*/Q_* в x запрещены (используйте Q_fixed)")
         else:
-            self._apply_qu_overrides_inplace(vec, x)
+            self._apply_qu_overrides_inplace(vec, x, seen=seen)
 
         # 3) фазы (если включены в схему)
-        self._apply_phase_overrides_inplace(vec, x)
+        self._apply_phase_overrides_inplace(vec, x, seen=seen)
 
         return vec
 
@@ -542,6 +633,7 @@ class CMFilter(BaseSurrogate):
         vecs = base.expand(B, base.shape[0]).clone()
 
         for i, x in enumerate(xs):
+            seen: Optional[Dict[int, float]] = {} if (self._tied is not None) else None
             # M
             for k, v in x.items():
                 if not isinstance(k, str):
@@ -549,7 +641,7 @@ class CMFilter(BaseSurrogate):
                 if k.startswith("M"):
                     if k not in self._m_keys:
                         raise ValueError(f"Неизвестный/запрещённый параметр матрицы связи: {k!r}")
-                    vecs[i, self._idx[k]] = float(v)
+                    self._set_param_inplace(vecs[i], k, float(v), seen=seen)
 
             # qu/Q
             if self.include_qu == "none":
@@ -559,15 +651,15 @@ class CMFilter(BaseSurrogate):
                 if any(str(k).startswith(("qu_", "Q_")) for k in x.keys()):
                     raise ValueError("include_qu='none': параметры qu_*/Q_* в x запрещены (используйте Q_fixed)")
             else:
-                self._apply_qu_overrides_inplace(vecs[i], x)
+                self._apply_qu_overrides_inplace(vecs[i], x, seen=seen)
 
             # phases
-            self._apply_phase_overrides_inplace(vecs[i], x)
+            self._apply_phase_overrides_inplace(vecs[i], x, seen=seen)
 
         return vecs
 
     # ----------------------------------------------------------------- overrides: qu/Q
-    def _apply_qu_overrides_inplace(self, vec: torch.Tensor, x: Mapping[str, float]) -> None:
+    def _apply_qu_overrides_inplace(self, vec: torch.Tensor, x: Mapping[str, float], *, seen: Optional[Dict[int, float]] = None) -> None:
         """
         Применяем параметры добротности из x к vec (in-place).
 
@@ -603,22 +695,22 @@ class CMFilter(BaseSurrogate):
                 raise ValueError("include_qu='scalar': векторные qu_i/Q_i запрещены, используйте 'qu' или 'Q'")
 
             if has_qu_scalar:
-                vec[self._idx["qu"]] = float(x["qu"])
+                self._set_param_inplace(vec, "qu", float(x["qu"]), seen=seen)
             elif has_Q_scalar:
-                vec[self._idx["qu"]] = float(x["Q"]) * scale
+                self._set_param_inplace(vec, "qu", float(x["Q"]) * scale, seen=seen)
             return
 
         # include_qu == "vec"
         if has_qu_scalar:
             val = float(x["qu"])
             for i in range(1, n + 1):
-                vec[self._idx[f"qu_{i}"]] = val
+                self._set_param_inplace(vec, f"qu_{i}", val, seen=seen)
             return
 
         if has_Q_scalar:
             val = float(x["Q"]) * scale
             for i in range(1, n + 1):
-                vec[self._idx[f"qu_{i}"]] = val
+                self._set_param_inplace(vec, f"qu_{i}", val, seen=seen)
             return
 
         if has_qu_vec:
@@ -626,7 +718,7 @@ class CMFilter(BaseSurrogate):
                 k = f"qu_{i}"
                 if k not in x:
                     raise KeyError(f"Ожидался параметр {k} для qu-вектора (order={n})")
-                vec[self._idx[k]] = float(x[k])
+                self._set_param_inplace(vec, k, float(x[k]), seen=seen)
             return
 
         if has_Q_vec:
@@ -634,13 +726,14 @@ class CMFilter(BaseSurrogate):
                 k = f"Q_{i}"
                 if k not in x:
                     raise KeyError(f"Ожидался параметр {k} для Q-вектора (order={n})")
-                vec[self._idx[f"qu_{i}"]] = float(x[k]) * scale
+                self._set_param_inplace(vec, f"qu_{i}", float(x[k]) * scale, seen=seen)
             return
 
         # Если ничего про qu/Q в x нет — оставляем базовые значения.
 
     # ----------------------------------------------------------------- overrides: phases
-    def _apply_phase_overrides_inplace(self, vec: torch.Tensor, x: Mapping[str, float]) -> None:
+    def _apply_phase_overrides_inplace(self, vec: torch.Tensor, x: Mapping[str, float], *,
+                                       seen: Optional[Dict[int, float]] = None) -> None:
         """
         Применяем фазовые параметры из x к vec (in-place), если фазы включены в схему.
 
@@ -669,27 +762,30 @@ class CMFilter(BaseSurrogate):
         if schema_has_a and "phase_a" in x:
             val = float(x["phase_a"])
             for i in range(1, ports + 1):
-                vec[self._idx[f"phase_a{i}"]] = val
+                # ВАЖНО: сахар НЕ должен считаться "конфликтом" с последующими уточнениями
+                # (например, phase_a=0, phase_a1=0.1). Поэтому не пишем в seen.
+                self._set_param_inplace(vec, f"phase_a{i}", val, seen=None)
 
         # phase_a: покомпонентно (можно частично)
         if schema_has_a:
             for i in range(1, ports + 1):
                 k = f"phase_a{i}"
                 if k in x:
-                    vec[self._idx[k]] = float(x[k])
+                    self._set_param_inplace(vec, k, float(x[k]), seen=seen)
 
         # phase_b: сахар скаляром
         if schema_has_b and "phase_b" in x:
             val = float(x["phase_b"])
             for i in range(1, ports + 1):
-                vec[self._idx[f"phase_b{i}"]] = val
+                # Аналогично phase_a: сахар не должен конфликтовать с уточнениями.
+                self._set_param_inplace(vec, f"phase_b{i}", val, seen=None)
 
         # phase_b: покомпонентно
         if schema_has_b:
             for i in range(1, ports + 1):
                 k = f"phase_b{i}"
                 if k in x:
-                    vec[self._idx[k]] = float(x[k])
+                    self._set_param_inplace(vec, k, float(x[k]), seen=seen)
 
     def _to_numpy(self, S_t: torch.Tensor) -> np.ndarray:
         """torch.Tensor -> np.ndarray complex64"""
@@ -712,7 +808,7 @@ class CMFilter(BaseSurrogate):
         with torch.inference_mode():
             dev = self.device
             vec = self._vector_from_x(x, dev)
-            M_real, qu, phase_a, phase_b = self.schema.assemble(vec, device=dev)
+            M_real, qu, phase_a, phase_b = self._assemble(vec, device=dev)
 
             omega = self._omega(dev)  # (F,)
             if self.include_qu == "none":
@@ -739,7 +835,7 @@ class CMFilter(BaseSurrogate):
         with torch.inference_mode():
             dev = self.device
             vecs = self._vectors_from_xs(xs, dev)
-            M_real, qu, phase_a, phase_b = self.schema.assemble(vecs, device=dev)
+            M_real, qu, phase_a, phase_b = self._assemble(vecs, device=dev)
 
             omega = self._omega(dev)  # (F,)
             if self.include_qu == "none":
@@ -885,6 +981,12 @@ class CMFilter(BaseSurrogate):
             include_qu: str = "none",
             Q_fixed: Optional[Union[float, Sequence[float], np.ndarray]] = None,
             base_mvals: Optional[Mapping[str, float]] = None,
+            # symmetry/tying
+            symmetry: Optional[str] = None,
+            tie_ports: bool = True,
+            tie_qu: bool = True,
+            tie_phases: bool = False,
+            validate_symmetry: bool = True,
             device: str = "cpu",
             method: str = "auto",
             fix_sign: bool = False,
@@ -985,6 +1087,11 @@ class CMFilter(BaseSurrogate):
             base_qu=base_qu,
             base_phase_a=cm.phase_a,
             base_phase_b=cm.phase_b,
+            symmetry=symmetry,
+            tie_ports=tie_ports,
+            tie_qu = tie_qu,
+            tie_phases = tie_phases,
+            validate_symmetry = validate_symmetry,
             device=device,
             method=method,
             fix_sign=fix_sign,
@@ -995,7 +1102,8 @@ class CMFilter(BaseSurrogate):
     def __repr__(self) -> str:  # pragma: no cover
         return (
             f"CMFilter(order={self.topo.order}, kind={self.meta.kind}, "
-            f"include_qu={self.include_qu!r}, output={self.output!r}, device={self.device!r})"
+            f"include_qu={self.include_qu!r}, symmetry={self.symmetry!r}, "
+            f"output={self.output!r}, device={self.device!r})"
         )
 
 
