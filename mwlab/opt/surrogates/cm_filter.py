@@ -391,6 +391,28 @@ class CMFilter(BaseSurrogate):
             fix_sign=self.fix_sign,
         )
 
+    # ----------------------------------------------------------------- opt-space public API
+    @property
+    def opt_size(self) -> int:
+        """Размер оптимизационного пространства (free-space при symmetry, иначе full-space)."""
+        return int(self._opt_size)
+
+    @property
+    def opt_keys(self) -> Tuple[str, ...]:
+        """
+        Ключи параметров в оптимизационном пространстве:
+          - без symmetry: ParamSchema.keys (полное пространство)
+          - с symmetry : TiedParamSchema.free_keys (редуцированное пространство)
+        """
+        if self._tied is None:
+            return tuple(self.schema.keys)
+        return tuple(self._tied.free_keys)
+
+    @property
+    def tied_schema(self) -> Optional[TiedParamSchema]:
+        """Read-only доступ к tied-схеме (None, если симметрия выключена)."""
+        return self._tied
+
     # ----------------------------------------------------------------- assemble (opt-space -> blocks)
     def _assemble(self, vec_opt: torch.Tensor, *, device: str):
         """
@@ -1043,6 +1065,21 @@ class CMFilter(BaseSurrogate):
 
         # Для include_qu="none" base_qu не нужен (и даже нежелателен семантически)
         base_qu = None if include_qu_l == "none" else cm.qu
+
+        # Нормированный qu в cm.qu может быть вектором (по резонаторам).
+        # Если пользователь просит include_qu="scalar", нужно скаляризовать базу,
+        # иначе CMFilter._apply_base_qu_to_params бросит ошибку.
+        if include_qu_l == "scalar" and base_qu is not None:
+            import numpy as _np
+            import torch as _torch
+            if _torch.is_tensor(base_qu):
+                qarr = base_qu.detach().cpu().numpy().astype(float, copy=False)
+            else:
+                qarr = _np.asarray(base_qu, dtype=float)
+            if qarr.ndim == 0 or qarr.size == 1:
+                base_qu = float(qarr.reshape(-1)[0])
+            else:
+                base_qu = float(qarr.reshape(-1).mean())
 
         # --- выбрать ОДНУ комбинацию частотных параметров для конструктора Filter ---
         kind_u = str(flt.kind).upper()
