@@ -173,7 +173,16 @@ class CMFilter(BaseSurrogate):
         self.fix_sign = bool(fix_sign)
         self.output: OutputKind = output
         # хранить в явном виде, чтобы было видно в логах/отладке
-        self.symmetry = (str(symmetry).strip().lower() if symmetry is not None else None) or None
+        # ВАЖНО: YAML часто даёт строку "None" вместо настоящего null.
+        # Поэтому трактуем "none/null/false/0/''" как отсутствие симметрии.
+        sym_norm: Optional[str] = None
+        if symmetry is not None:
+            s = str(symmetry).strip().lower()
+            if s in {"", "none", "null", "~", "false", "0", "no"}:
+                sym_norm = None
+            else:
+                sym_norm = s
+        self.symmetry = sym_norm
 
         # Политика добротности:
         #   - "none": qu НЕ является параметром оптимизации, берём фиксированный Q_fixed (физический)
