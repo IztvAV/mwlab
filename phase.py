@@ -16,36 +16,6 @@ import cauchy_method
 from scipy.optimize import curve_fit, minimize_scalar, minimize
 
 
-def apply_phase_one(S, phi):
-    S_new = S * np.exp(-1j * phi)
-    return S_new
-
-def apply_phase_all(net: rf.Network, phi11, phi22, inverse_s12_s21=False):
-    net.s[:, 0, 0] = apply_phase_one(net.s[:, 0, 0], 2*phi11)
-    net.s[:, 1, 1] = apply_phase_one(net.s[:, 1, 1], 2*phi22)
-    coeff = 1 if not inverse_s12_s21 else -1
-    phi21 = phi11 + phi22
-    net.s[:, 1, 0] = coeff*apply_phase_one(net.s[:, 1, 0], phi21)
-    net.s[:, 0, 1] = coeff*apply_phase_one(net.s[:, 1, 0], phi21)
-    return net
-
-# def apply_phase_coeffs_for_ntw(net: rf.Network, w, a11, b11, a22, b22, inverse_s12_s21=False):
-#     phi11 = -(a11 + np.asarray(w) * b11)
-#     phi22 = -(a22 + np.asarray(w) * b22)
-#     net = apply_phase_all(net, phi11, phi22, inverse_s12_s21)
-#     return net
-
-def add_phase_from_coeffs(net: rf.Network, w, a11, b11, a22, b22, inverse_s12_s21=False):
-    phi11 = a11 + np.asarray(w) * b11
-    phi22 = a22 + np.asarray(w) * b22
-    net = apply_phase_all(net, phi11, phi22, inverse_s12_s21)
-    return net
-
-def remove_phase_from_coeffs(net: rf.Network, w, a11, b11, a22, b22, inverse_s12_s21=False):
-    phi11 = -(a11 + np.asarray(w) * b11)
-    phi22 = -(a22 + np.asarray(w) * b22)
-    net = apply_phase_all(net, phi11, phi22, inverse_s12_s21)
-    return net
 
 def _wrap_to_pi(x):
     return (x + np.pi) % (2 * np.pi) - np.pi
@@ -1301,10 +1271,10 @@ def fit_phase_edges_curvefit(
         S = np.array(net.s, dtype=np.complex128, copy=True)
         phi1 = -2.0 * (phi1_c + phi1_b * w)
         phi2 = -2.0 * (phi2_c + phi2_b * w)
-        S[:, 0, 0] = apply_phase_one(S[:, 0, 0], phi1)
-        S[:, 1, 1] = apply_phase_one(S[:, 1, 1], phi2)
-        S[:, 0, 1] = -apply_phase_one(S[:, 0, 1], 0.5 * (phi1 + phi2))
-        S[:, 1, 0] = -apply_phase_one(S[:, 1, 0], 0.5 * (phi1 + phi2))
+        S[:, 0, 0] = PhaseLoadingExtractor.apply_phase_one(S[:, 0, 0], phi1)
+        S[:, 1, 1] = PhaseLoadingExtractor.apply_phase_one(S[:, 1, 1], phi2)
+        S[:, 0, 1] = -PhaseLoadingExtractor.apply_phase_one(S[:, 0, 1], 0.5 * (phi1 + phi2))
+        S[:, 1, 0] = -PhaseLoadingExtractor.apply_phase_one(S[:, 1, 0], 0.5 * (phi1 + phi2))
         return S
 
     S_corr = _deembed_ports(w, net, phi1_c, phi2_c, phi1_b, phi2_b)
@@ -1337,6 +1307,40 @@ class PhaseLoadingExtractor:
     # ------------------------------------------------------------------
     #                  ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
     # ------------------------------------------------------------------
+    @staticmethod
+    def apply_phase_one(S, phi):
+        S_new = S * np.exp(-1j * phi)
+        return S_new
+
+    @staticmethod
+    def apply_phase_all(net: rf.Network, phi11, phi22, inverse_s12_s21=False):
+        net.s[:, 0, 0] = PhaseLoadingExtractor.apply_phase_one(net.s[:, 0, 0], 2 * phi11)
+        net.s[:, 1, 1] = PhaseLoadingExtractor.apply_phase_one(net.s[:, 1, 1], 2 * phi22)
+        coeff = 1 if not inverse_s12_s21 else -1
+        phi21 = phi11 + phi22
+        net.s[:, 1, 0] = coeff * PhaseLoadingExtractor.apply_phase_one(net.s[:, 1, 0], phi21)
+        net.s[:, 0, 1] = coeff * PhaseLoadingExtractor.apply_phase_one(net.s[:, 1, 0], phi21)
+        return net
+
+    # def apply_phase_coeffs_for_ntw(net: rf.Network, w, a11, b11, a22, b22, inverse_s12_s21=False):
+    #     phi11 = -(a11 + np.asarray(w) * b11)
+    #     phi22 = -(a22 + np.asarray(w) * b22)
+    #     net = apply_phase_all(net, phi11, phi22, inverse_s12_s21)
+    #     return net
+
+    @staticmethod
+    def add_phase_from_coeffs(net: rf.Network, w, a11, b11, a22, b22, inverse_s12_s21=False):
+        phi11 = a11 + np.asarray(w) * b11
+        phi22 = a22 + np.asarray(w) * b22
+        net = PhaseLoadingExtractor.apply_phase_all(net, phi11, phi22, inverse_s12_s21)
+        return net
+
+    @staticmethod
+    def remove_phase_from_coeffs(net: rf.Network, w, a11, b11, a22, b22, inverse_s12_s21=False):
+        phi11 = -(a11 + np.asarray(w) * b11)
+        phi22 = -(a22 + np.asarray(w) * b22)
+        net = PhaseLoadingExtractor.apply_phase_all(net, phi11, phi22, inverse_s12_s21)
+        return net
 
     @staticmethod
     def make_network(frequencies, S11, S21, S22, name="Corrected"):
@@ -1485,7 +1489,7 @@ class PhaseLoadingExtractor:
             w = np.asarray(w, float).ravel()
             phi1 = -(phi1_c + phi1_b * w)
             phi2 = -(phi2_c + phi2_b * w)
-            net_de = apply_phase_all(net, phi1, phi2, inverse_s12_s21=True)
+            net_de = self.apply_phase_all(net, phi1, phi2, inverse_s12_s21=True)
             return net_de.s
 
         S_corr = _deembed_ports(w, net, phi1_c, phi2_c, phi1_b, phi2_b)
@@ -1511,7 +1515,7 @@ class PhaseLoadingExtractor:
             b11_opt, b22_opt = params
 
             # 1) деэмбед по кандидату (только линейная часть)
-            ntw_de = add_phase_from_coeffs(ntw_orig, w_norm, a11=0, b11=0.5*b11_opt, a22=0, b22=0.5*b22_opt)
+            ntw_de = self.add_phase_from_coeffs(ntw_orig, w_norm, a11=0, b11=0.5*b11_opt, a22=0, b22=0.5*b22_opt)
             # ntw_de = apply_phase_coeffs_for_ntw(ntw_orig, w_norm, a11=0, b11=0.5*b11_opt, a22=0, b22=0.5*b22_opt)
 
             # 2) NN → CM + своя фазовая нагрузка
@@ -1534,7 +1538,7 @@ class PhaseLoadingExtractor:
             b22_total = 0.5*(b22_opt + b22_nn)
 
             # ntw_final = apply_phase_coeffs_for_ntw(pred_filter, w_norm, a11=-a11_total, b11=-b11_total, a22=-a22_total, b22=-b22_total)
-            ntw_final = remove_phase_from_coeffs(pred_filter, w_norm, a11=a11_total, b11=b11_total, a22=a22_total, b22=b22_total)
+            ntw_final = self.remove_phase_from_coeffs(pred_filter, w_norm, a11=a11_total, b11=b11_total, a22=a22_total, b22=b22_total)
 
             loss = (
                 np.mean(np.abs(ntw_final.s[:, 0, 0] - ntw_de.s[:, 0, 0])) +
@@ -1665,7 +1669,7 @@ class PhaseLoadingExtractor:
 
         # фазы на портах
         # применяем обратную фазу: умножаем на exp(+j * φ)
-        ntw_full_deembedded = remove_phase_from_coeffs(ntw_edges_deembedded, w, a11=0, b11=b11_opt, a22=0, b22=b22_opt)
+        ntw_full_deembedded = self.remove_phase_from_coeffs(ntw_edges_deembedded, w, a11=0, b11=b11_opt, a22=0, b22=b22_opt)
 
         result = {
             "phi1_c": self.last_phi1_c,
