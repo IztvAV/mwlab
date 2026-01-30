@@ -4,5 +4,6 @@ meta:
   author: "Ilya Burlakov"
 
 paths:
+#  manifest: "filters/FilterData/14-ORDER-TEST-FILTER/manifest.yml"
   manifest: "filters/FilterData/EAMU4-KuIMUXT2-BPFC2/manifest.yml"
 #  manifest: "filters/FilterData/EAMU4-KuIMUXT2-BPFC4/manifest.yml"
