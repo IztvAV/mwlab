@@ -6,6 +6,7 @@ from torch import nn
 
 from filters.codecs import MWFilterTouchstoneCodec
 from filters.mwfilter_lightning import MWFilterBaseLMWithMetrics
+from filters.mwfilter_lightning.callbacks import BaseCallbackSet, SaflySaveCheckpoint, ModelCheckpoint
 from models import CorrectionNet
 from mwlab import TouchstoneDataset, TouchstoneDatasetAnalyzer, TouchstoneLDataModule, TouchstoneCodec
 from mwlab.nn import MinMaxScaler
@@ -18,6 +19,7 @@ import models
 import configs as cfg
 import lightning as L
 from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
+from filters.strategy.train_strategy import StandardStrategy, BaseStrategyConfig, TwoStageBatchSizeStrategy
 
 
 
@@ -290,8 +292,11 @@ def get_model(name: str="resnet_with_correction", **kwargs):
         raise ValueError(f"Unknown model name: {name}")
 
 
-def train_model(model: nn.Module, work_model, dm: TouchstoneLDataModule, trainer: L.Trainer,
+def train_model(model: nn.Module, work_model, dm: TouchstoneLDataModule,
+                trainer_builder,
+                trainer_builder_args:dict,
                 loss_fn,
+                strategy_type:str="standard",
                 optimizer_cfg:dict={"name": "AdamW", "lr": 0.0005370623202982373, "weight_decay": 1e-5},
                 scheduler_cfg:dict={"name": "StepLR", "step_size": 21, "gamma": 0.01}):
     lit_model = MWFilterBaseLMWithMetrics(
@@ -305,8 +310,24 @@ def train_model(model: nn.Module, work_model, dm: TouchstoneLDataModule, trainer
         scheduler_cfg=scheduler_cfg,
         loss_fn=loss_fn
     )
-    trainer.fit(lit_model, dm)
-    return lit_model
+
+    strategy_cfg = BaseStrategyConfig(
+        dm=dm,
+        lit_model=lit_model,
+        trainer_builder=trainer_builder,
+        trainer_builder_args=trainer_builder_args,
+        work_model=work_model
+    )
+
+    if strategy_type == "standard":
+        strategy = StandardStrategy(dm.batch_size)
+    elif strategy_type == "two stage":
+        strategy = TwoStageBatchSizeStrategy(small_bs=dm.batch_size, large_bs=1024)
+    else:
+        raise ValueError("Unknown strategy type")
+
+    status = strategy.fit(strategy_cfg)
+    return lit_model, status
 
 def check_metrics(trainer: L.Trainer, model: L.LightningModule, dm: TouchstoneLDataModule):
     print("Train loader")
@@ -316,23 +337,6 @@ def check_metrics(trainer: L.Trainer, model: L.LightningModule, dm: TouchstoneLD
     print("Test loader")
     test_metrics = trainer.test(model, dataloaders=dm.test_dataloader())
     return {"train": train_metrics, "val": val_metrics, "test": test_metrics}
-
-
-class MySafeCheckpoint(ModelCheckpoint):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def on_validation_end(self, trainer, pl_module):
-        train_loss = trainer.callback_metrics.get("train_loss")
-        val_loss = trainer.callback_metrics.get("val_loss")
-
-        # Только если оба есть
-        if train_loss is not None and val_loss is not None:
-           if train_loss < val_loss:
-                # Не сохраняем модель — early overfitting
-                return
-
-        super().on_validation_end(trainer, pl_module)
 
 
 class WorkModel:
@@ -354,7 +358,7 @@ class WorkModel:
 
         self.ds = TouchstoneDataset(source=self.ds_gen.backend, in_memory=True)
 
-        self.trainer = self._configure_trainer()
+        # self.trainer = self.configure_trainer(max_epochs=configs.APP_CONFIG.train.max_epochs)
         # self.codec = MWFilterTouchstoneCodec.from_dataset(ds=self.ds,
         #                                          keys_for_analysis=[f"m_{r}_{c}" for r, c in self.orig_filter.coupling_matrix.links])
         self.model_name = None
@@ -363,39 +367,43 @@ class WorkModel:
         self.model = None
         self.dm = None
 
-    def _configure_trainer(self):
-        stoping = L.pytorch.callbacks.EarlyStopping(monitor="val_mae", patience=31, mode="min", min_delta=0.00001)
-        checkpoint = MySafeCheckpoint(monitor="val_mae",
-                                      dirpath=self.configs.ENV_SAVED_MODELS_PATH,
-                                      filename="best-{epoch}-{train_loss:.5f}-{val_loss:.5f}-{val_r2:.5f}-{val_mse:.5f}-"
-                                                                  "{val_mae:.5f}" + self.BEST_MODEL_FILENAME_SUFFIX.format(
-                                                             batch_size=self.configs.BATCH_SIZE,
-                                                             train_dataset_size=self.configs.TRAIN_DATASET_SIZE,
-                                                             sampler_type=self.samplers.cms.type,
-                                                             self_couplings=self.configs.APP_CONFIG.dataset.matrix_sampler_delta.self_coupling,
-                                                             mainline_couplings=self.configs.APP_CONFIG.dataset.matrix_sampler_delta.mainline_coupling,
-                                                             cross_couplings=self.configs.APP_CONFIG.dataset.matrix_sampler_delta.cross_coupling,
-                                                             a11_o=self.configs.APP_CONFIG.dataset.pss_origin.a11,
-                                                             a22_o=self.configs.APP_CONFIG.dataset.pss_origin.a22,
-                                                             b11_o=self.configs.APP_CONFIG.dataset.pss_origin.b11,
-                                                             b22_o=self.configs.APP_CONFIG.dataset.pss_origin.b22,
-                                                             a11_s=self.configs.APP_CONFIG.dataset.pss_sampler_delta.a11,
-                                                             a22_s=self.configs.APP_CONFIG.dataset.pss_sampler_delta.a22,
-                                                             b11_s=self.configs.APP_CONFIG.dataset.pss_sampler_delta.b11,
-                                                             b22_s=self.configs.APP_CONFIG.dataset.pss_sampler_delta.b22,
-                                                         ),
-                                      mode="min",
-                                      save_top_k=1,  # Сохраняем только одну лучшую
-                                      save_weights_only=False,
-                                      # Сохранять всю модель (включая структуру)
-                                      verbose=False  # Отключаем логирование сохранения)
-                                      )
+    def configure_trainer(self, max_epochs:int, acceleration:str="auto", log_every_n_steps:int=200, cb_set:BaseCallbackSet=None):
+        if cb_set is None:
+            cb_set = BaseCallbackSet(
+                early_stopping=L.pytorch.callbacks.EarlyStopping(monitor="val_mae", patience=31, mode="min", min_delta=0.00001),
+                save_checkpoint=SaflySaveCheckpoint(monitor="val_mae",
+                                          dirpath=self.configs.ENV_SAVED_MODELS_PATH,
+                                          filename="best-{epoch}-{train_loss:.5f}-{val_loss:.5f}-{val_r2:.5f}-{val_mse:.5f}-"
+                                                                      "{val_mae:.5f}" + self.BEST_MODEL_FILENAME_SUFFIX.format(
+                                                                 batch_size=self.configs.BATCH_SIZE,
+                                                                 train_dataset_size=self.configs.TRAIN_DATASET_SIZE,
+                                                                 sampler_type=self.samplers.cms.type,
+                                                                 self_couplings=self.configs.APP_CONFIG.dataset.matrix_sampler_delta.self_coupling,
+                                                                 mainline_couplings=self.configs.APP_CONFIG.dataset.matrix_sampler_delta.mainline_coupling,
+                                                                 cross_couplings=self.configs.APP_CONFIG.dataset.matrix_sampler_delta.cross_coupling,
+                                                                 a11_o=self.configs.APP_CONFIG.dataset.pss_origin.a11,
+                                                                 a22_o=self.configs.APP_CONFIG.dataset.pss_origin.a22,
+                                                                 b11_o=self.configs.APP_CONFIG.dataset.pss_origin.b11,
+                                                                 b22_o=self.configs.APP_CONFIG.dataset.pss_origin.b22,
+                                                                 a11_s=self.configs.APP_CONFIG.dataset.pss_sampler_delta.a11,
+                                                                 a22_s=self.configs.APP_CONFIG.dataset.pss_sampler_delta.a22,
+                                                                 b11_s=self.configs.APP_CONFIG.dataset.pss_sampler_delta.b11,
+                                                                 b22_s=self.configs.APP_CONFIG.dataset.pss_sampler_delta.b22,
+                                                             ),
+                                          mode="min",
+                                          save_top_k=1,  # Сохраняем только одну лучшую
+                                          save_weights_only=False,
+                                          # Сохранять всю модель (включая структуру)
+                                          verbose=False  # Отключаем логирование сохранения)
+                                          ),
+            )
+
         trainer = L.Trainer(
             deterministic=True,
-            max_epochs=30,  # Максимальное количество эпох обучения
-            accelerator="auto",  # Автоматический выбор устройства (CPU/GPU)
-            log_every_n_steps=100,  # Частота логирования в процессе обучения
-            callbacks=[stoping, checkpoint]
+            max_epochs=max_epochs,  # Максимальное количество эпох обучения
+            accelerator=acceleration,  # Автоматический выбор устройства (CPU/GPU)
+            log_every_n_steps=log_every_n_steps,  # Частота логирования в процессе обучения
+            callbacks=cb_set.cb_list,
         )
         return trainer
 
@@ -440,13 +448,15 @@ class WorkModel:
         _, _, self.meta = test_tds[0]  # Используем первый файл набора данных
 
 
-    def train(self, optimizer_cfg: dict, scheduler_cfg: dict, loss_fn):
-        tb_logger = TensorBoardLogger(save_dir="lightning_logs", name=f"{self.model_name}")
-        csv_logger = CSVLogger(save_dir="lightning_logs", name=f"{self.model_name}_csv")
-        self.trainer.loggers = [tb_logger, csv_logger]
-        lit_model = train_model(model=self.model, work_model=self, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, dm=self.dm,
-                    trainer=self.trainer, loss_fn=loss_fn)
-        print(f"Лучшая модель сохранена в: {self.trainer.checkpoint_callback.best_model_path}")
+    def train(self, optimizer_cfg: dict, scheduler_cfg: dict, loss_fn, strategy_type:str="standard"):
+        lit_model, status = train_model(model=self.model, work_model=self, optimizer_cfg=optimizer_cfg, scheduler_cfg=scheduler_cfg, dm=self.dm,
+                    trainer_builder=self.configure_trainer,
+                    trainer_builder_args={"max_epochs": self.configs.APP_CONFIG.train.max_epochs},
+                    loss_fn=loss_fn, strategy_type=strategy_type)
+        if strategy_type == "standard":
+            print(f"Лучшая модель сохранена в: {status["best_ckpt"]}")
+        elif strategy_type == "two stage":
+            print(f"Лучшая модель сохранена в: {status["best_large"]}")
         return lit_model
 
     def inference(self, path_to_ckpt: str):
@@ -486,11 +496,11 @@ class WorkModel:
         print(f"Предсказанные параметры: {pred_prms}")
 
         orig_fil = MWFilter.from_touchstone_dataset_item(({**meta['params'], **orig_prms}, net))
-        pred_fil = self.create_filter_from_prediction(orig_fil, self.orig_filter, pred_prms, self.codec)
+        pred_fil = self.create_filter_from_prediction(orig_fil, self.orig_filter, pred_prms)
         return orig_fil, pred_fil
 
     @staticmethod
-    def create_filter_from_prediction(orig_fil: MWFilter, work_model_orig_fil: MWFilter, pred_prms: dict, codec: TouchstoneCodec) -> MWFilter:
+    def create_filter_from_prediction(orig_fil: MWFilter, work_model_orig_fil: MWFilter, pred_prms: dict) -> MWFilter:
         # Q = meta['params']['Q']
         if pred_prms.get('Q') is None:
             Q = work_model_orig_fil.Q

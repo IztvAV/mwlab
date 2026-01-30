@@ -3,8 +3,10 @@ import os
 import random
 import time
 from pathlib import Path
+from typing import Dict
 
 import numpy as np
+from torch.utils.data import DataLoader
 
 import cauchy_method
 import cm_extract_api
@@ -33,98 +35,11 @@ from filters.mwfilter_optim.bfgs import optimize_cm
 from losses import CustomLosses
 import configs as cfg
 import common
-import torch.nn.functional as F
-from mwlab.transforms import TComposite
 from mwlab.transforms.s_transforms import S_Crop, S_Resample
 from mwlab.nn.scalers import MinMaxScaler
+
+
 torch.set_float32_matmul_precision("medium")
-
-
-class MatrixCorrectionNet(nn.Module):
-    def __init__(self, s_shape, m_dim, hidden_dim=256):
-        super().__init__()
-        s_dim = s_shape[0] * s_shape[1]
-        self.fc1 = nn.Sequential(
-            nn.LayerNorm(s_dim),
-            nn.Linear(s_dim, hidden_dim),
-        )
-        self.fc2 = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            # nn.SiLU(),
-            # nn.Linear(hidden_dim, hidden_dim)
-         )
-        # self.fc3 = nn.Linear(hidden_dim*2, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, m_dim)
-
-    def forward(self, s_params_diff):
-        s_params_diff = s_params_diff.view(s_params_diff.size(0), -1)
-        x = F.silu(self.fc1(s_params_diff))
-        x = F.silu(self.fc2(x))
-        # x = F.silu(self.fc3(x))
-        delta = self.fc3(x)
-        return delta
-
-
-class CorrectionNet(nn.Module):
-    def __init__(self, s_shape, m_dim, hidden_dim=512):
-        super().__init__()
-        s_dim = s_shape[0] * s_shape[1]  # 301 * 8 = 2408 or 301 * 4 = 1204
-        self.fc1 = nn.Linear(s_dim + m_dim, hidden_dim)
-        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
-        self.fc3 = nn.Linear(hidden_dim, m_dim)
-
-    def forward(self, s_params, matrix_pred):
-        s_params = s_params.view(s_params.size(0), -1)  # B x 2408 or B x 1204
-        x = torch.cat([s_params, matrix_pred], dim=1)
-        x = F.silu(self.fc1(x))
-        x = F.silu(self.fc2(x))
-        delta = F.silu(self.fc3(x))
-        return matrix_pred + delta
-
-
-class SimpleCorrNet(nn.Module):
-    """
-    Простой корректор:
-      S-параметры [B, C_s, L] -> Conv1d x2 -> GlobalAvgPool -> concat([feat, m_pred]) ->
-      Linear -> ΔM -> (m_pred + ΔM)
-    """
-    def __init__(self,
-                 s_channels: int,      # число каналов S (напр. 3: S11_dB, S21_dB, S22_dB)
-                 m_dim: int,           # длина вектора факторов (len(codec.x_keys))
-                 hidden_conv: int = 64,
-                 hidden_mlp: int = 128,
-                 kernel_size: int = 5,
-                 delta_max: float = 2.0):   # мягкое ограничение амплитуды коррекции
-        super().__init__()
-        pad = (kernel_size - 1) // 2
-
-        # 2 лёгкие свёртки по частоте
-        self.conv1 = nn.Conv1d(s_channels, hidden_conv, kernel_size=kernel_size+2, padding=pad, bias=True, stride=2)
-        self.conv2 = nn.Conv1d(hidden_conv, hidden_conv, kernel_size=kernel_size, padding=pad, bias=True)
-
-        # глобальный pooling по частоте: [B, H, L] -> [B, H]
-        self.gap = nn.AdaptiveAvgPool1d(1)
-
-        # маленькая MLP-голова
-        self.fc1 = nn.Linear(hidden_conv + m_dim, hidden_mlp)
-        self.fc2 = nn.Linear(hidden_mlp, m_dim)
-
-        self.delta_max = float(delta_max)
-
-    def forward(self, s_params: torch.Tensor, m_pred: torch.Tensor) -> torch.Tensor:
-        """
-        s_params: [B, C_s, L]  (в дБ или линейке, как у вас)
-        m_pred:   [B, m_dim]   (база от основной модели, обычно .detach())
-        return:   [B, m_dim]   (скорректированные факторы = m_pred + ΔM)
-        """
-        x = F.silu(self.conv1(s_params))
-        x = F.silu(self.conv2(x))
-        x = self.gap(x).squeeze(-1)           # [B, hidden_conv]
-
-        h = torch.cat([x, m_pred], dim=1)     # [B, hidden_conv + m_dim]
-        h = F.silu(self.fc1(h))
-        delta = torch.tanh(self.fc2(h))
-        return m_pred + delta
 
 
 def online_correct():
@@ -229,7 +144,7 @@ def online_correct():
         pred_prms = inference_model.predict_x(ntw_de)
         # stop_time = time.time()
         # print(f"Predict time: {stop_time - start_time:.3f} sec")
-        pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms, work_model.codec)
+        pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms)
         # optim_matrix = optimize_cm(pred_fil, orig_fil, pred_fil.f_norm, plot=False)
         inference_model.plot_origin_vs_prediction(orig_fil, pred_fil, title=f'{i} Before correction')
         keys = pred_prms.keys()
@@ -293,7 +208,7 @@ def online_correct():
             total_pred_prms = dict(zip(m_keys, m_factors))
             # print(f"Origin parameters: {pred_prms}")
             # print(f"Tuned parameters: {total_pred_prms}")
-            correct_pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, total_pred_prms, work_model.codec)
+            correct_pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, total_pred_prms)
             inference_model.plot_origin_vs_prediction(orig_fil, correct_pred_fil, title=f' {i} After correction')
         # correct_pred_fil.coupling_matrix.plot_matrix()
         optim_matrix = optimize_cm(correct_pred_fil, orig_fil, phase_init=(pred_prms['a11'], pred_prms['a22'], pred_prms['b11'], pred_prms['b22']))
@@ -315,7 +230,7 @@ def fine_tune_model(origin_preds, inference_model: nn.Module, target_input: MWFi
     for i in range(iterations):
         print(f"Iteration: {i}")
         pred_prms = inference_model.predict_x(target_input)
-        pred_fil = work_model.create_filter_from_prediction(target_input, work_model.orig_filter, pred_prms, work_model.codec)
+        pred_fil = work_model.create_filter_from_prediction(target_input, work_model.orig_filter, pred_prms)
 
         sampler_configs = {
             "pss_origin": PSShift(a11=pred_prms['a11'], a22=pred_prms['a22'], b11=pred_prms['b11'], b22=pred_prms['b22']),
@@ -395,33 +310,125 @@ def fine_tune_model(origin_preds, inference_model: nn.Module, target_input: MWFi
         # inference_model.to('cpu')
     return inference_model
 
+@torch.no_grad()
+def compute_relative_error(
+    model: torch.nn.Module,
+    dataloader: DataLoader,
+    device: torch.device,
+    eps: float = 1e-12,
+) -> float:
+    """
+    Compute mean relative L2 error over a dataset.
+
+    Relative error per sample:
+        ||y_pred - y_true||_2 / (||y_true||_2 + eps)
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Trained model.
+    dataloader : DataLoader
+        DataLoader yielding (x, y_true).
+    device : torch.device
+        torch.device("cpu") or torch.device("cuda").
+    eps : float
+        Numerical stability constant.
+
+    Returns
+    -------
+    float
+        Mean relative error over the dataset.
+    """
+    model.eval()
+
+    rel_errors = []
+
+    for x, y_true in dataloader:
+        x = x.to(device)
+        y_true = y_true.to(device)
+
+        y_pred = model(x)
+        y_pred = model._apply_inverse(model.scaler_out, y_pred)
+
+        """
+        Relative L1 error per sample.
+
+        y_pred, y_true: shape (batch_size, n_params)
+        returns: shape (batch_size,)
+        """
+        num = torch.sum(torch.abs(y_pred - y_true), dim=1)
+        den = torch.sum(torch.abs(y_true), dim=1) + eps
+        rel_error = num / den
+
+        # diff_norm = torch.linalg.norm(y_pred - y_true, dim=1)
+        # true_norm = torch.linalg.norm(y_true, dim=1)
+        #
+        # rel_error = diff_norm / (true_norm + eps)
+        rel_errors.append(rel_error)
+
+    rel_errors = torch.cat(rel_errors)
+    return rel_errors.mean().item()
+
+
+def evaluate_datasets(
+    model: torch.nn.Module,
+    loaders: Dict[str, DataLoader],
+    device: torch.device,
+) -> Dict[str, float]:
+    """
+    Compute relative error for multiple datasets.
+
+    loaders = {
+        "train": train_loader,
+        "val":   val_loader,
+        "test":  test_loader
+    }
+    """
+    results = {}
+
+    for split, loader in loaders.items():
+        error = compute_relative_error(
+            model=model,
+            dataloader=loader,
+            device=device,
+        )
+        results[split] = error
+
+    return results
+
 
 def main():
     configs = cfg.Configs.init_as_default("default.yml")
-    lit_model = cm_extract_api.train_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
-    # # work_model = common.WorkModel(configs, is_inference=False)
-    # # # common.plot_distribution(work_model.ds, num_params=len(work_model.ds_gen.origin_filter.coupling_matrix.links))
-    # # # plt.show()
-    # #
-    # # codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
-    # #                                              keys_for_analysis=[f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links]+["Q"] + ["f0"] + ["bw"] + ["a11"] + ["a22"] + ["b11"] + ["b22"])
-    # #                                              # keys_for_analysis=[f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links])
-    # # # codec.y_channels = ['S1_1.real', 'S1_2.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S1_2.imag', 'S2_1.imag', 'S2_2.imag', 'S1_1.db', 'S1_2.db', 'S2_1.db', 'S2_2.db']
-    # # codec = codec
-    # #
-    # # work_model.setup(
-    # #     model_name="resnet_with_correction",
-    # #     model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
-    # #     dm_codec=codec
-    # # )
-    # #
-    # # lit_model = work_model.train(
-    # #     optimizer_cfg={"name": "AdamW", "lr": 0.0009400000000000001, "weight_decay": 1e-5},
-    # #     scheduler_cfg={"name": "StepLR", "step_size": 25, "gamma": 0.09},
-    # #     # optimizer_cfg={"name": "AdamW", "lr": 0.0005371, "weight_decay": 1e-5},
-    # #     # scheduler_cfg={"name": "StepLR", "step_size": 30, "gamma": 0.01},
-    # #     loss_fn=CustomLosses("sqrt_mse_with_l1", weight_decay=1, weights=None)
-    # #     )
+    # lit_model = cm_extract_api.train_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
+    cm_extract_api.load_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
+    lit_model = cm_extract_api.inference_model
+    work_model = cm_extract_api.work_model
+
+
+    # work_model = common.WorkModel(configs, is_inference=False)
+    # # common.plot_distribution(work_model.ds, num_params=len(work_model.ds_gen.origin_filter.coupling_matrix.links))
+    # # plt.show()
+    #
+    # codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
+    #                                              keys_for_analysis=[f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links]+["Q"] + ["f0"] + ["bw"] + ["a11"] + ["a22"] + ["b11"] + ["b22"])
+    #                                              # keys_for_analysis=[f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links])
+    # # codec.y_channels = ['S1_1.real', 'S1_2.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S1_2.imag', 'S2_1.imag', 'S2_2.imag', 'S1_1.db', 'S1_2.db', 'S2_1.db', 'S2_2.db']
+    # codec = codec
+    #
+    # work_model.setup(
+    #     model_name="resnet_with_correction",
+    #     model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
+    #     dm_codec=codec
+    # )
+    #
+    # lit_model = work_model.train(
+    #     optimizer_cfg={"name": "AdamW", "lr": 0.0009400000000000001, "weight_decay": 1e-5},
+    #     scheduler_cfg={"name": "StepLR", "step_size": 25, "gamma": 0.09},
+    #     # optimizer_cfg={"name": "AdamW", "lr": 0.0005371, "weight_decay": 1e-5},
+    #     # scheduler_cfg={"name": "StepLR", "step_size": 30, "gamma": 0.01},
+    #     loss_fn=CustomLosses("sqrt_mse_with_l1", weight_decay=1, weights=None),
+    #     strategy_type="standard"
+    # )
 
     # Загружаем лучшую модель
     # checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=12-val_loss=0.01266-train_loss=0.01224.ckpt",
@@ -435,13 +442,14 @@ def main():
     # inference_model = work_model.inference("saved_models\\ERV-KuIMUXT1-BPFC1\\best-epoch=25-train_loss=0.01518-val_loss=0.01534-val_r2=0.89565-val_mse=0.00116-val_mae=0.01418-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_STD.ckpt")
     # inference_model = work_model.inference("saved_models/EAMU4-KuIMUXT2-BPFC4/best-epoch=26-train_loss=0.08889-val_loss=0.08248-val_r2=0.99727-val_mse=0.00020-val_mae=0.00647-batch_size=32-base_dataset_size=300000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
     # inference_model = work_model.inference("saved_models/EAMU4-KuIMUXT2-BPFC2/best-epoch=27-train_loss=0.08527-val_loss=0.07506-val_r2=0.99731-val_mse=0.00021-val_mae=0.00531-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
+
     if not configs.MODEL_CHECKPOINT_PATH:
         inference_model = work_model.inference(lit_model.trainer.checkpoint_callback.best_model_path)
     else:
         inference_model = work_model.inference(configs.MODEL_CHECKPOINT_PATH)
 
 
-    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
+    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/modeling", s_tf=S_Resample(301))
     # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
     # cst_tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/cst",
     #                         s_tf=S_Resample(301))
@@ -458,18 +466,10 @@ def main():
     for i in range(0, 5):
         w = work_model.orig_filter.f_norm
         orig_fil = tds[i][1]
-        # cst_fil = cst_tds[i][1]
-
-        # b11 = 2.5
-        # b22 = 0.1
-        # orig_fil.s[:, 0, 0] *= np.array(torch.exp(-1j*(w*b11)), dtype=np.complex64)
-        # orig_fil.s[:, 0, 1] *= np.array(torch.exp(-1j*0.5*(w*(b11+b22))), dtype=np.complex64)
-        # orig_fil.s[:, 1, 0] *= np.array(torch.exp(-1j*0.5*(w*(b11+b22))), dtype=np.complex64)
-        # orig_fil.s[:, 1, 1] *= np.array(torch.exp(-1j*(w*b22)), dtype=np.complex64)
 
         orig_fil_to_nn = copy.deepcopy(orig_fil)
-        # orig_fil_to_nn.s[:, 1, 0] *= -1
-        # orig_fil_to_nn.s[:, 0, 1] *= -1
+        orig_fil_to_nn.s[:, 1, 0] *= -1
+        orig_fil_to_nn.s[:, 0, 1] *= -1
 
 
         # plt.figure()
@@ -505,7 +505,7 @@ def main():
         # orig_fil_to_nn_copy.s[:, 1, 1] *= np.array(torch.exp(1j * (w * b22)), dtype=np.complex64)
         # ntw_de = orig_fil_to_nn_copy
 
-        res = phase_extractor.extract_all(orig_fil_to_nn, w_norm=w, verbose=False)
+        res = phase_extractor.extract_all(orig_fil_to_nn, w_norm=w, verbose=True)
         ntw_de = res['ntw_deembedded']
 
         ts = TouchstoneData(ntw_de)
@@ -516,30 +516,12 @@ def main():
         pred_prms = inference_model.predict_x(ntw_de)
         # # stop_time = time.time()
         # # print(f"Predict time: {stop_time - start_time:.3f} sec")
-        # print(f"Предсказанные параметры: {pred_prms}")
-        pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms, work_model.codec)
+        print(f"Предсказанные параметры: {pred_prms}")
+        pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms)
+        # pred_fil.coupling_matrix.plot_matrix()
         l = loss(s_db, codec_db.encode(TouchstoneData(pred_fil))[1].unsqueeze(0))
         losses.append(l)
         print(f"[{i}] Recover S-parameters loss: {l}")
-        # pred_fil.coupling_matrix.plot_matrix()
-        # fine_tuned_model = fine_tune_model(
-        #     pred_prms, inference_model, ntw_de, work_model, epochs=25, lr=1e-3, iterations=1)
-
-        # inference_model = fine_tuned_model
-
-        # pred_prms = fine_tuned_model.predict_x(ntw_de)
-        # print(f"Дотюненные параметры: {pred_prms}")
-        # tuned_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms, work_model.codec)
-        # plt.figure()
-        # plt.plot(f_new, MWFilter.to_db(torch.tensor(s11_ext, dtype=torch.complex64)), label='S11 dB extr')
-        # cst_fil.plot_s_db(m=0, n=0, label='S11 dB CST')
-        # orig_fil.plot_s_db(m=0, n=0, label='S11 dB origin', ls='--')
-        #
-        # plt.figure()
-        # plt.plot(f_new, MWFilter.to_db(torch.tensor(s22_ext, dtype=torch.complex64)), label='S22 dB extr')
-        # cst_fil.plot_s_db(m=1, n=1, label='S22 dB CST')
-        # orig_fil.plot_s_db(m=1, n=1, label='S22 dB origin', ls='--')
-        # # ntw_de.plot_s_re(m=0, n=0, label='S11 Re corr', ls=':')
 
 
         # plt.figure()
@@ -596,15 +578,15 @@ def main():
         # optim_matrix, Q_opt, phase_opt = optimize_cm(pred_fil, orig_fil, phase_init=(0, 0, 0, 0))
         # print(f"Оптимизированные параметры: {optim_matrix.factors}. Добротность: {Q_opt}. Фаза: {phase_opt}")
 
-        optim_matrix, Q, phase_opt = optimize_cm(pred_fil, orig_fil, phase_init=(a11_final, a22_final, b11_final, b22_final))
+        optim_filter, phase_opt = optimize_cm(pred_fil, orig_fil, phase_init=(a11_final, a22_final, b11_final, b22_final))
         plt.title(tds.backend.paths[i].parts[-1])
         # print(f"Оптимизированные параметры: {optim_matrix.factors}. Добротность: {pred_fil.Q}. Фаза: {np.degrees(phase_opt)}")
-        # optim_matrix.plot_matrix()
+        optim_filter.coupling_matrix.plot_matrix()
 
-    # # Предсказываем эталонный фильтр
+    # Предсказываем эталонный фильтр
     # orig_fil = work_model.ds_gen.origin_filter
     # pred_prms = inference_model.predict_x(orig_fil)
-    # pred_fil = inference_model.create_filter_from_prediction(orig_fil, pred_prms, work_model.meta)
+    # pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms)
     # inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
     # optim_matrix = optimize_cm(pred_fil, orig_fil)
     # pred_fil.coupling_matrix.plot_matrix(title="Predict tuned matrix")

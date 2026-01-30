@@ -65,6 +65,11 @@ class DatasetConfig:
 
 
 @dataclass
+class TrainConfig:
+    max_epochs: int
+
+
+@dataclass
 class ModelConfig:
     checkpoint: str  # путь внутри архива/каталога
 
@@ -86,6 +91,7 @@ class AppConfig:
     filter: FilterConfig
     paths: PathsConfig
     dataset: DatasetConfig
+    train: TrainConfig
     model: ModelConfig
     inference: InferenceConfig
 
@@ -152,6 +158,7 @@ class Configs:
             pss_sampler_delta=pss_sampler_cfg,
         )
 
+        train_cfg = TrainConfig(**data['train'])
         model_cfg = ModelConfig(**data["model"])
         inference_cfg = InferenceConfig(**data["inference"])
 
@@ -161,6 +168,7 @@ class Configs:
             filter=filter_cfg,
             paths=paths_cfg,
             dataset=dataset_cfg,
+            train=train_cfg,
             model=model_cfg,
             inference=inference_cfg,
             base_dir=base_dir,
