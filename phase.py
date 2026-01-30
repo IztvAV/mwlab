@@ -20,24 +20,32 @@ def apply_phase_one(S, phi):
     S_new = S * np.exp(-1j * phi)
     return S_new
 
-def apply_phase_all(S11, S21, S22, w, a11, b11, a22, b22):
-    phi11 = a11 + b11 * w
-    phi22 = a22 + b22 * w
-    S11_corr = apply_phase_one(S11, phi11)
-    S22_corr = apply_phase_one(S22, phi22)
-    S21_corr = apply_phase_one(S21, 0.5 * (phi11 + phi22))
-    return S11_corr, S21_corr, S22_corr
-
-def apply_phase_for_ntw(net: rf.Network, w, a11, b11, a22, b22):
-    phi11 = -2 * (a11 + np.asarray(w) * b11)
-    phi22 = -2 * (a22 + np.asarray(w) * b22)
-    phi21 = -(phi11 + phi22)
-    net.s[:, 0, 0] = apply_phase_one(net.s[:, 0, 0], phi11)
-    net.s[:, 0, 1] = apply_phase_one(net.s[:, 0, 1], phi21)
-    net.s[:, 1, 0] = apply_phase_one(net.s[:, 1, 0], phi21)
-    net.s[:, 1, 1] = apply_phase_one(net.s[:, 1, 1], phi22)
+def apply_phase_all(net: rf.Network, phi11, phi22, inverse_s12_s21=False):
+    net.s[:, 0, 0] = apply_phase_one(net.s[:, 0, 0], 2*phi11)
+    net.s[:, 1, 1] = apply_phase_one(net.s[:, 1, 1], 2*phi22)
+    coeff = 1 if not inverse_s12_s21 else -1
+    phi21 = phi11 + phi22
+    net.s[:, 1, 0] = coeff*apply_phase_one(net.s[:, 1, 0], phi21)
+    net.s[:, 0, 1] = coeff*apply_phase_one(net.s[:, 1, 0], phi21)
     return net
 
+# def apply_phase_coeffs_for_ntw(net: rf.Network, w, a11, b11, a22, b22, inverse_s12_s21=False):
+#     phi11 = -(a11 + np.asarray(w) * b11)
+#     phi22 = -(a22 + np.asarray(w) * b22)
+#     net = apply_phase_all(net, phi11, phi22, inverse_s12_s21)
+#     return net
+
+def add_phase_from_coeffs(net: rf.Network, w, a11, b11, a22, b22, inverse_s12_s21=False):
+    phi11 = a11 + np.asarray(w) * b11
+    phi22 = a22 + np.asarray(w) * b22
+    net = apply_phase_all(net, phi11, phi22, inverse_s12_s21)
+    return net
+
+def remove_phase_from_coeffs(net: rf.Network, w, a11, b11, a22, b22, inverse_s12_s21=False):
+    phi11 = -(a11 + np.asarray(w) * b11)
+    phi22 = -(a22 + np.asarray(w) * b22)
+    net = apply_phase_all(net, phi11, phi22, inverse_s12_s21)
+    return net
 
 def _wrap_to_pi(x):
     return (x + np.pi) % (2 * np.pi) - np.pi
@@ -1175,158 +1183,6 @@ def de_embedding_2p_network_autoM(
     return new_ntw, best_M, metrics, all_details
 
 
-# def fit_phase_edges_curvefit(
-#     w,
-#     net: rf.Network,
-#     center_points=(-1.5, 1.5),
-#     phase_ylim_deg=(-180, 180),
-#     plot=True
-# ):
-#     if center_points is None:
-#         w_left = w[0]
-#         w_right = w[-1]
-#         w_th = min(abs(w_left), abs(w_right))
-#         center_points = (-w_th, w_th)
-#
-#
-#     w = np.asarray(w, float).ravel()
-#     S = np.asarray(net.s)
-#     assert S.shape[-2:] == (2, 2)
-#
-#     def find_phase_shift(phi_wrapped, w, w1, w2):
-#         def objective(shift):
-#             phi = _wrap_to_pi(phi_wrapped - shift)
-#             phi_interp = interp1d(w, phi, kind='linear', bounds_error=True)
-#             res = np.abs(_wrap_to_pi(phi_interp(w2) + phi_interp(w1)))
-#             return res
-#
-#         from scipy.optimize import minimize_scalar
-#         result = minimize_scalar(objective, bounds=(-np.pi, np.pi), method='bounded')
-#         best_shift = result.x
-#         print(
-#             f"Оптимальный фазовый сдвиг (при φ({w2}) = -φ({w1})): {best_shift:.6f} рад ({np.degrees(best_shift):.2f}°)")
-#         return best_shift
-#
-#     phi1_c = phi2_c = phi1_b = phi2_b = 0.0
-#     res = {}
-#
-#     # --------------------------------------------------------
-#     #     ОБРАБОТКА S11 И S22
-#     # --------------------------------------------------------
-#     for name, ij in [('S11', (0, 0)), ('S22', (1, 1))]:
-#         z = S[:, ij[0], ij[1]]
-#         phi_wrapped = np.angle(z)
-#
-#         # --------------------------------------------------------
-#         #      1) Центрирование фазы
-#         # --------------------------------------------------------
-#         w1, w2 = center_points
-#
-#         phi_shift = find_phase_shift(phi_wrapped, w, w1, w2)
-#         phi_centered = _wrap_to_pi(phi_wrapped - phi_shift)
-#         phi_c = -0.5 * phi_shift
-#
-#         # Значения фазы до/после центрирования → ДЛЯ ВЫВОДА
-#         interp_phi_before = interp1d(w, phi_wrapped, kind='linear', bounds_error=True)
-#         interp_phi_after  = interp1d(w, phi_centered, kind='linear', bounds_error=True)
-#
-#         phi_bef_1 = float(interp_phi_before(w1))
-#         phi_bef_2 = float(interp_phi_before(w2))
-#         phi_aft_1 = float(interp_phi_after(w1))
-#         phi_aft_2 = float(interp_phi_after(w2))
-#
-#         print(f"\n{name}:")
-#         print(f"  Исходная фаза в w1={w1}: {phi_bef_1:+.4f} рад ({np.degrees(phi_bef_1):+.2f}°)")
-#         print(f"  Исходная фаза в w2={w2}: {phi_bef_2:+.4f} рад ({np.degrees(phi_bef_2):+.2f}°)")
-#         print(f"  Центрированная фаза в w1={w1}: {phi_aft_1:+.4f} рад ({np.degrees(phi_aft_1):+.2f}°)")
-#         print(f"  Центрированная фаза в w2={w2}: {phi_aft_2:+.4f} рад ({np.degrees(phi_aft_2):+.2f}°)")
-#         print(f"  Разность после центрирования: phi(w2)+phi(w1) = {phi_aft_1 + phi_aft_2:+.4e} рад")
-#
-#         # Следующая производная (уже от центрированной)
-#         phi_unwrapped = np.unwrap(phi_centered)
-#         dphi_dw_centered = np.gradient(phi_unwrapped, abs(w))
-#
-#         # --------------------------------------------------------
-#         #     Сохранение коэффициентов
-#         # --------------------------------------------------------
-#         if name == 'S11':
-#             phi1_c = phi_c
-#         else:
-#             phi2_c = phi_c
-#
-#         print(f"  φ_c = {phi_c:.6f} рад ({np.degrees(phi_c):.2f}°)")
-#
-#         # --------------------------------------------------------
-#         #     3) График фазы + ВЕРТИКАЛЬНЫЕ ЛИНИИ
-#         # --------------------------------------------------------
-#         if plot:
-#             plt.figure(figsize=(8, 4))
-#             plt.plot(w, np.degrees(np.angle(z)), '-.', alpha=0.5, label='Исходная')
-#             plt.plot(w, np.degrees(phi_wrapped), '--', alpha=0.5, label='Без линейной компоненты φ')
-#             plt.plot(w, np.degrees(phi_centered), label='Центрированная φ')
-#             # plt.plot(w, np.degrees(phi_centered*1/w), label='Центрированная φ c гиперболой')
-#             # phi_centered_with_hip = interp1d(w, _wrap_to_pi(phi_centered*_wrap_to_pi(1/w)), kind='linear', bounds_error=True)
-#             # print(f"С гиперболой: {phi_centered_with_hip(w1)}/{phi_centered_with_hip(w2)}")
-#
-#             # ВЕРТИКАЛЬНЫЕ ЛИНИИ
-#             plt.axvline(w1, color='r', linestyle='--', label=f'w1={w1}')
-#             plt.axvline(w2, color='g', linestyle='--', label=f'w2={w2}')
-#
-#             # Горизонтальные линии на уровне фазы в этих точках
-#             plt.axhline(np.degrees(phi_aft_1), color='r', alpha=0.3)
-#             plt.axhline(np.degrees(phi_aft_2), color='g', alpha=0.3)
-#
-#             plt.xlabel('Нормированная частота')
-#             plt.ylabel('Фаза (°)')
-#             plt.title(f'{name}: центрирование + линии w1/w2')
-#             plt.grid(True)
-#             plt.legend()
-#             plt.ylim(*phase_ylim_deg)
-#             plt.tight_layout()
-#
-#             phi_centered_with_hip = interp1d(w, _wrap_to_pi((np.unwrap(phi_centered) + (2*-0.0256*w))), kind='linear',
-#                                              bounds_error=True)
-#             print(f"С гиперболой: {phi_centered_with_hip(w1)}/{phi_centered_with_hip(w2)}. В нуле: {phi_centered_with_hip(0)}")
-#             plt.figure(figsize=(8, 4))
-#             plt.plot(w, np.unwrap(phi_centered) + (-2*0.0256*w), label='deemebedeed')
-#             plt.plot(w, np.unwrap(phi_centered), label='centered')
-#             plt.plot(w,  -2*0.0256*w)
-#             plt.legend()
-#
-#         res[name] = dict(
-#             phi_wrapped=phi_wrapped,
-#             phi_centered=phi_centered,
-#             dphi_dw=None,
-#             phi_c=phi_c,
-#             phi_before_points=(phi_bef_1, phi_bef_2),
-#             phi_after_points=(phi_aft_1, phi_aft_2),
-#         )
-#
-#     # --------------------------------------------------------
-#     #   ДЕЭМБЕДДИНГ
-#     # --------------------------------------------------------
-#     def _deembed_ports(w, net: rf.Network, phi1_c, phi2_c, phi1_b=0.0, phi2_b=0.0):
-#         w = np.asarray(w, float).ravel()
-#         S = np.array(net.s, dtype=np.complex128, copy=True)
-#         phi1 = -2.0 * (phi1_c + phi1_b * w)
-#         phi2 = -2.0 * (phi2_c + phi2_b * w)
-#         S[:, 0, 0] = apply_phase_one(S[:, 0, 0], phi1)
-#         S[:, 1, 1] = apply_phase_one(S[:, 1, 1], phi2)
-#         S[:, 0, 1] = -apply_phase_one(S[:, 0, 1], 0.5*(phi1 + phi2))
-#         S[:, 1, 0] = -apply_phase_one(S[:, 1, 0], 0.5*(phi1 + phi2))
-#         # f11 = np.exp(1j * 2.0 * (phi1_c + phi1_b * w))
-#         # f22 = np.exp(1j * 2.0 * (phi2_c + phi2_b * w))
-#         # f21 = -np.exp(1j * ((phi1_c + phi2_c) + (phi1_b + phi2_b) * w))
-#         # S[:, 0, 0] *= f11
-#         # S[:, 1, 1] *= f22
-#         # S[:, 0, 1] *= f21
-#         # S[:, 1, 0] *= f21
-#         return S
-#
-#     S_corr = _deembed_ports(w, net, phi1_c, phi2_c, phi1_b, phi2_b)
-#
-#     return res, S_corr
-
 def fit_phase_edges_curvefit(
     w,
     net: rf.Network,
@@ -1497,21 +1353,6 @@ class PhaseLoadingExtractor:
         )
         return ntw
 
-    @staticmethod
-    def apply_phase_all(S11, S21, S22, w, a11, b11, a22, b22):
-        """
-        Та же логика, что и в твоей apply_phase_all:
-        φ11 = a11 + b11*w
-        φ22 = a22 + b22*w
-        φ21 = 0.5*(φ11+φ22)
-        """
-        phi11 = a11 + b11 * w
-        phi22 = a22 + b22 * w
-        S11_corr = S11 * np.exp(-1j * phi11)
-        S22_corr = S22 * np.exp(-1j * phi22)
-        S21_corr = S21 * np.exp(-1j * 0.5 * (phi11 + phi22))
-        return S11_corr, S21_corr, S22_corr
-
     # ------------------------------------------------------------------
     #          1. ЦЕНТРИРОВАНИЕ КРАЁВ ФАЗЫ (φ_c для S11, S22)
     # ------------------------------------------------------------------
@@ -1642,14 +1483,10 @@ class PhaseLoadingExtractor:
         # ------------------ ДЕЭМБЕДДИНГ по φ_c ------------------
         def _deembed_ports(w, net: rf.Network, phi1_c, phi2_c, phi1_b=0.0, phi2_b=0.0):
             w = np.asarray(w, float).ravel()
-            S_loc = np.array(net.s, dtype=np.complex128, copy=True)
-            phi1 = -2.0 * (phi1_c + phi1_b * w)
-            phi2 = -2.0 * (phi2_c + phi2_b * w)
-            S_loc[:, 0, 0] = apply_phase_one(S_loc[:, 0, 0], phi1)
-            S_loc[:, 1, 1] = apply_phase_one(S_loc[:, 1, 1], phi2)
-            S_loc[:, 0, 1] = -apply_phase_one(S_loc[:, 0, 1], 0.5 * (phi1 + phi2))
-            S_loc[:, 1, 0] = -apply_phase_one(S_loc[:, 1, 0], 0.5 * (phi1 + phi2))
-            return S_loc
+            phi1 = -(phi1_c + phi1_b * w)
+            phi2 = -(phi2_c + phi2_b * w)
+            net_de = apply_phase_all(net, phi1, phi2, inverse_s12_s21=True)
+            return net_de.s
 
         S_corr = _deembed_ports(w, net, phi1_c, phi2_c, phi1_b, phi2_b)
 
@@ -1663,13 +1500,6 @@ class PhaseLoadingExtractor:
         """
         Обёртка над твоим make_phase_objective, но как метод.
         """
-        f = ntw_orig.f
-        S_raw = ntw_orig.s
-
-        S11_raw_full = S_raw[:, 0, 0]
-        S21_raw_full = S_raw[:, 0, 1]
-        S22_raw_full = S_raw[:, 1, 1]
-
         ntw_de = ntw_orig.copy()
         ntw_de.name = "De-embedded_for_NN"
 
@@ -1681,30 +1511,15 @@ class PhaseLoadingExtractor:
             b11_opt, b22_opt = params
 
             # 1) деэмбед по кандидату (только линейная часть)
-            S11_de, S21_de, S22_de = self.apply_phase_all(
-                S11_raw_full, S21_raw_full, S22_raw_full,
-                w_norm,
-                a11=0.0, b11=-b11_opt,
-                a22=0.0, b22=-b22_opt,
-            )
-
-            S_new = np.empty_like(S_raw)
-            S_new[:, 0, 0] = S11_de
-            S_new[:, 0, 1] = S21_de
-            S_new[:, 1, 0] = S21_de
-            S_new[:, 1, 1] = S22_de
-            ntw_de.s = S_new
+            ntw_de = add_phase_from_coeffs(ntw_orig, w_norm, a11=0, b11=0.5*b11_opt, a22=0, b22=0.5*b22_opt)
+            # ntw_de = apply_phase_coeffs_for_ntw(ntw_orig, w_norm, a11=0, b11=0.5*b11_opt, a22=0, b22=0.5*b22_opt)
 
             # 2) NN → CM + своя фазовая нагрузка
             pred_params = self.inference_model.predict_x(ntw_de)
 
             pred_filter = self.work_model.create_filter_from_prediction(
-                ntw_de, self.reference_filter, pred_params, self.work_model.codec
+                ntw_de, self.reference_filter, pred_params
             )
-            S_pred = pred_filter.s
-            S11_ideal = S_pred[:, 0, 0]
-            S21_ideal = S_pred[:, 0, 1]
-            S22_ideal = S_pred[:, 1, 1]
 
             # 3) фаза от сети
             a11_nn = float(pred_params.get("a11", 0.0))
@@ -1713,22 +1528,18 @@ class PhaseLoadingExtractor:
             b22_nn = float(pred_params.get("b22", 0.0))
 
             # 4) суммарная фаза
-            a11_total = a11_nn
-            a22_total = a22_nn
-            b11_total = b11_opt + b11_nn
-            b22_total = b22_opt + b22_nn
+            a11_total = 0.5*a11_nn
+            a22_total = 0.5*a22_nn
+            b11_total = 0.5*(b11_opt + b11_nn)
+            b22_total = 0.5*(b22_opt + b22_nn)
 
-            S11_final, S21_final, S22_final = self.apply_phase_all(
-                S11_ideal, S21_ideal, S22_ideal,
-                w_norm,
-                a11=a11_total, b11=b11_total,
-                a22=a22_total, b22=b22_total,
-            )
+            # ntw_final = apply_phase_coeffs_for_ntw(pred_filter, w_norm, a11=-a11_total, b11=-b11_total, a22=-a22_total, b22=-b22_total)
+            ntw_final = remove_phase_from_coeffs(pred_filter, w_norm, a11=a11_total, b11=b11_total, a22=a22_total, b22=b22_total)
 
             loss = (
-                np.mean(np.abs(S11_final - S11_raw_full)) +
-                np.mean(np.abs(S21_final - S21_raw_full)) +
-                np.mean(np.abs(S22_final - S22_raw_full))
+                np.mean(np.abs(ntw_final.s[:, 0, 0] - ntw_de.s[:, 0, 0])) +
+                np.mean(np.abs(ntw_final.s[:, 0, 1] - ntw_de.s[:, 0, 1])) +
+                np.mean(np.abs(ntw_final.s[:, 1, 1] - ntw_de.s[:, 1, 1]))
             )
 
             if verbose:
@@ -1766,9 +1577,9 @@ class PhaseLoadingExtractor:
             lambda x: obj(x),
             x0,
             method='Nelder-Mead',
-            options={'maxiter': 100, 'xatol': 2e-4, 'fatol': 5e-4}
+            options={'maxiter': 1000, 'xatol': 1e-6, 'fatol': 1e-9}
         )
-        # print(f"[NELDER-MEAD] x_opt={res.x}, loss={res.fun:.6f}, success={res.success}")
+        print(f"[NELDER-MEAD] x_opt={res.x}, loss={res.fun:.6f}, success={res.success}")
         return res
 
     def optimize_phase_loading(self, ntw_orig, w_norm, use_grid=False):
@@ -1852,24 +1663,9 @@ class PhaseLoadingExtractor:
         # --- 3. Полный деэмбеддинг линейной фазы (как в твоём коде) ---
         w = np.asarray(w_norm, dtype=float)
 
-        S_lin = np.array(ntw_edges_deembedded.s, dtype=np.complex128, copy=True)
-
         # фазы на портах
-        phi11_lin = -2*w * b11_opt
-        phi22_lin = -2*w * b22_opt
-        phi21_lin = -(phi11_lin + phi22_lin)
-
         # применяем обратную фазу: умножаем на exp(+j * φ)
-        S_lin[:, 0, 0] = apply_phase_one(S_lin[:, 0, 0], phi11_lin)
-        S_lin[:, 1, 1] = apply_phase_one(S_lin[:, 1, 1], phi22_lin)
-        S_lin[:, 0, 1] = apply_phase_one(S_lin[:, 0, 1], phi21_lin)
-        S_lin[:, 1, 0] = apply_phase_one(S_lin[:, 1, 0], phi21_lin)
-
-        ntw_full_deembedded = rf.Network(
-            frequency=ntw_edges_deembedded.frequency,
-            s=S_lin,
-            name="fully_deembedded_phase",
-        )
+        ntw_full_deembedded = remove_phase_from_coeffs(ntw_edges_deembedded, w, a11=0, b11=b11_opt, a22=0, b22=b22_opt)
 
         result = {
             "phi1_c": self.last_phi1_c,

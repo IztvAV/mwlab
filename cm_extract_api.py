@@ -61,6 +61,7 @@ def _get_configs_from_manifest(manifest_path: str|os.PathLike|None=None) -> cfg.
 
 def train_model(manifest_path: str|os.PathLike|None=None):
     configs = _get_configs_from_manifest(manifest_path)
+    global work_model
     work_model = common.WorkModel(configs, is_inference=False)
     codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
                                                  keys_for_analysis=[f"m_{r}_{c}" for r, c in
@@ -77,7 +78,8 @@ def train_model(manifest_path: str|os.PathLike|None=None):
     lit_model = work_model.train(
         optimizer_cfg={"name": "AdamW", "lr": 0.0009400000000000001, "weight_decay": 1e-5},
         scheduler_cfg={"name": "StepLR", "step_size": 25, "gamma": 0.09},
-        loss_fn=CustomLosses("sqrt_mse_with_l1", weight_decay=1, weights=None)
+        loss_fn=CustomLosses("sqrt_mse_with_l1", weight_decay=1, weights=None),
+        strategy_type="two stage"
     )
 
     return lit_model
@@ -86,48 +88,45 @@ def train_model(manifest_path: str|os.PathLike|None=None):
 
 def load_model(manifest_path: str|os.PathLike|None=None):
     """ Пока в таком формате. В дальнейшем надо будет стандартизировать названия моделей """
-    try:
-        global work_model
-        configs = _get_configs_from_manifest(manifest_path)
-        work_model = common.WorkModel(configs, is_inference=True)
-        codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
-                                                     keys_for_analysis=[f"m_{r}_{c}" for r, c in
-                                                                        work_model.orig_filter.coupling_matrix.links] +
-                                                                       ["Q"] + ["f0"] + ["bw"] + ["a11"] +
-                                                                       ["a22"] + ["b11"] + ["b22"])
+    global work_model
+    configs = _get_configs_from_manifest(manifest_path)
+    work_model = common.WorkModel(configs, is_inference=True)
+    codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
+                                                 keys_for_analysis=[f"m_{r}_{c}" for r, c in
+                                                                    work_model.orig_filter.coupling_matrix.links] +
+                                                                   ["Q"] + ["f0"] + ["bw"] + ["a11"] +
+                                                                   ["a22"] + ["b11"] + ["b22"])
 
-        codec = codec
-        work_model.setup(
-            model_name="resnet_with_correction",
-            model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
-            dm_codec=codec
-        )
+    codec = codec
+    work_model.setup(
+        model_name="resnet_with_correction",
+        model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
+        dm_codec=codec
+    )
 
-        global inference_model, phase_extractor, inference_model_ft
-        inference_model = work_model.inference(configs.MODEL_CHECKPOINT_PATH)
-        inference_model_ft = copy.deepcopy(inference_model)
-        inference_model_ft.eval()
-        for param in inference_model_ft.model.parameters():
-            param.requires_grad = False
+    global inference_model, phase_extractor, inference_model_ft
+    inference_model = work_model.inference(configs.MODEL_CHECKPOINT_PATH)
+    inference_model_ft = copy.deepcopy(inference_model)
+    inference_model_ft.eval()
+    for param in inference_model_ft.model.parameters():
+        param.requires_grad = False
 
-        for param in inference_model_ft.model._main_model.fc.parameters():
-            param.requires_grad = True
+    for param in inference_model_ft.model._main_model.fc.parameters():
+        param.requires_grad = True
 
-        for param in inference_model_ft.model._correction_model.parameters():
-            param.requires_grad = True
-        params = [p for p in inference_model_ft.parameters() if p.requires_grad]
-        global corr_optim
-        corr_optim = torch.optim.AdamW(params=params, lr=0.0005370623202982373, weight_decay=1e-5)
-        global corr_fast_calc
-        corr_fast_calc = FastMN2toSParamCalculation(matrix_order=work_model.orig_filter.coupling_matrix.matrix_order,
-                                                    wlist=work_model.orig_filter.f_norm,
-                                                    Q=work_model.orig_filter.Q,
-                                                    fbw=work_model.orig_filter.fbw,
-                                                    device=inference_model_ft.device)
+    for param in inference_model_ft.model._correction_model.parameters():
+        param.requires_grad = True
+    params = [p for p in inference_model_ft.parameters() if p.requires_grad]
+    global corr_optim
+    corr_optim = torch.optim.AdamW(params=params, lr=0.0005370623202982373, weight_decay=1e-5)
+    global corr_fast_calc
+    corr_fast_calc = FastMN2toSParamCalculation(matrix_order=work_model.orig_filter.coupling_matrix.matrix_order,
+                                                wlist=work_model.orig_filter.f_norm,
+                                                Q=work_model.orig_filter.Q,
+                                                fbw=work_model.orig_filter.fbw,
+                                                device=inference_model_ft.device)
 
-        phase_extractor = phase.PhaseLoadingExtractor(inference_model, work_model, work_model.orig_filter)
-    except Exception as e:
-        raise ValueError(f"На сервере возникла ошибка: {e}") from e
+    phase_extractor = phase.PhaseLoadingExtractor(inference_model, work_model, work_model.orig_filter)
 
 
 def phase_extract(fil: rf.Network):
@@ -139,20 +138,23 @@ def phase_extract(fil: rf.Network):
         ntw_de = calibration_res['ntw_deembedded']
         calibrated = True
     else:
+        # TODO: Сделать коррекцию фазы одной функцией. Для этого нужно переработать класс коррекции фазы
         w = work_model.orig_filter.f_norm
         a11 = calibration_res['phi1_c']
         a22 = calibration_res['phi2_c']
 
-        phi1 = -2.0 * (a11 + 0 * np.asarray(w))
-        phi2 = -2.0 * (a22 + 0 * np.asarray(w))
-        fil.s[:, 0, 0] = phase.apply_phase_one(fil.s[:, 0, 0], phi1)
-        fil.s[:, 1, 1] = phase.apply_phase_one(fil.s[:, 1, 1], phi2)
-        fil.s[:, 0, 1] = -phase.apply_phase_one(fil.s[:, 0, 1], 0.5 * (phi1 + phi2))
-        fil.s[:, 1, 0] = -phase.apply_phase_one(fil.s[:, 1, 0], 0.5 * (phi1 + phi2))
+        fil = phase.remove_phase_from_coeffs(fil, w, a11, 0, a22, 0, inverse_s12_s21=True)
+
+        # phi1 = -2.0 * (a11 + 0 * np.asarray(w))
+        # phi2 = -2.0 * (a22 + 0 * np.asarray(w))
+        # fil.s[:, 0, 0] = phase.apply_phase_one(fil.s[:, 0, 0], phi1)
+        # fil.s[:, 1, 1] = phase.apply_phase_one(fil.s[:, 1, 1], phi2)
+        # fil.s[:, 0, 1] = -phase.apply_phase_one(fil.s[:, 0, 1], 0.5 * (phi1 + phi2))
+        # fil.s[:, 1, 0] = -phase.apply_phase_one(fil.s[:, 1, 0], 0.5 * (phi1 + phi2))
 
         b11 = calibration_res['b11_opt']
         b22 = calibration_res['b22_opt']
-        ntw_de = phase.apply_phase_for_ntw(fil, w, 0, b11, 0, b22)
+        ntw_de = phase.remove_phase_from_coeffs(fil, w, 0, b11, 0, b22, inverse_s12_s21=False)
     return ntw_de
 
 
@@ -166,8 +168,7 @@ def prediction_with_optim_correct(fil: rf.Network):
 
     pred_prms = inference_model.predict_x(ntw_de)
     print(f"Предсказанные параметры: {pred_prms}")
-    pred_fil = work_model.create_filter_from_prediction(fil, work_model.orig_filter, pred_prms,
-                                                        work_model.codec)
+    pred_fil = work_model.create_filter_from_prediction(fil, work_model.orig_filter, pred_prms)
 
     a11_final = calibration_res['phi1_c'] + pred_prms["a11"]
     a22_final = calibration_res['phi2_c'] + pred_prms["a22"]
@@ -177,11 +178,11 @@ def prediction_with_optim_correct(fil: rf.Network):
         f"Финальный фазовый сдвиг, после корректировки ИИ: a11={a11_final:.6f} рад ({np.degrees(a11_final):.2f}°), a22={a22_final:.6f} рад ({np.degrees(a22_final):.2f}°)"
         f" b11 = {b11_final:.6f} рад ({np.degrees(b11_final):.2f}°), b22 = {b22_final:.6f} рад ({np.degrees(b22_final):.2f}°)")
 
-    pred_fil = phase.apply_phase_for_ntw(pred_fil, w, a11_final, b11_final, a22_final, b22_final)
+    pred_fil = phase.remove_phase_from_coeffs(pred_fil, w, a11_final, b11_final, a22_final, b22_final, inverse_s12_s21=False)
     optim_filter, phase_opt = optimize_cm(pred_fil, fil, phase_init=(a11_final, a22_final, b11_final, b22_final), plot=False)
     print(f"Оптимизированные параметры: {optim_filter.coupling_matrix.factors}. Добротность: {optim_filter.Q}. Фаза: {np.degrees(phase_opt)}")
 
-    optim_filter = phase.apply_phase_for_ntw(optim_filter, w, *phase_opt)
+    optim_filter = phase.remove_phase_from_coeffs(optim_filter, w, *phase_opt, inverse_s12_s21=False)
     return optim_filter.s, optim_filter.coupling_matrix.matrix.numpy()
 
 
@@ -212,7 +213,7 @@ def prediction_with_online_correct(fil: rf.Network):
 
     codec = work_model.codec
 
-    loss = nn.L1Loss()
+    loss = nn.L1Loss(reduction="sum")
 
     codec_db = copy.deepcopy(codec)
     codec_db.y_channels = ['S1_1.db', 'S2_1.db']
@@ -221,7 +222,7 @@ def prediction_with_online_correct(fil: rf.Network):
 
     ntw_de = phase_extract(fil)
     pred_prms = inference_model_ft.predict_x(ntw_de)
-    pred_fil = work_model.create_filter_from_prediction(fil, work_model.orig_filter, pred_prms, work_model.codec)
+    pred_fil = work_model.create_filter_from_prediction(fil, work_model.orig_filter, pred_prms)
 
     keys = pred_prms.keys()
     m_keys = list(keys)[:-7]
@@ -290,28 +291,22 @@ def prediction_with_online_correct(fil: rf.Network):
         total_pred_prms = dict(zip(m_keys, m_factors))
         # print(f"Origin parameters: {pred_prms}")
         # print(f"Tuned parameters: {total_pred_prms}")
-        correct_pred_fil = work_model.create_filter_from_prediction(fil, work_model.orig_filter, total_pred_prms, work_model.codec)
+        correct_pred_fil = work_model.create_filter_from_prediction(fil, work_model.orig_filter, total_pred_prms)
         # inference_model.plot_origin_vs_prediction(orig_fil, correct_pred_fil, title=f' {i} After correction')
     return  correct_pred_fil.s, correct_pred_fil.coupling_matrix.matrix.numpy()
 
 
 def predict(fil: rf.Network):
-    try:
-        s, m = prediction_with_optim_correct(fil)
-        # s, m = prediction_with_online_correct(fil)
-        return s, m
-    except Exception as e:
-        raise ValueError(f"На сервере возникла ошибка: {e}") from e
+    # s, m = prediction_with_optim_correct(fil)
+    s, m = prediction_with_online_correct(fil)
+    return s, m
 
 
 
 def model_info():
-    try:
-        global work_model
-        info = work_model.info()
-        return info
-    except Exception as e:
-        raise ValueError(f"На сервере возникла ошибка: {e}") from e
+    global work_model
+    info = work_model.info()
+    return info
 
 
 def calc_s_params(M:np.array, f0:float, bw:float, Q:float, frange:list or np.array):
