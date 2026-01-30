@@ -143,7 +143,7 @@ def phase_extract(fil: rf.Network):
         a11 = calibration_res['phi1_c']
         a22 = calibration_res['phi2_c']
 
-        fil = phase.remove_phase_from_coeffs(fil, w, a11, 0, a22, 0, inverse_s12_s21=True)
+        fil = phase_extractor.remove_phase_from_coeffs(fil, w, a11, 0, a22, 0, inverse_s12_s21=True)
 
         # phi1 = -2.0 * (a11 + 0 * np.asarray(w))
         # phi2 = -2.0 * (a22 + 0 * np.asarray(w))
@@ -154,7 +154,7 @@ def phase_extract(fil: rf.Network):
 
         b11 = calibration_res['b11_opt']
         b22 = calibration_res['b22_opt']
-        ntw_de = phase.remove_phase_from_coeffs(fil, w, 0, b11, 0, b22, inverse_s12_s21=False)
+        ntw_de = phase_extractor.remove_phase_from_coeffs(fil, w, 0, b11, 0, b22, inverse_s12_s21=False)
     return ntw_de
 
 
@@ -178,12 +178,12 @@ def prediction_with_optim_correct(fil: rf.Network):
         f"Финальный фазовый сдвиг, после корректировки ИИ: a11={a11_final:.6f} рад ({np.degrees(a11_final):.2f}°), a22={a22_final:.6f} рад ({np.degrees(a22_final):.2f}°)"
         f" b11 = {b11_final:.6f} рад ({np.degrees(b11_final):.2f}°), b22 = {b22_final:.6f} рад ({np.degrees(b22_final):.2f}°)")
 
-    pred_fil = phase.remove_phase_from_coeffs(pred_fil, w, a11_final, b11_final, a22_final, b22_final, inverse_s12_s21=False)
+    pred_fil = phase_extractor.remove_phase_from_coeffs(pred_fil, w, a11_final, b11_final, a22_final, b22_final, inverse_s12_s21=False)
     optim_filter, phase_opt = optimize_cm(pred_fil, fil, phase_init=(a11_final, a22_final, b11_final, b22_final), plot=False)
     print(f"Оптимизированные параметры: {optim_filter.coupling_matrix.factors}. Добротность: {optim_filter.Q}. Фаза: {np.degrees(phase_opt)}")
 
-    optim_filter = phase.remove_phase_from_coeffs(optim_filter, w, *phase_opt, inverse_s12_s21=False)
-    return optim_filter.s, optim_filter.coupling_matrix.matrix.numpy()
+    optim_filter = phase_extractor.remove_phase_from_coeffs(optim_filter, w, *phase_opt, inverse_s12_s21=False)
+    return optim_filter
 
 
 def prediction_with_online_correct(fil: rf.Network):
@@ -293,13 +293,17 @@ def prediction_with_online_correct(fil: rf.Network):
         # print(f"Tuned parameters: {total_pred_prms}")
         correct_pred_fil = work_model.create_filter_from_prediction(fil, work_model.orig_filter, total_pred_prms)
         # inference_model.plot_origin_vs_prediction(orig_fil, correct_pred_fil, title=f' {i} After correction')
-    return  correct_pred_fil.s, correct_pred_fil.coupling_matrix.matrix.numpy()
+    return  correct_pred_fil
 
 
 def predict(fil: rf.Network):
+    resample_in = S_Resample(301)
+    resample_out = S_Resample(len(fil.f))
     # s, m = prediction_with_optim_correct(fil)
-    s, m = prediction_with_online_correct(fil)
-    return s, m
+    fil_in = resample_in(fil)
+    fil_pred = prediction_with_optim_correct(fil_in)
+    fil_out = resample_out(fil_pred)
+    return fil_out.s, fil_out.coupling_matrix.matrix.numpy()
 
 
 
