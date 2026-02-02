@@ -68,6 +68,27 @@ on_empty:
 - "real" : агрегировать по Re(y),
 - "imag" : агрегировать по Im(y).
 
+Signed-агрегаторы (интегральные ограничения с запасом)
+------------------------------------------------------
+Signed-агрегаторы (SignedUpIntAgg/SignedLoIntAgg/SignedRippleIntAgg) используются,
+когда недостаточно “скаляра нарушения” и нужно учитывать **частотную зависимость запаса**
+(margin/slack) по всей полосе.
+
+Новый контракт signed-агрегаторов:
+- агрегатор возвращает **signed residual** относительно границы 0;
+- значение агрегатора интерпретируется компаратором как ограничение вида:
+      value <= 0
+
+Семантика:
+- value >  0 : есть нарушения (penalty),
+- value <= 0 : ограничение выполнено, а запас (slack) равен:
+      slack = -value
+  и является **интегральной** мерой запаса по частоте.
+
+Важно: shaping/нормировка вознаграждения (reward saturation, “не гнаться за бесконечным запасом”)
+должны выполняться на уровне Comparator.reward(...), а не внутри агрегатора.
+Агрегатор возвращает только физически/алгоритмически осмысленный signed residual.
+
 Структура файла
 ---------------
 1) Внутренние типы и хелперы (политики, конверсия единиц, фильтрация).
@@ -1278,7 +1299,6 @@ def _signed_core(
     p: int,
     method: IntegralMethod,
     normalize: Union[str, float, Sequence[Union[str, float]]],
-    rho: float,
     ref_for_norm: np.ndarray,
 ) -> float:
     """
@@ -1290,7 +1310,12 @@ def _signed_core(
     - ref_for_norm — линия для нормировки (limit/target).
 
     Выход:
-    - если нарушений нет, метрика может быть < 0 из-за «награды за запас».
+    - возвращает signed residual относительно 0:
+        value >  0 : нарушения (штраф)
+        value <= 0 : ограничение выполнено, slack = -value
+
+      Важно: агрегатор НЕ выполняет shaping reward (насыщение/ограничение гонки за запасом).
+      Это задача компаратора (Comparator.reward).
     """
     r = np.asarray(r, dtype=float)
     f_basis = np.asarray(f_basis, dtype=float)
@@ -1307,10 +1332,6 @@ def _signed_core(
     if mth not in _INTEGRAL_METHODS:
         raise ValueError(f"method должен быть один из {_INTEGRAL_METHODS}")
 
-    rho = float(rho)
-    if rho <= 0.0:
-        raise ValueError("rho должен быть > 0")
-
     # 1) Штраф за нарушения (r > 0)
     pos = np.clip(r, 0.0, None) ** p
     raw_plus = _trapz(pos, f_basis) if mth == "trapz" else float(np.mean(pos))
@@ -1326,15 +1347,15 @@ def _signed_core(
     neg = np.clip(-r, 0.0, None)
     M = _lme_soft_max(neg)
 
-    # Масштабируем «награду» совместимо с методом
+    # Масштабируем интегральную меру запаса совместимо с методом
     if mth == "trapz":
         raw_minus = (M ** p) * _bandwidth(f_basis)
     else:
         raw_minus = (M ** p)
 
     S = raw_minus / Z
-    reward = S * float(np.exp(-S / rho))
-    return A_plus - reward
+    # Новый контракт: возвращаем signed residual. При отсутствии нарушений value = -S.
+    return A_plus - S
 
 
 class _SignedAggBase(BaseAggregator):
@@ -1344,11 +1365,18 @@ class _SignedAggBase(BaseAggregator):
     Signed-агрегаторы предназначены для задач оптимизации, где полезно:
     - штрафовать нарушения,
     - но при отсутствии нарушений предпочитать больший «запас» (margin),
-      не превращая это в жёсткую «гонку в бесконечность».
+      при этом shaping вознаграждения выполняется на уровне Comparator.reward, а не здесь.
 
     Ограничения:
     - vals должны быть вещественными (complex запрещён),
     - при basis="Hz" требуется unit-aware вызов aggregate(..., freq_unit=...).
+
+    Контракт результата:
+      агрегатор возвращает value, предназначенное для компаратора как ограничение:
+          value <= 0
+      где:
+        value >  0 : нарушения,
+        value <= 0 : ограничение выполнено, slack = -value.
     """
 
     expects_freq_unit: Optional[str] = None
@@ -1360,7 +1388,6 @@ class _SignedAggBase(BaseAggregator):
         *,
         method: IntegralMethod = "mean",
         normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
-        rho: float = 0.25,
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
@@ -1375,10 +1402,6 @@ class _SignedAggBase(BaseAggregator):
             raise ValueError(f"method должен быть один из {_INTEGRAL_METHODS}")
 
         self.normalize = normalize
-
-        self.rho = float(rho)
-        if self.rho <= 0.0:
-            raise ValueError("rho должен быть > 0")
 
         self.finite_policy = str(finite_policy).strip().lower()
         self.on_empty = str(on_empty).strip().lower()
@@ -1448,7 +1471,6 @@ class SignedUpIntAgg(_SignedAggBase):
         *,
         method: IntegralMethod = "mean",
         normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
-        rho: float = 0.25,
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
@@ -1457,7 +1479,6 @@ class SignedUpIntAgg(_SignedAggBase):
         super().__init__(p,
                          method=method,
                          normalize=normalize,
-                         rho=rho,
                          finite_policy=finite_policy,
                          on_empty=on_empty,
                          basis=basis,
@@ -1496,7 +1517,6 @@ class SignedUpIntAgg(_SignedAggBase):
             p=self.p,
             method=self.method,
             normalize=self.normalize,
-            rho=self.rho,
             ref_for_norm=lim,
         )
 
@@ -1516,7 +1536,6 @@ class SignedLoIntAgg(_SignedAggBase):
         *,
         method: IntegralMethod = "mean",
         normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
-        rho: float = 0.25,
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
@@ -1525,7 +1544,6 @@ class SignedLoIntAgg(_SignedAggBase):
         super().__init__(p,
                          method=method,
                          normalize=normalize,
-                         rho=rho,
                          finite_policy=finite_policy,
                          on_empty=on_empty,
                          basis=basis,
@@ -1564,7 +1582,6 @@ class SignedLoIntAgg(_SignedAggBase):
             p=self.p,
             method=self.method,
             normalize=self.normalize,
-            rho=self.rho,
             ref_for_norm=lim,
         )
 
@@ -1585,7 +1602,6 @@ class SignedRippleIntAgg(_SignedAggBase):
         *,
         method: IntegralMethod = "mean",
         normalize: Union[str, float, Sequence[Union[str, float]]] = "bandwidth",
-        rho: float = 0.25,
         finite_policy: FinitePolicy = "omit",
         on_empty: EmptyPolicy = "raise",
         basis: FreqBasis = "native",
@@ -1594,7 +1610,6 @@ class SignedRippleIntAgg(_SignedAggBase):
         super().__init__(p,
                          method=method,
                          normalize=normalize,
-                         rho=rho,
                          finite_policy=finite_policy,
                          on_empty=on_empty,
                          basis=basis,
@@ -1645,7 +1660,6 @@ class SignedRippleIntAgg(_SignedAggBase):
             p=self.p,
             method=self.method,
             normalize=self.normalize,
-            rho=self.rho,
             ref_for_norm=tgt,
         )
 

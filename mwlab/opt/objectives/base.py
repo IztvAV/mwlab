@@ -22,7 +22,9 @@ mwlab.opt.objectives.base
 1) **Selector**    — извлекает из `NetworkLike` частотную зависимость: `(freq, values)`
 2) **Transform**   — преобразует кривую: `(freq, vals) -> (freq2, vals2)`
 3) **Aggregator**  — сворачивает кривую в скаляр: `(freq, vals) -> float`
-4) **Comparator**  — интерпретирует скаляр как pass/fail и/или штраф: `is_ok(value)`, `penalty(value)`
+4) **Comparator**  — интерпретирует скаляр как pass/fail и вычисляет метрики:
+                     - `penalty(value)` : неотрицательный штраф за нарушение,
+                     - `reward(value)`  : неотрицательное вознаграждение за запас (опционально).
 
 Композиция:
     Selector ∘ Transform ∘ Aggregator ∘ Comparator
@@ -82,6 +84,7 @@ from typing import (
     Any,
     Dict,
     Iterable,
+    Final,
     List,
     Literal,
     Optional,
@@ -664,6 +667,16 @@ class BaseComparator(ABC):
         """
         return 0.0 if self.is_ok(value) else 1.0
 
+    def reward(self, value: float) -> float:
+        """
+        Вознаграждение за запас (>= 0).
+
+        По умолчанию компаратор не начисляет reward и возвращает 0.0.
+        Конкретные компараторы могут переопределять reward и делать его нормированным.
+        """
+        _ = value
+        return 0.0
+
     def serde_params(self) -> Dict[str, Any]:
         return _serde_params_from_obj(self)
 
@@ -692,6 +705,9 @@ class CriterionResult:
     raw_penalty: float
     weighted_penalty: float
     weight: float
+    raw_reward: float
+    weighted_reward: float
+    reward_weight: float
     freq_unit: str
     value_unit: str
 
@@ -861,6 +877,7 @@ class BaseCriterion:
         *,
         transform: Optional[BaseTransform] = None,
         weight: float = 1.0,
+        reward_weight: float = 1.0,
         name: str = "",
         assume_prepared: bool = False,
     ):
@@ -872,6 +889,28 @@ class BaseCriterion:
         self.weight = float(weight)
         if self.weight < 0:
             raise ValueError("weight must be >= 0")
+
+        self.reward_weight = float(reward_weight)
+        if self.reward_weight < 0:
+            raise ValueError("reward_weight must be >= 0")
+
+        # ------------------------------------------------------------------
+        # Auto-disable reward if comparator doesn't support it.
+        #
+        # Support is detected structurally: comparator overrides BaseComparator.reward.
+        # If not overridden, reward() is always 0.0 → such criteria must NOT participate
+        # in min/softmin aggregation, otherwise they "kill" the global reward.
+        #
+        # You can still force-disable reward explicitly with reward_weight=0.
+        # ------------------------------------------------------------------
+        try:
+            reward_overridden = (self.comparator.__class__.reward is not BaseComparator.reward)
+        except Exception:
+            # Conservative fallback: if introspection fails, do not auto-disable
+            reward_overridden = True
+
+        if (self.reward_weight > 0.0) and (not reward_overridden):
+            self.reward_weight = 0.0
 
         self.name = name or getattr(selector, "name", "crit")
         self.assume_prepared = bool(assume_prepared)
@@ -1008,8 +1047,10 @@ class BaseCriterion:
 
         v = float(self.value(net))
         ok = bool(self.comparator.is_ok(v))
-        raw = float(self.comparator.penalty(v))
-        wpen = self.weight * raw
+        raw_p = float(self.comparator.penalty(v))
+        raw_r = float(self.comparator.reward(v))
+        wpen = self.weight * raw_p
+        wrew = self.reward_weight * raw_r
 
         t_class = self.transform.__class__.__name__ if self.transform is not None else "None"
         t_chain = repr(self.transform) if self.transform is not None else "None"
@@ -1019,9 +1060,12 @@ class BaseCriterion:
             name=self.name,
             value=v,
             ok=ok,
-            raw_penalty=raw,
+            raw_penalty=raw_p,
             weighted_penalty=wpen,
-            weight=self.weight,
+            weight = self.weight,
+            raw_reward = raw_r,
+            weighted_reward = wrew,
+            reward_weight = self.reward_weight,
             freq_unit=freq_unit,
             value_unit=value_unit,
             comparator_unit=c_unit,
@@ -1041,6 +1085,11 @@ class BaseCriterion:
         raw = float(self.comparator.penalty(v))
         return self.weight * raw
 
+    def reward(self, net: NetworkLike) -> float:
+        v = float(self.value(net))
+        raw = float(self.comparator.reward(v))
+        return self.reward_weight * raw
+
     def __repr__(self):  # pragma: no cover
         return f"Criterion({self.name})"
 
@@ -1048,9 +1097,8 @@ class BaseCriterion:
 # =============================================================================
 # Specification — AND-набор критериев
 # =============================================================================
-
 Reduction = Literal["sum", "mean", "max"]
-
+RewardReduction = Literal["min", "softmin", "mean", "sum"]
 
 class BaseSpecification:
     """
@@ -1064,6 +1112,12 @@ class BaseSpecification:
         - reduction="sum"  : сумма weighted_penalty
         - reduction="mean" : среднее по критериям
         - reduction="max"  : худший критерий (minimax)
+
+    reward(net)
+      Сводит вознаграждения критериев в одну величину:
+        - reduction="min"     : минимальный weighted_reward (bottleneck / maximin)
+        - reduction="softmin" : гладкая аппроксимация min (управляется tau)
+        - reduction="sum"/"mean"/"max" : опционально для экспериментов/диагностики
     """
 
     def __init__(self, criteria: Sequence[BaseCriterion], *, name: str = "spec"):
@@ -1111,6 +1165,63 @@ class BaseSpecification:
 
         raise ValueError("reduction must be 'sum'|'mean'|'max'")
 
+    def reward(
+        self,
+        net: NetworkLike,
+        *,
+        reduction: RewardReduction = "min",
+        tau: float = 0.1,
+    ) -> float:
+        """
+        Сводный reward по спецификации.
+
+        reduction:
+          - "min"     : минимальный reward среди критериев (maximin по запасу)
+          - "softmin" : гладкая аппроксимация min (через log-sum-exp), параметр tau>0
+          - "mean"    : среднее reward
+          - "sum"     : сумма reward
+          - "max"     : максимальный reward среди критериев
+
+        ВАЖНО:
+        - по умолчанию критерии с reward_weight==0 исключаются из агрегации reward,
+          чтобы они не «обнуляли» min/softmin.
+        """
+        vals: List[float] = []
+        for c in self.criteria:
+            rw = float(getattr(c, "reward_weight", 1.0))
+            if rw <= 0.0:
+                continue
+            vals.append(float(c.reward(net)))
+
+        if not vals:
+            return 0.0
+
+        red = str(reduction).strip().lower()
+
+        if red == "sum":
+            return float(np.sum(np.asarray(vals, dtype=float)))
+
+        if red == "mean":
+            return float(np.mean(np.asarray(vals, dtype=float)))
+
+        if red == "min":
+            return float(np.min(np.asarray(vals, dtype=float)))
+
+        if red == "softmin":
+            t = float(tau)
+            if t <= 0.0:
+                raise ValueError("tau must be > 0 for softmin")
+            a = np.asarray(vals, dtype=float)
+            m = float(np.min(a))
+            # softmin(a) = -t*log(mean(exp(-a/t)))  (стабильная форма через сдвиг на m)
+            z = np.exp(-(a - m) / t)
+            return float(m - t * np.log(np.mean(z)))
+
+        if red == "max":
+            return float(np.max(np.asarray(vals, dtype=float)))
+
+        raise ValueError("reduction must be 'min'|'softmin'|'mean'|'sum'|'max'")
+
     def __len__(self) -> int:  # pragma: no cover
         return len(self.criteria)
 
@@ -1157,4 +1268,5 @@ __all__ = [
     "BaseCriterion",
     "CriterionResult",
     "BaseSpecification",
+    "RewardReduction",
 ]

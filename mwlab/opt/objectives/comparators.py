@@ -16,6 +16,16 @@ Comparator отвечает на вопрос: «как интерпретиро
    Штраф (мера “плохости”), удобная для оптимизации.
    Важно: penalty **всегда неотрицателен**.
 
+3) reward(value) -> float >= 0
+   Вознаграждение (мера “запаса” / margin), удобная для получения решения "с запасом".
+   Общая семантика reward:
+     - reward начисляется ТОЛЬКО если требование выполнено (slack > 0),
+     - reward=0, если требование нарушено или значение невалидно (NaN/Inf)*
+     - reward нормируется по характерному масштабу компаратора (scale/margin/delta/ширина окна),
+       чтобы разные критерии были сопоставимы.
+
+   * При finite_policy="raise" для NaN/Inf возбуждается исключение, как и в penalty().
+
 Comparator не видит частотную зависимость
 -----------------------------------------
 Comparator работает только со скаляром. Все операции над кривыми (обрезка полос,
@@ -49,6 +59,35 @@ non_finite_penalty всегда приводится к неотрицатель
 - для окна [low, high]    : max(high - low, AUTO_EPS)
 
 AUTO_EPS нужен, чтобы избегать деления на ноль.
+
+Рекомендации для SignedAgg (signed residual)
+--------------------------------------------
+Signed-агрегаторы (например, SignedUpIntAgg / SignedLoIntAgg / SignedRippleIntAgg)
+возвращают **signed residual** относительно границы 0 и предназначены для
+интерпретации как ограничения:
+
+    value <= 0
+
+где:
+- value >  0 : есть нарушения (penalty),
+- value <= 0 : ограничение выполнено, slack = -value — интегральная мера запаса.
+
+Практические рекомендации:
+1) Для оптимизации почти всегда выбирайте *мягкий* одно-сторонний компаратор с limit=0:
+   - HingeLEComparator(limit=0, scale=...)
+   - SoftPlusLEComparator(limit=0, scale=..., beta=...)
+   - SoftLEComparator(limit=0, margin=..., power=...)
+
+2) Не полагайтесь на scale="auto" при limit=0:
+   auto приведёт scale к AUTO_EPS, и penalty/reward станут слишком “жёсткими”/взрывоопасными.
+   Задавайте scale/margin явно.
+
+3) Если SignedAgg использует normalize='bandwidth'/'limit' и возвращает метрики порядка ~1,
+   разумный старт: scale≈1 (или margin≈1). При другой нормировке выбирайте масштаб так,
+   чтобы “типичные” нарушения давали penalty порядка 1.
+
+4) Reward shaping (“не гнаться за бесконечным запасом”) реализуется на уровне reward(...)
+   выбранного компаратора (обычно через tanh/exp/log1p), а не внутри SignedAgg.
 """
 
 from __future__ import annotations
@@ -126,6 +165,54 @@ def _handle_non_finite(
 
     # pol == "raise"
     raise ValueError("Comparator получил невалидное значение (NaN/Inf)")
+
+
+def _handle_non_finite_reward(*, finite_policy: FinitePolicy) -> float:
+    """
+    Единая политика обработки NaN/Inf для reward.
+
+    Почему так:
+    - reward — "поощрение", поэтому на невалидных значениях безопаснее не поощрять (reward=0),
+      чтобы NaN/Inf не давали ложные "бонусы".
+    - но в режиме отладки finite_policy="raise" — возбуждаем исключение.
+    """
+    pol = _norm_finite_policy(finite_policy)
+    if pol == "raise":
+        raise ValueError("Comparator получил невалидное значение (NaN/Inf)")
+    return 0.0
+
+
+def _reward_from_slack(slack: float, *, scale: float, kind: str) -> float:
+    """
+    Преобразовать запас (slack>0) в reward >= 0.
+
+    slack:
+      slack <= 0  -> 0
+      slack >  0  -> reward(slack)
+
+    kind:
+      - "linear" : slack/scale
+      - "tanh"   : tanh(slack/scale)         (0..1, мягкое насыщение)
+      - "exp"    : 1 - exp(-slack/scale)     (0..1, мягкое насыщение)
+      - "log1p"  : log1p(slack/scale)        (медленный рост, без верхней границы)
+    """
+    s = float(slack)
+    if s <= 0.0:
+        return 0.0
+    sc = _require_positive("scale", float(scale))
+    u = s / sc
+
+    k = str(kind).strip().lower()
+    if k == "linear":
+        return float(u)
+    if k == "tanh":
+        return float(np.tanh(u))
+    if k == "exp":
+        # численно устойчиво для малых u
+        return float(-np.expm1(-u))
+    if k == "log1p":
+        return float(np.log1p(u))
+    raise ValueError("reward kind must be one of: 'linear'|'tanh'|'exp'|'log1p'")
 
 
 def _resolve_scale_for_limit(limit: float, scale: Union[float, str]) -> float:
@@ -295,6 +382,16 @@ class LEComparator(BaseComparator):
             return p
         return 0.0 if v <= self.limit else 1.0
 
+    def reward(self, value: float) -> float:
+        v = float(value)
+        if not _is_finite_scalar(v):
+            return _handle_non_finite_reward(finite_policy=self.finite_policy)
+        # slack = limit - value (положителен внутри допустимой области)
+        slack = self.limit - v
+        # Для hard-компаратора reward делаем линейным, чтобы не было плато.
+        sc = max(abs(float(self.limit)), _AUTO_EPS)
+        return _reward_from_slack(slack, scale=sc, kind="tanh")
+
 
 @register_comparator(("GEComparator", "ge", ">="))
 class GEComparator(BaseComparator):
@@ -339,6 +436,14 @@ class GEComparator(BaseComparator):
             )
             return p
         return 0.0 if v >= self.limit else 1.0
+
+    def reward(self, value: float) -> float:
+        v = float(value)
+        if not _is_finite_scalar(v):
+            return _handle_non_finite_reward(finite_policy=self.finite_policy)
+        slack = v - self.limit
+        sc = max(abs(float(self.limit)), _AUTO_EPS)
+        return _reward_from_slack(slack, scale=sc, kind="tanh")
 
 
 # =============================================================================
@@ -387,6 +492,14 @@ class SoftLEComparator(LEComparator):
             return p
         return _penalty_one_sided(v - self.limit, kind="power", margin=self.margin, power=self.power)
 
+    def reward(self, value: float) -> float:
+        v = float(value)
+        if not _is_finite_scalar(v):
+            return _handle_non_finite_reward(finite_policy=self.finite_policy)
+        slack = self.limit - v
+        # Нормируем тем же margin, что и штраф.
+        return _reward_from_slack(slack, scale=self.margin, kind="tanh")
+
 
 @register_comparator(("SoftGEComparator", "soft_ge", "power_ge"))
 class SoftGEComparator(GEComparator):
@@ -427,6 +540,13 @@ class SoftGEComparator(GEComparator):
             )
             return p
         return _penalty_one_sided(self.limit - v, kind="power", margin=self.margin, power=self.power)
+
+    def reward(self, value: float) -> float:
+        v = float(value)
+        if not _is_finite_scalar(v):
+            return _handle_non_finite_reward(finite_policy=self.finite_policy)
+        slack = v - self.limit
+        return _reward_from_slack(slack, scale=self.margin, kind="tanh")
 
 
 @register_comparator(("HingeLEComparator", "hinge_le"))
@@ -469,6 +589,14 @@ class HingeLEComparator(LEComparator):
         sc = _resolve_scale_for_limit(self.limit, self.scale)
         return _penalty_one_sided(v - self.limit, kind="hinge", scale=sc)
 
+    def reward(self, value: float) -> float:
+        v = float(value)
+        if not _is_finite_scalar(v):
+            return _handle_non_finite_reward(finite_policy=self.finite_policy)
+        slack = self.limit - v
+        sc = _resolve_scale_for_limit(self.limit, self.scale)
+        return _reward_from_slack(slack, scale=sc, kind="tanh")
+
 
 @register_comparator(("HingeGEComparator", "hinge_ge"))
 class HingeGEComparator(GEComparator):
@@ -505,6 +633,14 @@ class HingeGEComparator(GEComparator):
             return p
         sc = _resolve_scale_for_limit(self.limit, self.scale)
         return _penalty_one_sided(self.limit - v, kind="hinge", scale=sc)
+
+    def reward(self, value: float) -> float:
+        v = float(value)
+        if not _is_finite_scalar(v):
+            return _handle_non_finite_reward(finite_policy=self.finite_policy)
+        slack = v - self.limit
+        sc = _resolve_scale_for_limit(self.limit, self.scale)
+        return _reward_from_slack(slack, scale=sc, kind="tanh")
 
 
 @register_comparator(("SoftPlusLEComparator", "softplus_le"))
@@ -552,6 +688,14 @@ class SoftPlusLEComparator(LEComparator):
             beta=self.beta,
         )
 
+    def reward(self, value: float) -> float:
+        v = float(value)
+        if not _is_finite_scalar(v):
+            return _handle_non_finite_reward(finite_policy=self.finite_policy)
+        slack = self.limit - v
+        sc = _resolve_scale_for_limit(self.limit, self.scale)
+        return _reward_from_slack(slack, scale=sc, kind="tanh")
+
 
 @register_comparator(("SoftPlusGEComparator", "softplus_ge"))
 class SoftPlusGEComparator(GEComparator):
@@ -597,6 +741,15 @@ class SoftPlusGEComparator(GEComparator):
             beta=self.beta,
         )
 
+    def reward(self, value: float) -> float:
+        v = float(value)
+        if not _is_finite_scalar(v):
+            return _handle_non_finite_reward(finite_policy=self.finite_policy)
+        # slack = value - limit (положителен внутри допустимой области)
+        slack = v - self.limit
+        sc = _resolve_scale_for_limit(self.limit, self.scale)
+        return _reward_from_slack(slack, scale=sc, kind="tanh")
+
 
 @register_comparator(("HuberLEComparator", "huber_le"))
 class HuberLEComparator(LEComparator):
@@ -633,6 +786,13 @@ class HuberLEComparator(LEComparator):
             return p
         return _penalty_one_sided(v - self.limit, kind="huber", delta=self.delta)
 
+    def reward(self, value: float) -> float:
+        v = float(value)
+        if not _is_finite_scalar(v):
+            return _handle_non_finite_reward(finite_policy=self.finite_policy)
+        slack = self.limit - v
+        return _reward_from_slack(slack, scale=self.delta, kind="tanh")
+
 
 @register_comparator(("HuberGEComparator", "huber_ge"))
 class HuberGEComparator(GEComparator):
@@ -666,6 +826,13 @@ class HuberGEComparator(GEComparator):
             )
             return p
         return _penalty_one_sided(self.limit - v, kind="huber", delta=self.delta)
+
+    def reward(self, value: float) -> float:
+        v = float(value)
+        if not _is_finite_scalar(v):
+            return _handle_non_finite_reward(finite_policy=self.finite_policy)
+        slack = v - self.limit
+        return _reward_from_slack(slack, scale=self.delta, kind="tanh")
 
 
 # =============================================================================
@@ -768,6 +935,32 @@ class WindowComparator(BaseComparator):
         p_left = _penalty_one_sided(left_res, kind="huber", delta=self.delta)
         p_right = _penalty_one_sided(right_res, kind="huber", delta=self.delta)
         return float(p_left + p_right)
+
+    def reward(self, value: float) -> float:
+        v = float(value)
+        if not _is_finite_scalar(v):
+            return _handle_non_finite_reward(finite_policy=self.finite_policy)
+
+        # slack до ближайшей границы окна
+        slack = min(v - self.low, self.high - v)
+        if slack <= 0.0:
+            return 0.0
+
+        if self.mode == "huber":
+            # delta задаёт характерную шкалу
+            return _reward_from_slack(slack, scale=self.delta, kind="tanh")
+
+        if self.mode in ("hinge", "softplus"):
+            # scale auto обычно ~ (high-low). Хотим reward≈1 в центре:
+            # slack_center = (high-low)/2 => 2*slack/scale ~ 1
+            sc = _resolve_scale_for_window(self.low, self.high, self.scale)
+            return _reward_from_slack(2.0 * slack, scale=sc, kind="tanh")
+
+        # hard-режим: естественный масштаб — половина ширины окна
+        half = max(0.5 * (self.high - self.low), _AUTO_EPS)
+        # Для hard также можно оставить линейный reward (без насыщения),
+        # но tanh даёт аккуратный bounded-score.
+        return _reward_from_slack(slack, scale=half, kind="tanh")
 
 
 @register_comparator(("TargetComparator", "target"))

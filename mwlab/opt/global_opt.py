@@ -12,6 +12,7 @@
 * Сборка surrogate (из Lightning-модуля или готового BaseSurrogate);
 * Формирование цели:
     - 'penalty'         → PenaltyObjective (минимизация суммарного штрафа);
+    - 'penalty_reward'  → PenaltyRewardObjective (penalty − α·reward, опц. только для feasible);
     - 'feasible_yield'  → FeasibleYieldObjective (penalty − α·Y_local для feasible-точек);
       (также допускается кастомная objective_fn);
 * Запуск оптимизации (Nevergrad через NGOptimizer);
@@ -28,7 +29,7 @@
 Зависимости
 -----------
 * Ваши модули:
-  - `mwlab.opt.objectives.penalty.PenaltyObjective, FeasibleYieldObjective`
+  - `mwlab.opt.objectives.penalty.PenaltyObjective, PenaltyRewardObjective, FeasibleYieldObjective`
   - `mwlab.opt.nevergrad_runner.NGOptimizer, NGResult`
 * MWLab:
   - `mwlab.opt.design.space.DesignSpace`
@@ -86,7 +87,7 @@ from mwlab.opt.objectives.specification import Specification
 from mwlab.opt.surrogates.base import BaseSurrogate
 from mwlab.opt.design.samplers import get_sampler
 from mwlab.opt.design.space import ContinuousVar, IntegerVar, OrdinalVar, CategoricalVar
-
+from mwlab.opt.objectives.network_like import NetworkLike
 
 # Обёртка над Lightning-модулем (если surrogate ещё не построен)
 try:  # pragma: no cover
@@ -116,7 +117,7 @@ except Exception:  # pragma: no cover
 # Ваши цели и раннер
 # ────────────────────────────────────────────────────────────────────────────
 
-from mwlab.opt.objectives.penalty import PenaltyObjective, FeasibleYieldObjective
+from mwlab.opt.objectives.penalty import PenaltyObjective, PenaltyRewardObjective, FeasibleYieldObjective
 from mwlab.opt.nevergrad_runner import NGOptimizer, NGResult
 
 
@@ -138,8 +139,8 @@ class GlobalOptConfig:
     surrogate: Optional[BaseSurrogate] = None           # уже готовый surrogate X→S
     pl_module: Any = None                                # обученный Lightning-модуль (swap_xy=False)
 
-    # Режим цели: 'penalty' | 'feasible_yield'
-    objective_mode: str = "penalty"
+    # Режим цели: 'penalty' | 'penalty_reward' | 'feasible_yield'
+    objective_mode: str = "penalty_reward"
 
     # Кастомная цель (если задана — имеет приоритет над objective_mode)
     objective_fn: Optional[Callable[[Mapping[str, Any]], float]] = None
@@ -164,6 +165,12 @@ class GlobalOptConfig:
     yield_n_mc: int = 8192
     yield_sampler: str = "normal"  # "normal" | "sobol" | ...
     yield_k: int = 5               # на скольких лучших считать yield
+
+    # Параметры режима 'penalty_reward'
+    pr_reward_reduction: str = "min"  # 'min' | 'softmin' | 'mean' | 'sum' | 'max'
+    pr_reward_tau: float = 0.1  # температура для softmin
+    pr_alpha: float = 0.1  # вес reward
+    pr_reward_only_if_feasible: bool = True
 
     # Параметры режима 'feasible_yield'
     # Если используете 'penalty', эти поля игнорируются.
@@ -195,7 +202,7 @@ class GlobalOptResult:
     best_value: float
 
     # (опц.) предсказанная сеть для best (если был surrogate)
-    best_net: Optional["rf.Network"]
+    best_net: Optional[NetworkLike]
 
     # Отчёт спецификации для best (если spec/суррогат заданы)
     spec_report: Optional[Dict[str, Any]]
@@ -224,6 +231,29 @@ class GlobalOptimizer:
         → NGOptimizer.run()
         → отчёты и доп. метрики (yield по топ-K — опционально).
     """
+    @staticmethod
+    def _align_to_grid(v: int, origin: int, step: int) -> int:
+        """Посадка на сетку origin + k*step (к ближайшему узлу)."""
+        if step <= 1:
+            return v
+        k = int(round((v - origin) / step))
+        return origin + k * step
+
+    @staticmethod
+    def _align_down(v: int, origin: int, step: int) -> int:
+        """Выравнивание вниз по сетке origin + k*step."""
+        import math
+        if step <= 1:
+            return v
+        return origin + int(math.floor((v - origin) / step)) * step
+
+    @staticmethod
+    def _align_up(v: int, origin: int, step: int) -> int:
+        """Выравнивание вверх по сетке origin + k*step."""
+        import math
+        if step <= 1:
+            return v
+        return origin + int(math.ceil((v - origin) / step)) * step
 
     def __init__(self, cfg: GlobalOptConfig):
         self.cfg = cfg
@@ -274,7 +304,7 @@ class GlobalOptimizer:
            - 'penalty'        → PenaltyObjective(surrogate, spec)
            - 'feasible_yield' → FeasibleYieldObjective(...)
 
-        Для 'penalty' и 'feasible_yield' требуется surrogate и spec.
+        Для 'penalty', 'penalty_reward' и 'feasible_yield' требуется surrogate и spec.
         Для 'feasible_yield' обязательно задать локальные допуски (fy_delta
         или fy_tolerance_space). Базовое пространство берём из fy_base_space
         или cfg.space.
@@ -283,8 +313,8 @@ class GlobalOptimizer:
             return self.cfg.objective_fn
 
         mode = str(self.cfg.objective_mode).lower()
-        if mode not in ("penalty", "feasible_yield"):
-            raise ValueError("objective_mode должен быть 'penalty' или 'feasible_yield'")
+        if mode not in ("penalty", "penalty_reward", "feasible_yield"):
+            raise ValueError("objective_mode должен быть 'penalty', 'penalty_reward' или 'feasible_yield'")
 
         if self.surrogate is None or self.cfg.spec is None:
             raise ValueError(
@@ -297,6 +327,18 @@ class GlobalOptimizer:
                 surrogate=self.surrogate,
                 spec=self.cfg.spec,
                 reduction="sum",
+                large_penalty=1e12,
+            )
+
+        if mode == "penalty_reward":
+            return PenaltyRewardObjective(
+                surrogate=self.surrogate,
+                spec=self.cfg.spec,
+                reduction="sum",
+                reward_reduction=self.cfg.pr_reward_reduction,
+                reward_tau=self.cfg.pr_reward_tau,
+                alpha=self.cfg.pr_alpha,
+                reward_only_if_feasible=self.cfg.pr_reward_only_if_feasible,
                 large_penalty=1e12,
             )
 
@@ -344,9 +386,9 @@ class GlobalOptimizer:
         best_v = float(ng_res.best_value)
 
         best_net = None
-        if self.surrogate is not None and _HAS_SKRF:
+        if self.surrogate is not None:
             try:
-                best_net = self.surrogate.predict(best_x)  # type: ignore[assignment]
+                best_net = self.surrogate.predict(best_x)  # NetworkLike, skrf не нужен
             except Exception:
                 best_net = None
 
@@ -377,6 +419,13 @@ class GlobalOptimizer:
             topk=self.cfg.topk,
             show_progress=self.cfg.show_progress,
         )
+        if (self.cfg.objective_fn is None) and (str(self.cfg.objective_mode).lower() == "penalty_reward"):
+            snapshot.update(dict(
+                pr_reward_reduction = self.cfg.pr_reward_reduction,
+                pr_reward_tau = self.cfg.pr_reward_tau,
+                pr_alpha = self.cfg.pr_alpha,
+                pr_reward_only_if_feasible = self.cfg.pr_reward_only_if_feasible,
+            ))
         if (self.cfg.objective_fn is None) and (str(self.cfg.objective_mode).lower() == "feasible_yield"):
             snapshot.update(dict(
                 fy_delta=self.cfg.fy_delta,
@@ -406,7 +455,7 @@ class GlobalOptimizer:
     # ───────────────────────────────────────────────────────────────────
     # Вспомогательный: построить ЛОКАЛЬНЫЙ DesignSpace вокруг x
     # ───────────────────────────────────────────────────────────────────
-    def _build_local_space_for_report(self, x: Mapping[str, Any]) -> DesignSpace:
+    def _build_local_space_for_report(self, x: Mapping[str, Any]) -> Optional[DesignSpace]:
         """
         Строит локальный DesignSpace вокруг точки x, используя cfg.fy_* настройки.
         Если локальные допуски не заданы (ни fy_delta, ни fy_tolerance_space),
@@ -415,7 +464,7 @@ class GlobalOptimizer:
         base_space = self.cfg.fy_base_space or self.cfg.space
         # нет локальных допусков → пусть вызывающий решит, что делать (глобальный fallback)
         if self.cfg.fy_tolerance_space is None and self.cfg.fy_delta is None:
-            return None  # type: ignore[return-value]
+            return None
 
         # 1) собрать карту радиусов dm, dp для каждого параметра
         dm_dp_map: Dict[str, Tuple[float, float]] = {}
@@ -429,16 +478,23 @@ class GlobalOptimizer:
             mode = str(self.cfg.fy_delta_mode).lower()
             for name in base_space.names():
                 center = float(x[name]) if name in x else 0.0
-                d_spec = delta[name] if isinstance(delta, dict) and name in delta else delta
+                if isinstance(delta, dict):
+                    if name not in delta:
+                        raise KeyError(f"fy_delta dict не содержит ключ '{name}'")
+                    d_spec = delta[name]
+                else:
+                    d_spec = delta
                 if isinstance(d_spec, tuple):
                     dm, dp = map(float, d_spec)
                     dm, dp = abs(dm), abs(dp)
                 else:
                     r = float(d_spec)  # type: ignore[arg-type]
-                    dm, dp = r, r
+                    dm, dp = abs(r), abs(r)
                 if mode == "rel":
                     # относительный режим: масштабируем на |center|
                     scale = abs(center)
+                    if scale == 0.0:
+                        scale = 1.0
                     dm *= scale
                     dp *= scale
                 dm_dp_map[name] = (dm, dp)
@@ -456,9 +512,14 @@ class GlobalOptimizer:
                 levels = list(base_var.levels)  # type: ignore[attr-defined]
                 if not self.cfg.fy_vary_categorical:
                     # заморозка уровня
-                    xstr = xval if xval in levels else str(xval)
+                    if xval in levels:
+                        lvl = xval
+                    elif isinstance(xval, (int, np.integer)) and 0 <= int(xval) < len(levels):
+                        lvl = levels[int(xval)]
+                    else:
+                        raise ValueError(f"Unknown level '{xval}' for '{name}'")
                     cls = CategoricalVar if isinstance(base_var, CategoricalVar) else OrdinalVar
-                    local_vars[name] = cls(levels=[xstr])  # type: ignore[call-arg]
+                    local_vars[name] = cls(levels=[lvl])  # type: ignore[call-arg]
                 else:
                     cls = CategoricalVar if isinstance(base_var, CategoricalVar) else OrdinalVar
                     local_vars[name] = cls(levels=levels)  # type: ignore[call-arg]
@@ -469,10 +530,11 @@ class GlobalOptimizer:
                 step = int(getattr(base_var, "step", 1))
                 lo_g, hi_g = base_var.bounds()
                 lo_g, hi_g = int(round(lo_g)), int(round(hi_g))
+                origin = lo_g
                 if not self.cfg.fy_vary_integers:
                     ival = int(round(float(xval)))
-                    if step > 1:
-                        ival = int(round(ival / step) * step)
+                    ival = int(np.clip(ival, lo_g, hi_g))
+                    ival = self._align_to_grid(ival, origin=origin, step=step)
                     ival = int(np.clip(ival, lo_g, hi_g))
                     local_vars[name] = IntegerVar(lower=ival, upper=ival, step=step, unit=getattr(base_var, "unit", ""))
                 else:
@@ -480,9 +542,9 @@ class GlobalOptimizer:
                     c = int(round(float(xval)))
                     lo = int(np.floor(c - dm))
                     hi = int(np.ceil(c + dp))
-                    if step > 1:
-                        lo = int(round(lo / step) * step)
-                        hi = int(round(hi / step) * step)
+                    # lower вниз, upper вверх по сетке origin + k*step
+                    lo = self._align_down(lo, origin=origin, step=step)
+                    hi = self._align_up(hi, origin=origin, step=step)
                     lo = int(np.clip(lo, lo_g, hi_g))
                     hi = int(np.clip(hi, lo_g, hi_g))
                     if hi < lo:
@@ -557,10 +619,22 @@ class GlobalOptimizer:
                         raise RuntimeError(
                             f"Не удаётся сопоставить семплы с параметрами: shape={arr.shape}, D={len(names)}")
 
-                # 3) батч-прогон и подсчёт pass
-                nets = self.surrogate.batch_predict(xs)
-                ok = [self.cfg.spec.is_ok(net) for net in nets]
-                y = float(np.mean(ok))
+                # 3) быстрый путь: surrogate.passes_spec, если есть
+                fn = getattr(self.surrogate, "passes_spec", None)
+                if callable(fn):
+                    ok_mask = fn(xs, self.cfg.spec)
+                    ok_arr = np.asarray(ok_mask, dtype=bool)
+                    y = float(np.mean(ok_arr))
+                else:
+                    # fallback: batch_predict + spec.is_ok (robust: ошибка = False)
+                    nets = self.surrogate.batch_predict(xs)
+                    ok_list: List[bool] = []
+                    for net in nets:
+                        try:
+                            ok_list.append(bool(self.cfg.spec.is_ok(net)))
+                        except Exception:
+                            ok_list.append(False)
+                    y = float(np.mean(ok_list))
             except Exception as e:
                 print(f"[yield] Compute failed for idx={i}: {type(e).__name__}: {e}")
                 y = float("nan")
@@ -592,9 +666,9 @@ class GlobalOptimizer:
                 if getattr(var, "is_integer", False):
                     step = int(getattr(var, "step", 1))
                     ival = int(round(val))
-                    if step > 1:
-                        ival = int(round(ival / step) * step)
-                    out[n] = ival
+                    origin = int(getattr(var, "lower", lo))
+                    ival = GlobalOptimizer._align_to_grid(ival, origin=origin, step=step)
+                    ival = int(np.clip(ival, int(lo), int(hi)))
                 else:
                     out[n] = float(val)
         return out

@@ -591,7 +591,7 @@ class CouplingMatrix:
         ax.set_xticklabels(labels)
         ax.set_yticklabels(labels)
 
-        if annotate and M.shape[0] <= 15:
+        if annotate and M.shape[0] <= 30:
             for i in range(M.shape[0]):
                 for j in range(M.shape[1]):
                     if hide_zero and mask[i, j]:

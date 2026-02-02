@@ -122,8 +122,19 @@ class YieldObjective:
             return float(np.mean(ok))
 
         # 3) Fallback: batch_predict + spec.is_ok
-        nets = self.sur.batch_predict(pts)
-        ok = np.fromiter((self.spec.is_ok(net) for net in nets), dtype=bool, count=len(nets))
+        try:
+            nets = self.sur.batch_predict(pts)
+        except Exception:
+            # Надёжный (но более медленный) fallback:
+            nets = [self.sur.predict(p) for p in pts]
+
+        def _safe_is_ok(net) -> bool:
+            try:
+                return bool(self.spec.is_ok(net))
+            except Exception:
+                return False
+
+        ok = np.fromiter((_safe_is_ok(net) for net in nets), dtype=bool, count=len(nets))
         return float(np.mean(ok))
 
     def __repr__(self) -> str:  # pragma: no cover

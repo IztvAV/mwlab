@@ -4,10 +4,10 @@
 mwlab.opt.objectives.penalty
 ===========================
 
-Penalty & Feasible-Yield objectives for surrogate-based optimization
+Penalty / Reward / Feasible-Yield objectives for surrogate-based optimization
 -------------------------------------------------------------------
 
-В модуле реализованы две цели для глобальной оптимизации поверх суррогата:
+В модуле реализованы три цели для глобальной оптимизации поверх суррогата:
 
 1) PenaltyObjective
    ----------------
@@ -19,7 +19,20 @@ Penalty & Feasible-Yield objectives for surrogate-based optimization
        если требуется «ужесточённая» спецификация, подготовьте её снаружи
        и передайте как `spec`.
 
-2) FeasibleYieldObjective
+2) PenaltyRewardObjective
+   ----------------------
+   Цель для получения решения “с запасом” после достижения penalty==0:
+
+       J(x) = penalty(x) − α · I{feasible(x)} · reward(x)
+
+   где:
+     • penalty(x) = spec.penalty(net, reduction) — неотрицательный штраф;
+     • feasible(x) = AND по критериям (ok);
+     • reward(x) — агрегированное “вознаграждение за запас” по критериям,
+       редуцируемое обычно как min/softmin (bottleneck), чтобы один критерий
+       не перетягивал оптимизацию на себя.
+
+3) FeasibleYieldObjective
    ----------------------
    «Составная» цель для одного прогона оптимизатора:
 
@@ -53,6 +66,9 @@ skrf НЕ требуется и не импортируется.
   - penalty (свёртка weighted_penalty),
   - all_ok (AND по r.ok).
 
+В PenaltyRewardObjective также избегаем двойного прохода:
+penalty, reward и feasible извлекаются из одного результата spec.evaluate(net).
+
 Примеры
 -------
 >>> # 1) Минимизация penalty
@@ -60,7 +76,16 @@ skrf НЕ требуется и не импортируется.
 >>> val = obj({"w": 12e-6, "gap": 40e-6})
 >>> arr = obj.batch([{"w": 10e-6}, {"w": 20e-6}])   # np.ndarray формы (B,)
 
->>> # 2) Составная цель: penalty → затем −α·Y_local (жёсткий режим)
+>>> # 2) Минимизация penalty и “углубление” в feasible область по reward
+>>> obj2 = PenaltyRewardObjective(
+...     surrogate=sur, spec=spec,
+...     reduction="sum",
+...     reward_reduction="softmin", reward_tau=0.05,
+...     alpha=0.25,
+... )
+>>> val2 = obj2({"w": 12e-6, "gap": 40e-6})
+
+>>> # 3) Составная цель: penalty → затем −α·Y_local (жёсткий режим)
 >>> fy = FeasibleYieldObjective(
 ...     surrogate=sur,
 ...     spec=spec,
@@ -99,7 +124,7 @@ from mwlab.opt.design.samplers import get_sampler, BaseSampler
 # ────────────────────────────────────────────────────────────────────────────
 
 ReductionMode = Literal["sum", "mean", "max"]
-
+RewardReductionMode = Literal["min", "softmin", "mean", "sum", "max"]
 
 # ────────────────────────────────────────────────────────────────────────────
 #                        Внутренние проверки и утилиты
@@ -117,6 +142,30 @@ def _normalize_reduction(reduction: str) -> ReductionMode:
     if r not in ("sum", "mean", "max"):
         raise ValueError("reduction must be one of: 'sum', 'mean', 'max'")
     return r  # type: ignore[return-value]
+
+
+def _normalize_reward_reduction(reduction: str) -> RewardReductionMode:
+    r = str(reduction).strip().lower()
+    if r not in ("min", "softmin", "mean", "sum", "max"):
+        raise ValueError("reward_reduction must be one of: 'min', 'softmin', 'mean', 'sum', 'max'")
+    return r  # type: ignore[return-value]
+
+
+def _softmin(values: np.ndarray, tau: float) -> float:
+    """
+    Гладкий аналог min(values) через log-sum-exp:
+      softmin_tau(x) = -tau * log(mean(exp(-x/tau)))
+    Устойчивая реализация: вычитаем min(x).
+    """
+    x = np.asarray(values, dtype=float)
+    if x.size == 0:
+        return 0.0
+    t = float(tau)
+    if t <= 0.0:
+        raise ValueError("reward_tau must be > 0 for softmin")
+    m = float(np.min(x))
+    z = -(x - m) / t  # z <= 0
+    return float(m - t * np.log(np.mean(np.exp(z))))
 
 
 def _is_networklike(obj: Any) -> bool:
@@ -156,6 +205,20 @@ def _reduce_penalties(values: np.ndarray, reduction: ReductionMode) -> float:
     return float(np.max(values))
 
 
+def _reduce_rewards(values: np.ndarray, reduction: RewardReductionMode, *, tau: float) -> float:
+    if values.size == 0:
+        return 0.0
+    if reduction == "min":
+        return float(np.min(values))
+    if reduction == "softmin":
+        return float(_softmin(values, tau=float(tau)))
+    if reduction == "mean":
+        return float(np.mean(values))
+    if reduction == "sum":
+        return float(np.sum(values))
+    # reduction == "max"
+    return float(np.max(values))
+
 def _penalty_and_all_ok_via_evaluate(
     spec: Specification,
     net: NetworkLike,
@@ -176,6 +239,39 @@ def _penalty_and_all_ok_via_evaluate(
     penalties = np.asarray([r.weighted_penalty for r in results], dtype=float)
     p = _reduce_penalties(penalties, reduction)
     return p, all_ok
+
+def _penalty_reward_and_all_ok_via_evaluate(
+    spec: Specification,
+    net: NetworkLike,
+    reduction_penalty: ReductionMode,
+    reduction_reward: RewardReductionMode,
+    reward_tau: float,
+) -> Tuple[float, float, bool]:
+    """
+    Получить (penalty, reward, all_ok) за ОДИН прогон spec.evaluate(net).
+
+    reward берём из результатов (weighted_reward), если поле присутствует.
+    Для обычных компараторов reward=0, поэтому метод безопасен.
+    """
+    results = spec.evaluate(net)
+    all_ok = bool(all(r.ok for r in results))
+
+    penalties = np.asarray([r.weighted_penalty for r in results], dtype=float)
+    p = _reduce_penalties(penalties, reduction_penalty)
+
+    # IMPORTANT:
+    # Исключаем критерии с reward_weight<=0, чтобы они не "обнуляли" min/softmin.
+    # weighted_reward может отсутствовать (если CriterionResult ещё не расширен) — тогда 0.
+    rw = np.asarray(
+        [float(getattr(r, "weighted_reward", 0.0)) for r in results if float(getattr(r, "reward_weight", 1.0)) > 0.0],
+         dtype = float,
+    )
+
+    # Safety: reward ожидается неотрицательным, но клипуем на всякий случай.
+    rw = np.clip(rw, 0.0, None)
+    r = _reduce_rewards(rw, reduction_reward, tau=float(reward_tau))
+
+    return float(p), float(r), bool(all_ok)
 
 
 def _align_down(v: int, origin: int, step: int) -> int:
@@ -325,6 +421,216 @@ class PenaltyObjective:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+#                           PenaltyRewardObjective
+# ────────────────────────────────────────────────────────────────────────────
+
+class PenaltyRewardObjective:
+    """
+    Целевая функция для получения решения “с запасом” после выполнения ТЗ:
+
+        J(x) = penalty(x) - alpha * I{feasible(x)} * reward(x)
+
+    По умолчанию reward учитывается только на feasible точках, чтобы reward не
+    конкурировал с процессом устранения нарушений.
+
+    Parameters
+    ----------
+    surrogate : BaseSurrogate
+        Модель X→S. Должна поддерживать predict(), желательно batch_predict().
+    spec : Specification
+        Спецификация (guard-bands не поддерживаются).
+    reduction : {'sum','mean','max'}, default='sum'
+        Агрегация штрафов по критериям (penalty).
+    reward_reduction : {'min','softmin','mean','sum','max'}, default='min'
+        Агрегация reward по критериям.
+        Рекомендуется: 'min' или 'softmin' (bottleneck), чтобы оптимизация
+        улучшала “худший запас”.
+    reward_tau : float, default=0.1
+        Температура для reward_reduction='softmin'. Должна быть > 0.
+    alpha : float, default=0.1
+        Вес reward. Чем больше alpha — тем сильнее оптимизатор “углубляется”
+        в feasible область после достижения penalty==0.
+    reward_only_if_feasible : bool, default=True
+        Если True, reward учитывается только когда all_ok==True.
+    large_penalty : float, default=1e9
+        Что возвращать, если surrogate/декодинг/оценка упали на конкретной точке.
+    """
+
+    def __init__(
+        self,
+        *,
+        surrogate: BaseSurrogate,
+        spec: Specification,
+        reduction: str = "sum",
+        reward_reduction: str = "min",
+        reward_tau: float = 0.1,
+        alpha: float = 0.1,
+        reward_only_if_feasible: bool = True,
+        large_penalty: float = 1e9,
+    ):
+        self.sur = surrogate
+        self.spec = spec
+
+        self.reduction: ReductionMode = _normalize_reduction(reduction)
+        self.reward_reduction: RewardReductionMode = _normalize_reward_reduction(reward_reduction)
+
+        self.reward_tau = float(reward_tau)
+        if self.reward_reduction == "softmin" and not (self.reward_tau > 0.0):
+            raise ValueError("reward_tau must be > 0 when reward_reduction='softmin'")
+
+        self.alpha = float(alpha)
+        if self.alpha < 0.0:
+            raise ValueError("alpha must be >= 0")
+
+        self.reward_only_if_feasible = bool(reward_only_if_feasible)
+        self.large_penalty = float(large_penalty)
+
+    # ---------------------------------------------------------------- single
+    def __call__(self, x: Mapping[str, float]) -> float:
+        try:
+            net = self.sur.predict(x)
+            if not _is_networklike(net):
+                raise TypeError("surrogate.predict() вернул объект, не совместимый с NetworkLike")
+
+            p, r, feas = _penalty_reward_and_all_ok_via_evaluate(
+                self.spec,
+                net,
+                self.reduction,
+                self.reward_reduction,
+                self.reward_tau,
+            )
+
+            if self.alpha == 0.0:
+                return float(p)
+
+            if self.reward_only_if_feasible and not feas:
+                return float(p)
+
+            return float(p - self.alpha * r)
+
+        except Exception as e:  # pragma: no cover
+            warnings.warn(
+                f"[PenaltyRewardObjective] ошибка оценки точки {dict(x)}: {e!r} → возвращаю large_penalty",
+                RuntimeWarning,
+            )
+            return self.large_penalty
+
+    # ---------------------------------------------------------------- batch
+    def batch(self, xs: Sequence[Mapping[str, float]]) -> np.ndarray:
+        if not xs:
+            return np.zeros((0,), dtype=float)
+
+        try:
+            nets = self.sur.batch_predict(xs)
+        except Exception as e:  # pragma: no cover
+            warnings.warn(
+                f"[PenaltyRewardObjective.batch] batch_predict упал: {e!r}; fallback на построчный режим",
+                RuntimeWarning,
+            )
+            return np.fromiter((self(x) for x in xs), dtype=float, count=len(xs))
+
+        if len(nets) != len(xs):
+            warnings.warn(
+                "[PenaltyRewardObjective.batch] batch_predict вернул список другой длины; fallback на построчный режим",
+                RuntimeWarning,
+            )
+            return np.fromiter((self(x) for x in xs), dtype=float, count=len(xs))
+
+        out = np.empty((len(nets),), dtype=float)
+        for i, net in enumerate(nets):
+            try:
+                if not _is_networklike(net):
+                    raise TypeError("batch_predict: элемент не совместим с NetworkLike")
+
+                p, r, feas = _penalty_reward_and_all_ok_via_evaluate(
+                    self.spec,
+                    net,
+                    self.reduction,
+                    self.reward_reduction,
+                    self.reward_tau,
+                )
+
+                if self.alpha == 0.0:
+                    out[i] = p
+                elif self.reward_only_if_feasible and not feas:
+                    out[i] = p
+                else:
+                    out[i] = p - self.alpha * r
+
+            except Exception:  # pragma: no cover
+                out[i] = self.large_penalty
+
+        return out
+
+    # ---------------------------------------------------------------- report
+    def report(self, x: Mapping[str, float]) -> Dict[str, Any]:
+        """
+        Развёрнутый отчёт по спецификации + сводные метрики цели:
+          {
+            "__objective__": float,
+            "__penalty__" : float,
+            "__reward__"  : float,
+            "__feasible__": bool,
+            "__alpha__"   : float,
+            "__reward_reduction__": str,
+            "__reward_tau__": float,
+            "__reward_only_if_feasible__": bool,
+          }
+        """
+        try:
+            net = self.sur.predict(x)
+            if not _is_networklike(net):
+                raise TypeError("surrogate.predict() вернул объект, не совместимый с NetworkLike")
+
+            # Один прогон evaluate() и используем его в report без повторных вычислений.
+            results = self.spec.evaluate(net)
+            rep = self.spec.report(
+                net,
+                reduction=self.reduction,
+                reward_reduction=self.reward_reduction,
+                reward_tau=self.reward_tau,
+                results=results,
+            )
+
+            p = float(rep.get("__penalty__", self.large_penalty))
+            r = float(rep.get("__reward__", 0.0))
+            feas = bool(rep.get("__all_ok__", False))
+
+            if self.alpha == 0.0:
+                obj = p
+            elif self.reward_only_if_feasible and not feas:
+                obj = p
+            else:
+                obj = p - self.alpha * r
+
+            rep["__feasible__"] = bool(feas)
+            rep["__alpha__"] = float(self.alpha)
+            rep["__reward_reduction__"] = str(self.reward_reduction)
+            rep["__reward_tau__"] = float(self.reward_tau)
+            rep["__reward_only_if_feasible__"] = bool(self.reward_only_if_feasible)
+            rep["__objective__"] = float(obj)
+            rep["__spec_name__"] = str(self.spec.name)
+
+            return rep
+
+        except Exception as e:  # pragma: no cover
+            warnings.warn(f"[PenaltyRewardObjective.report] ошибка: {e!r}", RuntimeWarning)
+            return {"__objective__": self.large_penalty, "__error__": repr(e)}
+
+    def evaluate_vector(self, z: Sequence[float], names: Sequence[str]) -> float:
+        if len(z) != len(names):
+            raise ValueError("evaluate_vector: длины z и names не совпадают")
+        x = {k: float(v) for k, v in zip(names, z)}
+        return self(x)
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return (
+            f"PenaltyRewardObjective(reduction={self.reduction}, "
+            f"reward_reduction={self.reward_reduction}, alpha={self.alpha})"
+        )
+
+
+# ────────────────────────────────────────────────────────────────────────────
 #                           FeasibleYieldObjective
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -428,9 +734,15 @@ class FeasibleYieldObjective:
         self.spec = spec
 
         # --- источники локальных допусков
-        self.base_space = base_space
         self.tol_space = tolerance_space
         self.delta = delta
+        # Если задано tolerance_space, но base_space не задан —
+        # используем tolerance_space как базу для типов/границ переменных,
+        # иначе _build_local_space() неизбежно упадёт.
+        if base_space is None and tolerance_space is not None:
+            self.base_space = tolerance_space
+        else:
+            self.base_space = base_space
 
         dm = str(delta_mode).strip().lower()
         if dm not in ("abs", "rel"):
@@ -634,8 +946,20 @@ class FeasibleYieldObjective:
             ok_arr = np.asarray(ok, dtype=bool)
         else:
             # Fallback: batch_predict -> list[NetworkLike] -> is_ok поштучно
-            nets = self.sur.batch_predict(pts)
-            ok_arr = np.fromiter((self.spec.is_ok(net) for net in nets), dtype=bool, count=len(nets))
+            try:
+                nets = self.sur.batch_predict(pts)
+            except Exception:
+                # Самый надёжный (хотя и медленный) fallback:
+                nets = [self.sur.predict(p) for p in pts]
+
+            def _safe_is_ok(net) -> bool:
+                try:
+                    return bool(self.spec.is_ok(net))
+                except Exception:
+                    # Битая точка/сеть/спека => fail для этого сэмпла
+                    return False
+
+            ok_arr = np.fromiter((_safe_is_ok(net) for net in nets), dtype=bool, count=len(nets))
 
         y = float(np.mean(ok_arr))
 
@@ -785,5 +1109,6 @@ class FeasibleYieldObjective:
 
 __all__ = [
     "PenaltyObjective",
+    "PenaltyRewardObjective",
     "FeasibleYieldObjective",
 ]

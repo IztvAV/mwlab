@@ -21,7 +21,9 @@ Specification = AND-набор Criterion-ов.
 - Selector извлекает кривую из `NetworkLike`
 - Transform (опционально) предварительно обрабатывает кривую
 - Aggregator сворачивает кривую в скаляр
-- Comparator интерпретирует скаляр как pass/fail и возвращает штраф
+- Comparator интерпретирует скаляр как pass/fail и возвращает:
+  - penalty (штраф),
+  - reward (вознаграждение за запас), если компаратор его поддерживает.
 
 Выходные данные (report)
 ------------------------
@@ -36,7 +38,7 @@ Specification = AND-набор Criterion-ов.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence, Literal, Tuple
+from typing import Any, Dict, List, Sequence, Literal, Tuple, Optional
 
 import numpy as np
 
@@ -46,6 +48,9 @@ from .network_like import NetworkLike
 
 Reduction = Literal["sum", "mean", "max"]
 _REDUCTION_MODES: Tuple[str, ...] = ("sum", "mean", "max")
+
+RewardReduction = Literal["min", "softmin", "mean", "sum", "max"]
+_REWARD_REDUCTION_MODES: Tuple[str, ...] = ("min", "softmin", "mean", "sum", "max")
 
 
 class Specification(BaseSpecification):
@@ -73,7 +78,7 @@ class Specification(BaseSpecification):
 
         # Проверка уникальности имён и защиты служебных ключей
         names = [c.name for c in self.criteria]
-        reserved = {"__all_ok__", "__penalty__"}
+        reserved = {"__all_ok__", "__penalty__", "__reward__"}
         for nm in names:
             if nm in reserved:
                 raise ValueError(f"Specification: имя критерия '{nm}' зарезервировано")
@@ -107,6 +112,27 @@ class Specification(BaseSpecification):
             raise ValueError(f"reduction должен быть одним из {_REDUCTION_MODES}")
 
         return super().penalty(net, reduction=red)  # type: ignore[arg-type]
+
+    def reward(
+        self,
+        net: NetworkLike,
+        *,
+        reduction: RewardReduction = "min",
+        tau: float = 0.1,
+    ) -> float:
+        """
+        Сводный reward по спецификации (запас/margin).
+
+        reduction:
+          - "min"     : минимальный reward по критериям (предпочтительно)
+          - "softmin" : гладкая аппроксимация min, параметр tau>0
+          - "mean"    : среднее
+          - "sum"     : сумма
+        """
+        red = str(reduction).strip().lower()
+        if red not in _REWARD_REDUCTION_MODES:
+            raise ValueError(f"reward reduction должен быть одним из {_REWARD_REDUCTION_MODES}")
+        return super().reward(net, reduction=red, tau=float(tau))  # type: ignore[arg-type]
 
     # -------------------------------------------------------------------------
     # Удобные “срезы” результатов
@@ -155,7 +181,44 @@ class Specification(BaseSpecification):
 
         raise ValueError(f"reduction должен быть одним из {_REDUCTION_MODES}")
 
-    def report(self, net: NetworkLike, *, reduction: Reduction = "sum") -> Dict[str, Any]:
+    @staticmethod
+    def _reduction_rewards(values: np.ndarray, reduction: RewardReduction, *, tau: float) -> float:
+        """
+        Свёртка reward без повторного пересчёта критериев.
+        Поддержка: min/softmin/mean/sum/max.
+        """
+        x = np.asarray(values, dtype=float)
+        if x.size == 0:
+            return 0.0
+
+        red = str(reduction).strip().lower()
+        if red == "min":
+            return float(np.min(x))
+        if red == "max":
+            return float(np.max(x))
+        if red == "mean":
+            return float(np.mean(x))
+        if red == "sum":
+            return float(np.sum(x))
+        if red == "softmin":
+            t = float(tau)
+            if t <= 0.0:
+                raise ValueError("reward_tau (tau) must be > 0 for softmin")
+            m = float(np.min(x))
+            z = np.exp(-(x - m) / t)
+            return float(m - t * np.log(np.mean(z)))
+
+        raise ValueError(f"reward reduction должен быть одним из {_REWARD_REDUCTION_MODES}")
+
+    def report(
+        self,
+        net: NetworkLike,
+        *,
+        reduction: Reduction = "sum",
+        reward_reduction: RewardReduction = "min",
+        reward_tau: float = 0.1,
+        results: Optional[List[CriterionResult]] = None,
+    ) -> Dict[str, Any]:
         """
         Подробный отчёт по всем критериям и сводные поля.
 
@@ -177,6 +240,8 @@ class Specification(BaseSpecification):
             "ok": bool,
             "raw_penalty": float,
             "weighted_penalty": float,
+            "raw_reward": float,
+            "weighted_reward": float,
             "weight": float,
             "units": {"freq": str, "value": str},
             "chain": {"selector": str, "transform": str, "aggregator": str, "comparator": str},
@@ -185,11 +250,20 @@ class Specification(BaseSpecification):
         Служебные поля:
         - "__all_ok__"  : bool  (AND по ok)
         - "__penalty__" : float (свёртка weighted_penalty по правилу reduction)
+        - "__reward__"  : float (свёртка weighted_reward; правило задаётся BaseSpecification.reward)
         """
-        results: List[CriterionResult] = self.evaluate(net)
+        # NOTE: один прогон evaluate() даёт и penalty, и reward
+        if results is None:
+            results = self.evaluate(net)
 
         rep: Dict[str, Any] = {}
         penalties = np.asarray([r.weighted_penalty for r in results], dtype=float)
+        rewards = np.asarray(
+            [float(getattr(r, "weighted_reward", 0.0)) for r in results if
+             float(getattr(r, "reward_weight", 1.0)) > 0.0],
+            dtype = float,
+        )
+        rewards = np.clip(rewards, 0.0, None)
 
         for r in results:
             rep[r.name] = {
@@ -197,7 +271,10 @@ class Specification(BaseSpecification):
                 "ok": bool(r.ok),
                 "raw_penalty": float(r.raw_penalty),
                 "weighted_penalty": float(r.weighted_penalty),
+                "raw_reward": float(getattr(r, "raw_reward", 0.0)),
+                "weighted_reward": float(getattr(r, "weighted_reward", 0.0)),
                 "weight": float(r.weight),
+                "reward_weight": float(getattr(r, "reward_weight", 1.0)),
                 "units": {
                     "freq": str(r.freq_unit),
                     "value": str(r.value_unit),
@@ -212,6 +289,9 @@ class Specification(BaseSpecification):
 
         rep["__all_ok__"] = bool(all(r.ok for r in results))
         rep["__penalty__"] = self._reduction_penalties(penalties, reduction)
+        rep["__reward__"] = self._reduction_rewards(rewards, reward_reduction, tau=float(reward_tau))
+        rep["__reward_reduction__"] = str(reward_reduction)
+        rep["__reward_tau__"] = float(reward_tau)
 
         return rep
 

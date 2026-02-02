@@ -122,6 +122,16 @@ class NGResult:
     topk: List[Dict[str, Any]]                  # [{..., "__value__": float}, ...]
     elapsed_sec: float
 
+    # --- внутренности nevergrad (best-effort; полезно для мета-оптимизаторов NGOpt/NgIohTuned)
+    # outer_optimizer: класс реального объекта nevergrad-оптимизатора (ask/tell)
+    # inner_optimizer: выбранный базовый оптимизатор (часто optimizer.optim / optimizer._optim)
+    # inner_components: список компонент (если это портфолио/competitor)
+    # optimizer_repr: repr(...) для отладки
+    outer_optimizer: Optional[str] = None
+    inner_optimizer: Optional[str] = None
+    inner_components: Optional[List[str]] = None
+    optimizer_repr: Optional[str] = None
+
     def to_dataframe(self) -> "pd.DataFrame":
         """Удобный доступ к трейсу в виде DataFrame (если установлен pandas)."""
         if not _HAS_PANDAS:
@@ -206,6 +216,71 @@ class NGOptimizer:
         # счётчик «сколько шагов подряд глобальный минимум ≤ zero_tol»
         self._zero_hold_streak: int = 0
 
+        # --- отладка/интроспекция: сохраняем последний созданный nevergrad-оптимизатор
+        # Это важно, потому что сам объект optimizer создаётся внутри run() как локальная переменная.
+        self._last_parametrization = None
+        self._last_optimizer = None
+        self._last_optimizer_info: Dict[str, Any] = {}
+
+    @staticmethod
+    def _extract_ng_optimizer_info(optimizer: Any) -> Dict[str, Any]:
+        """
+        Извлечь информацию о nevergrad-оптимизаторе (best-effort):
+          - outer: класс объекта с ask/tell (реальный оптимизатор)
+          - inner: выбранный базовый оптимизатор у мета-оптимизаторов (optim/_optim)
+          - components: список компонент у портфолио/competitor (если доступно)
+          - repr: строковое представление repr(...) для отладки
+        """
+        out: Dict[str, Any] = {
+            "outer": None,
+            "inner": None,
+            "components": None,
+            "repr": None,
+        }
+        if optimizer is None:
+            return out
+
+        out["outer"] = type(optimizer).__name__
+        try:
+            out["repr"] = repr(optimizer)
+        except Exception:
+            out["repr"] = None
+
+        # У мета-оптимизаторов (NGOpt/NgIohTuned) часто есть ссылка на выбранный внутренний оптимизатор:
+        #   optimizer.optim или optimizer._optim
+        inner = None
+        for attr in ("optim", "_optim"):
+            try:
+                inner = getattr(optimizer, attr, None)
+                if inner is not None and inner is not optimizer:
+                    break
+            except Exception:
+                inner = None
+
+        if inner is not None and inner is not optimizer:
+            out["inner"] = type(inner).__name__
+            # Портфолио/competitor: иногда хранит список компонент
+            for cand in ("optimizers", "_optimizers", "optims", "_optims"):
+                try:
+                    comps = getattr(inner, cand, None)
+                    if comps is not None:
+                        out["components"] = [type(c).__name__ for c in list(comps)]
+                        break
+                except Exception:
+                    continue
+        else:
+            # Иногда список компонент есть у outer-объекта напрямую
+            for cand in ("optimizers", "_optimizers", "optims", "_optims"):
+                try:
+                    comps = getattr(optimizer, cand, None)
+                    if comps is not None:
+                        out["components"] = [type(c).__name__ for c in list(comps)]
+                        break
+                except Exception:
+                    continue
+
+        return out
+
     # ──────────────────────────────────────────────────────────────
     #          Построение NG-параметризации из DesignSpace
     # ──────────────────────────────────────────────────────────────
@@ -267,8 +342,11 @@ class NGOptimizer:
                 step = int(getattr(var, "step", 1))
                 ival = int(round(float(val)))
                 if step > 1:
-                    ival = int(round(ival / step) * step)
-                out[name] = int(max(var.lower, min(ival, var.upper)))
+                    origin = int(var.lower)
+                    k = int(round((ival - origin) / step))
+                    ival = origin + k * step
+                ival = int(max(var.lower, min(ival, var.upper)))
+                out[name] = ival
                 continue
 
             if isinstance(var, ContinuousVar):
@@ -310,11 +388,20 @@ class NGOptimizer:
         -------
         NGResult
         """
+        # IMPORTANT: допускаем повторные вызовы run() на одном экземпляре оптимизатора
+        self._history = []
+        self._best_so_far = math.inf
+        self._eval_count = 0
+        self._zero_hold_streak = 0
 
         # 0) Параметризация и оптимизатор
         parametrization = self._build_parametrization(space)
         opt_cls = self._resolve_optimizer(self.algo)
         optimizer = opt_cls(parametrization=parametrization, budget=self.budget, num_workers=self.num_workers)
+
+        # Сохраняем для внешней интроспекции/отладки (например, чтобы понять, что выбрал NGOpt внутри)
+        self._last_parametrization = parametrization
+        self._last_optimizer = optimizer
 
         # СИДИРОВАНИЕ RNG: даём корректный RandomState (нужен .randn для CMA)
         if self.seed is not None:
@@ -427,6 +514,11 @@ class NGOptimizer:
             pbar.close()
         elapsed = time.time() - start
 
+        # --- Интроспекция nevergrad: снимаем информацию ПОСЛЕ оптимизации
+        # (у некоторых мета-оптимизаторов внутренности окончательно проявляются/стабилизируются только к концу)
+        opt_info = self._extract_ng_optimizer_info(optimizer)
+        self._last_optimizer_info = dict(opt_info)
+
         # 2) Выбираем лучший результат: в первую очередь — из нашей истории,
         #    т.к. provide_recommendation() у некоторых оптимизаторов может вернуть loss=None.
         if not self._history:
@@ -479,6 +571,10 @@ class NGOptimizer:
             trace=trace_obj,
             topk=top_list,
             elapsed_sec=elapsed,
+            outer_optimizer=opt_info.get("outer"),
+            inner_optimizer=opt_info.get("inner"),
+            inner_components = opt_info.get("components"),
+            optimizer_repr = opt_info.get("repr"),
         )
 
     # ──────────────────────────────────────────────────────────────
@@ -512,9 +608,19 @@ class NGOptimizer:
         sorted_hist = sorted(history, key=lambda r: float(r["value"]))
         uniq: List[Dict[str, Any]] = []
         seen: set = set()
+
+        def _canon(v: Any) -> Any:
+            # численные значения округляем, категориальные/ordinal оставляем как есть
+            try:
+                if isinstance(v, (int, float, np.integer, np.floating)):
+                    return round(float(v), 12)
+            except Exception:
+                pass
+            return v
+
         for rec in sorted_hist:
             x = rec.get("x", {})
-            key = tuple((n, round(float(v), 12)) for n, v in sorted(x.items()))
+            key = tuple((n, _canon(v)) for n, v in sorted(x.items()))
             if key in seen:
                 continue
             seen.add(key)
@@ -524,3 +630,4 @@ class NGOptimizer:
             if len(uniq) >= k:
                 break
         return uniq
+
