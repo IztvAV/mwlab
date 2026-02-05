@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from torch.utils.data import Dataset
 from filters.mwfilter_optim.base import FastMN2toSParamCalculation
 from mwlab.lightning.base_lm_with_metrics import MAE_error
+import torch.nn.functional as F
 
 
 class MWFilterBaseLModule(BaseLModule):
@@ -407,6 +408,123 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
                 + 0.05 * torch.nn.functional.l1_loss(torch.angle(s_pred), torch.angle(s_in_decoded)))
         return loss
 
+    def calc_mirror_loss(self, x: torch.Tensor, y_t: torch.Tensor) -> torch.Tensor:
+        """
+        Делает "зеркальный" проход и считает loss ТОЧНО так же, как calc_loss, но:
+          1) входные данные x переставляются местами по портам -> x_mir
+          2) x_mir подаётся в сеть -> preds_mir
+          3) preds_mir возвращается в исходный порядок выходов -> preds_mir_un
+          4) loss считается по той же формуле, но сравнение идёт с исходными (x, y_t),
+             а не с x_mir.
+
+        Важно (про inplace):
+          - loss_fn и физический кусок (через sparams_from_preds_batch, где может быть inverse/inplace)
+            используют РАЗНЫЕ тензоры preds, чтобы не ловить version mismatch в autograd.
+        """
+
+        # ----------------------------------------------------------
+        # 1) Зеркалим вход x по портам БЕЗ inplace (через permutation)
+        # ----------------------------------------------------------
+        y_order = self.work_model.codec.y_channels
+        idx_y = {name: i for i, name in enumerate(y_order)}
+
+        required = [
+            'S1_1.real', 'S1_1.imag', 'S2_2.real', 'S2_2.imag',
+            'S1_2.real', 'S1_2.imag', 'S2_1.real', 'S2_1.imag'
+        ]
+        if not all(k in idx_y for k in required):
+            raise ValueError("Не хватает каналов для зеркалирования входа x (S11/S22/S12/S21 real/imag).")
+
+        C = x.shape[1]
+        perm = torch.arange(C, device=x.device)
+
+        # swap S11 <-> S22
+        perm[idx_y['S1_1.real']], perm[idx_y['S2_2.real']] = perm[idx_y['S2_2.real']].clone(), perm[
+            idx_y['S1_1.real']].clone()
+        perm[idx_y['S1_1.imag']], perm[idx_y['S2_2.imag']] = perm[idx_y['S2_2.imag']].clone(), perm[
+            idx_y['S1_1.imag']].clone()
+
+        # swap S12 <-> S21
+        perm[idx_y['S1_2.real']], perm[idx_y['S2_1.real']] = perm[idx_y['S2_1.real']].clone(), perm[
+            idx_y['S1_2.real']].clone()
+        perm[idx_y['S1_2.imag']], perm[idx_y['S2_1.imag']] = perm[idx_y['S2_1.imag']].clone(), perm[
+            idx_y['S1_2.imag']].clone()
+
+        x_mir = x.index_select(dim=1, index=perm)
+
+        # ----------------------------------------------------------
+        # 2) Прогоняем сеть на зеркальном входе
+        # ----------------------------------------------------------
+        preds_mir = self(x_mir)
+        # [B, D]
+
+        # ----------------------------------------------------------
+        # 3) "Раззеркаливаем" preds_mir обратно в исходный порядок x_keys
+        #    (делаем это перестановкой колонок)
+        # ----------------------------------------------------------
+        x_keys = self.work_model.codec.x_keys
+        idx_x = {name: i for i, name in enumerate(x_keys)}
+
+        K = self.work_model.orig_filter.coupling_matrix.matrix_order  # размер полной матрицы (N+2)
+        pat = re.compile(r'^m_(\d+)_(\d+)$')
+
+        src_cols = []
+        for name in x_keys:
+            m = pat.match(name)
+            if m:
+                i, j = int(m.group(1)), int(m.group(2))
+                ii, jj = (K - 1 - i), (K - 1 - j)
+                src_name = f"m_{ii}_{jj}"
+            elif name == 'a11':
+                src_name = 'a22'
+            elif name == 'a22':
+                src_name = 'a11'
+            elif name == 'b11':
+                src_name = 'b22'
+            elif name == 'b22':
+                src_name = 'b11'
+            else:
+                src_name = name  # Q, f0, bw и т.п. считаем инвариантными
+
+            if src_name not in idx_x:
+                # fallback: если матрица хранится только одним треугольником
+                if m:
+                    src_alt = f"m_{jj}_{ii}"
+                    src_name = src_alt if src_alt in idx_x else name
+                else:
+                    src_name = name
+
+            src_cols.append(idx_x[src_name])
+
+        src_cols_t = torch.tensor(src_cols, device=preds_mir.device, dtype=torch.long)
+        preds_mir_un = preds_mir.index_select(dim=1, index=src_cols_t)
+
+        # ----------------------------------------------------------
+        # 4) Считаем loss тем же способом, что в calc_loss, но vs исходных (x, y_t)
+        # ----------------------------------------------------------
+        # Важно: s_in_decoded берём от исходного x, как ты и хотел
+        s_in_decoded, _ = self.features_to_sbatch(x, order=self.work_model.codec.y_channels)
+
+        # Разводим тензоры, чтобы inverse()/прочие inplace не ломали backward loss_fn
+        preds_for_loss = preds_mir_un.clone()
+        preds_for_phys = preds_mir_un.clone()
+
+        s_pred, _aux = self.sparams_from_preds_batch(
+            preds_for_phys,
+            self.work_model.codec.x_keys,
+            self.work_model.orig_filter.coupling_matrix.matrix_order,
+            self.work_model.orig_filter.f_norm
+        )
+        s_pred_encoded, _ = self.sbatch_to_features(s_pred, order=self.work_model.codec.y_channels)
+
+        loss_mirror = (
+                self.loss_fn(preds_for_loss, y_t)
+                + 0.1 * F.l1_loss(s_pred_encoded, x)
+                + 0.05 * F.l1_loss(torch.angle(s_pred), torch.angle(s_in_decoded))
+        )
+
+        return loss_mirror
+
     # ───────────────────────────────────────────── shared step (train/val/test)
     def _shared_step(self, batch):
         x, y, _ = self._split_batch(batch)
@@ -418,6 +536,7 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
             y = self.scaler_out(y)
 
         loss = self.calc_loss(x, y, preds)
+        mirror_loss = self.calc_mirror_loss(x, y)
         # s_pred, aux = self.sparams_from_preds_batch(preds, self.work_model.codec.x_keys, self.work_model.orig_filter.coupling_matrix.matrix_order,
         #                                                self.work_model.orig_filter.f_norm)
         # # s_pred_db = MWFilter.to_db(s_pred)
@@ -428,7 +547,7 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         # # s_pred_norm = self.scaler_in(s_pred_encoded)
         #
         # loss = self.loss_fn(preds, y) + 0.1*torch.nn.functional.mse_loss(s_pred_encoded, x) + 0.1*torch.nn.functional.l1_loss(torch.angle(s_pred), torch.angle(s_in_decoded))
-        return loss
+        return loss + mirror_loss
 
     # ======================================================================
     #                        validation / test loop
@@ -452,7 +571,7 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         # loss = self.loss_fn(preds, y_t) + 0.1 * torch.nn.functional.mse_loss(s_pred_encoded,
         #                                                                    x) + 0.1 * torch.nn.functional.l1_loss(
         #     torch.angle(s_pred), torch.angle(s_in_decoded))
-        loss = self.calc_loss(x, y_t, preds)
+        loss = self.calc_loss(x, y_t, preds) + self.calc_mirror_loss(x, y_t)
 
         self.log("val_loss", loss, on_epoch=True, prog_bar=True, batch_size=x.size(0))
 

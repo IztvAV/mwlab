@@ -33,14 +33,15 @@ dataset:
     b22: 0.1
   sampler_type: "sobol"   # sobol, lhs, std
   size:
-    train: 1000
+    train: 100000
     infer: 1000
 
 train:
   max_epochs: 30
 
 model:
-  checkpoint: "best-epoch=26-train_loss=0.08889-val_loss=0.08248-val_r2=0.99727-val_mse=0.00020-val_mae=0.00647-batch_size=32-base_dataset_size=300000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt"
+#  checkpoint: "best-epoch=26-train_loss=0.08889-val_loss=0.08248-val_r2=0.99727-val_mse=0.00020-val_mae=0.00647-batch_size=32-base_dataset_size=300000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt"
+  checkpoint: "best-epoch=25-train_loss=0.21893-val_loss=0.24350-val_r2=0.94852-val_mse=0.00249-val_mae=0.01590-batch_size=32-train_dataset_size=100000-sampler=SamplerTypes.SAMPLER_SOBOL-cm_shifts=0.1;0.05;0.001-ps_origin=0;0;0;0-ps_shifts=0.1;0.1;0.1;0.1.ckpt"
 
 inference:
   batch_size: 32

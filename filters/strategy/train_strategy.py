@@ -55,7 +55,7 @@ class StandardStrategy(TrainingStrategy):
 
     def fit(self, cfg) -> Dict[str, Any]:
         cfg.set_batch_size(self.batch_size)
-        trainer, ckpt = cfg.new_trainer()
+        trainer = cfg.new_trainer()
         trainer.fit(cfg.lit_model, datamodule=cfg.dm)
         best_ckpt_path = trainer.checkpoint_callback.best_model_path
         return {

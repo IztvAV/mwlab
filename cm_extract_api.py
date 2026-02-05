@@ -79,7 +79,7 @@ def train_model(manifest_path: str|os.PathLike|None=None):
         optimizer_cfg={"name": "AdamW", "lr": 0.0009400000000000001, "weight_decay": 1e-5},
         scheduler_cfg={"name": "StepLR", "step_size": 25, "gamma": 0.09},
         loss_fn=CustomLosses("sqrt_mse_with_l1", weight_decay=1, weights=None),
-        strategy_type="two stage"
+        strategy_type="standard"
     )
 
     return lit_model
@@ -299,8 +299,8 @@ def prediction_with_online_correct(fil: rf.Network):
 def predict(fil: rf.Network):
     resample_in = S_Resample(301)
     resample_out = S_Resample(len(fil.f))
-    # s, m = prediction_with_optim_correct(fil)
     fil_in = resample_in(fil)
+    # fil_pred = prediction_with_online_correct(fil_in)
     fil_pred = prediction_with_optim_correct(fil_in)
     fil_out = resample_out(fil_pred)
     return fil_out.s, fil_out.coupling_matrix.matrix.numpy()
