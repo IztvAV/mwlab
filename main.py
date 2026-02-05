@@ -449,8 +449,8 @@ def main():
         inference_model = work_model.inference(configs.MODEL_CHECKPOINT_PATH)
 
 
-    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/modeling", s_tf=S_Resample(301))
-    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
+    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/modeling", s_tf=S_Resample(301))
+    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
     # cst_tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/cst",
     #                         s_tf=S_Resample(301))
     # TODO: РЕФАКТОРИНГ МЕТОДОВ WORK_MODEL!!!!!
@@ -468,8 +468,8 @@ def main():
         orig_fil = tds[i][1]
 
         orig_fil_to_nn = copy.deepcopy(orig_fil)
-        orig_fil_to_nn.s[:, 1, 0] *= -1
-        orig_fil_to_nn.s[:, 0, 1] *= -1
+        # orig_fil_to_nn.s[:, 1, 0] *= -1
+        # orig_fil_to_nn.s[:, 0, 1] *= -1
 
 
         # plt.figure()

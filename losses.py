@@ -46,11 +46,11 @@ class CustomLosses(nn.Module):
             if self.params.get("weights") is None:
                 weights = 1
             else:
-                weights = self.params.get("weights").to("cuda")
-            y_true *= weights
-            y_pred *= weights
+                weights = self.params.get("weights").to(device=y_pred.device, dtype=y_pred.dtype)
+            y_true_w = y_true * weights
+            y_pred_w = y_pred * weights
             return torch.sqrt(
-                F.mse_loss(y_pred, y_true) + self.params.get("weight_decay", 1) * F.l1_loss(y_pred, y_true))
+                F.mse_loss(y_pred_w, y_true_w) + self.params.get("weight_decay", 1) * F.l1_loss(y_pred_w, y_true_w))
         elif self.loss_name == "mse_with_l1_with_threshold":
             epsilon = self.params.get("abs_error_threshold", 1e-3)  # точность до знака после запятой
             weight_decay = self.params.get("weight_decay", 1.0)

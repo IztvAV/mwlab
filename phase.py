@@ -1319,7 +1319,7 @@ class PhaseLoadingExtractor:
         coeff = 1 if not inverse_s12_s21 else -1
         phi21 = phi11 + phi22
         net.s[:, 1, 0] = coeff * PhaseLoadingExtractor.apply_phase_one(net.s[:, 1, 0], phi21)
-        net.s[:, 0, 1] = coeff * PhaseLoadingExtractor.apply_phase_one(net.s[:, 1, 0], phi21)
+        net.s[:, 0, 1] = coeff * PhaseLoadingExtractor.apply_phase_one(net.s[:, 0, 1], phi21)
         return net
 
     # def apply_phase_coeffs_for_ntw(net: rf.Network, w, a11, b11, a22, b22, inverse_s12_s21=False):
@@ -1515,7 +1515,8 @@ class PhaseLoadingExtractor:
             b11_opt, b22_opt = params
 
             # 1) деэмбед по кандидату (только линейная часть)
-            ntw_de = self.add_phase_from_coeffs(ntw_orig, w_norm, a11=0, b11=0.5*b11_opt, a22=0, b22=0.5*b22_opt)
+            ntw_de = ntw_orig.copy()
+            ntw_de = self.remove_phase_from_coeffs(ntw_de, w_norm, a11=0, b11=b11_opt, a22=0, b22=b22_opt)
             # ntw_de = apply_phase_coeffs_for_ntw(ntw_orig, w_norm, a11=0, b11=0.5*b11_opt, a22=0, b22=0.5*b22_opt)
 
             # 2) NN → CM + своя фазовая нагрузка
@@ -1532,18 +1533,18 @@ class PhaseLoadingExtractor:
             b22_nn = float(pred_params.get("b22", 0.0))
 
             # 4) суммарная фаза
-            a11_total = 0.5*a11_nn
-            a22_total = 0.5*a22_nn
-            b11_total = 0.5*(b11_opt + b11_nn)
-            b22_total = 0.5*(b22_opt + b22_nn)
+            a11_total = a11_nn
+            a22_total = a22_nn
+            b11_total = b11_opt + b11_nn
+            b22_total = b22_opt + b22_nn
 
             # ntw_final = apply_phase_coeffs_for_ntw(pred_filter, w_norm, a11=-a11_total, b11=-b11_total, a22=-a22_total, b22=-b22_total)
-            ntw_final = self.remove_phase_from_coeffs(pred_filter, w_norm, a11=a11_total, b11=b11_total, a22=a22_total, b22=b22_total)
+            ntw_final = self.add_phase_from_coeffs(pred_filter, w_norm, a11=a11_total, b11=b11_total, a22=a22_total, b22=b22_total)
 
             loss = (
-                np.mean(np.abs(ntw_final.s[:, 0, 0] - ntw_de.s[:, 0, 0])) +
-                np.mean(np.abs(ntw_final.s[:, 0, 1] - ntw_de.s[:, 0, 1])) +
-                np.mean(np.abs(ntw_final.s[:, 1, 1] - ntw_de.s[:, 1, 1]))
+                np.mean(np.abs(ntw_final.s[:, 0, 0] - ntw_orig.s[:, 0, 0])) +
+                np.mean(np.abs(ntw_final.s[:, 0, 1] - ntw_orig.s[:, 0, 1])) +
+                np.mean(np.abs(ntw_final.s[:, 1, 1] - ntw_orig.s[:, 1, 1]))
             )
 
             if verbose:
@@ -1603,7 +1604,7 @@ class PhaseLoadingExtractor:
 
         res = self._refine_local(x0, obj)
         self._last_x0 = res.x.copy()
-        self.last_b11_opt, self.last_b22_opt = 0.5*res.x # Умножаю на 0.5, чтобы физический смысл соответствовал смещению фазы на порте
+        self.last_b11_opt, self.last_b22_opt = res.x
 
         stop_time = time.time()
         # print(f"Optimize phase loading time: {stop_time - start_time:.3f} sec")
