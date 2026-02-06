@@ -450,7 +450,7 @@ def main():
 
 
     # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/modeling", s_tf=S_Resample(301))
-    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
+    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/shifted", s_tf=S_Resample(301))
     # cst_tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/cst",
     #                         s_tf=S_Resample(301))
     # TODO: РЕФАКТОРИНГ МЕТОДОВ WORK_MODEL!!!!!
@@ -463,13 +463,13 @@ def main():
 
     losses = []
 
-    for i in range(0, 5):
+    for i in range(len(tds)):
         w = work_model.orig_filter.f_norm
         orig_fil = tds[i][1]
 
         orig_fil_to_nn = copy.deepcopy(orig_fil)
-        # orig_fil_to_nn.s[:, 1, 0] *= -1
-        # orig_fil_to_nn.s[:, 0, 1] *= -1
+        orig_fil_to_nn.s[:, 1, 0] *= -1
+        orig_fil_to_nn.s[:, 0, 1] *= -1
 
 
         # plt.figure()
@@ -549,8 +549,8 @@ def main():
         # ps_shifts = [pred_prms["a11"], pred_prms["a22"], pred_prms["b11"], pred_prms["b22"]]
         a11_final = res['phi1_c'] + pred_prms["a11"]
         a22_final = res['phi2_c'] + pred_prms["a22"]
-        b11_final = pred_prms["b11"] + 0.5 * res['b11_opt']
-        b22_final = pred_prms["b22"] + 0.5 * res['b22_opt']
+        b11_final = pred_prms["b11"] + res['b11_opt']
+        b22_final = pred_prms["b22"] + res['b22_opt']
         print(
             f"Финальный фазовый сдвиг, после корректировки ИИ: a11={a11_final:.6f} рад ({np.degrees(a11_final):.2f}°), a22={a22_final:.6f} рад ({np.degrees(a22_final):.2f}°)"
             f" b11 = {b11_final:.6f} рад ({np.degrees(b11_final):.2f}°), b22 = {b22_final:.6f} рад ({np.degrees(b22_final):.2f}°)")
