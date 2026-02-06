@@ -23,6 +23,7 @@ Thumbs.db
 # Archives
 *.zip
 *.tar.gz
+*.7z
 
 # Tests cache
 tests/__pycache__/
