@@ -1704,7 +1704,7 @@ class PhaseLoadingExtractor:
             # ntw_de = apply_phase_coeffs_for_ntw(ntw_orig, w_norm, a11=0, b11=0.5*b11_opt, a22=0, b22=0.5*b22_opt)
 
             # 2) NN → CM + своя фазовая нагрузка
-            pred_params = self.inference_model.predict_x(ntw_de)
+            pred_params = self.inference_model.predict_x(ntw_de, decimals=5)
 
             pred_filter = self.work_model.create_filter_from_prediction(
                 ntw_de, self.reference_filter, pred_params
@@ -1726,9 +1726,9 @@ class PhaseLoadingExtractor:
             ntw_final = self.add_phase_from_coeffs(pred_filter, w_norm, a11=a11_total, b11=b11_total, a22=a22_total, b22=b22_total)
 
             loss = (
-                np.mean(np.abs(ntw_final.s[:, 0, 0] - ntw_orig.s[:, 0, 0])) +
-                np.mean(np.abs(ntw_final.s[:, 0, 1] - ntw_orig.s[:, 0, 1])) +
-                np.mean(np.abs(ntw_final.s[:, 1, 1] - ntw_orig.s[:, 1, 1]))
+                np.mean(np.abs(ntw_final.s[:, 0, 0] - ntw_orig.s[:, 0, 0])) + np.abs(np.mean(20*np.log10(np.abs(ntw_final.s[:, 0, 0]/ntw_orig.s[:, 0, 0])))) +
+                np.mean(np.abs(ntw_final.s[:, 0, 1] - ntw_orig.s[:, 0, 1])) + np.abs(np.mean(20*np.log10(np.abs(ntw_final.s[:, 0, 1]/ntw_orig.s[:, 0, 1])))) +
+                np.mean(np.abs(ntw_final.s[:, 1, 1] - ntw_orig.s[:, 1, 1])) + np.abs(np.mean(20*np.log10(np.abs(ntw_final.s[:, 1, 1]/ntw_orig.s[:, 1, 1]))))
             )
 
             if verbose:

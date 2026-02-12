@@ -18,6 +18,8 @@ from filters.datasets.theoretical_dataset_generator import CMShifts, PSShift, CM
 import models
 import configs as cfg
 import lightning as L
+import numpy as np
+import random
 from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
 from filters.strategy.train_strategy import StandardStrategy, BaseStrategyConfig, TwoStageBatchSizeStrategy
 
@@ -343,6 +345,8 @@ class WorkModel:
     BEST_MODEL_FILENAME_SUFFIX = "-batch_size={batch_size}-train_dataset_size={train_dataset_size}-sampler={sampler_type}-cm_shifts={self_couplings};{mainline_couplings};{cross_couplings}-ps_origin={a11_o};{a22_o};{b11_o};{b22_o}-ps_shifts={a11_s};{a22_s};{b11_s};{b22_s}"
     def __init__(self, configs: cfg.Configs, is_inference: bool):
         L.seed_everything(0)
+        np.random.seed(0)
+        random.seed(0)
         print("Создаем фильтр")
         self.orig_filter = create_origin_filter(configs, resample_scale=301)
         print("Создаем сэмплеры")

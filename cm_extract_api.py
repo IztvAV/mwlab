@@ -4,6 +4,7 @@ import random
 import time
 from pathlib import Path
 
+import numpy.random
 import pandas as pd
 from sklearn.ensemble import GradientBoostingRegressor, HistGradientBoostingRegressor
 
@@ -46,6 +47,8 @@ corr_fast_calc = None
 corr_optim = None
 phase_extractor: phase.PhaseLoadingExtractor or None = None
 calibration_res: dict or None = None
+calibration_arr: list = []
+count_calibration: int = 0
 calibrated: bool = False
 
 
@@ -129,32 +132,34 @@ def load_model(manifest_path: str|os.PathLike|None=None):
     phase_extractor = phase.PhaseLoadingExtractor(inference_model, work_model, work_model.orig_filter)
 
 
-def phase_extract(fil: rf.Network):
-    global phase_extractror, work_model, calibration_res, calibrated
+def calibrate(fil: rf.Network) -> bool:
+    global phase_extractor, work_model, calibration_res, calibrated, count_calibration
     if not calibrated:
-        print("Start calibration")
+        print("Calibration")
         w = work_model.orig_filter.f_norm
         calibration_res = phase_extractor.extract_all(fil, w_norm=w)
-        ntw_de = calibration_res['ntw_deembedded']
-        calibrated = True
-    else:
-        # TODO: Сделать коррекцию фазы одной функцией. Для этого нужно переработать класс коррекции фазы
-        w = work_model.orig_filter.f_norm
-        a11 = calibration_res['phi1_c']
-        a22 = calibration_res['phi2_c']
+        calibration_arr.append(calibration_res)
+        count_calibration += 1
+        if (not calibrated) and (count_calibration == 5):
+            calibration_res = dict.fromkeys(['phi1_c', 'phi2_c', 'b11_opt', 'b22_opt'], 0)
+            for key in calibration_res.keys():
+                for e in calibration_arr:
+                    calibration_res[key] += e[key]
+                calibration_res[key] /= count_calibration
+            calibrated = True
+            return False
+    return calibrated
 
-        fil = phase_extractor.remove_phase_from_coeffs(fil, w, a11, 0, a22, 0)
 
-        # phi1 = -2.0 * (a11 + 0 * np.asarray(w))
-        # phi2 = -2.0 * (a22 + 0 * np.asarray(w))
-        # fil.s[:, 0, 0] = phase.apply_phase_one(fil.s[:, 0, 0], phi1)
-        # fil.s[:, 1, 1] = phase.apply_phase_one(fil.s[:, 1, 1], phi2)
-        # fil.s[:, 0, 1] = -phase.apply_phase_one(fil.s[:, 0, 1], 0.5 * (phi1 + phi2))
-        # fil.s[:, 1, 0] = -phase.apply_phase_one(fil.s[:, 1, 0], 0.5 * (phi1 + phi2))
+def phase_extract(fil: rf.Network):
+    global phase_extractor, work_model, calibration_res, calibrated, count_calibration
+    w = work_model.orig_filter.f_norm
+    a11 = calibration_res['phi1_c']
+    a22 = calibration_res['phi2_c']
+    b11 = calibration_res['b11_opt']
+    b22 = calibration_res['b22_opt']
 
-        b11 = calibration_res['b11_opt']
-        b22 = calibration_res['b22_opt']
-        ntw_de = phase_extractor.remove_phase_from_coeffs(fil, w, 0, b11, 0, b22)
+    ntw_de = phase_extractor.remove_phase_from_coeffs(fil, w, a11=a11, b11=b11, a22=a22, b22=b22)
     return ntw_de
 
 
@@ -166,7 +171,7 @@ def prediction_with_optim_correct(fil: rf.Network):
     # orig_fil_to_nn = copy.deepcopy(fil)
     ntw_de = phase_extract(fil)
 
-    pred_prms = inference_model.predict_x(ntw_de)
+    pred_prms = inference_model.predict_x(ntw_de, decimals=5)
     print(f"Предсказанные параметры: {pred_prms}")
     pred_fil = work_model.create_filter_from_prediction(fil, work_model.orig_filter, pred_prms)
 
@@ -300,6 +305,7 @@ def predict(fil: rf.Network):
     resample_in = S_Resample(301)
     resample_out = S_Resample(len(fil.f))
     fil_in = resample_in(fil)
+    fil_in.s = np.round(fil_in.s, 5)
     # fil_pred = prediction_with_online_correct(fil_in)
     fil_in.s[:, 0, 1] *= -1
     fil_in.s[:, 1, 0] *= -1

@@ -450,7 +450,8 @@ def main():
 
 
     # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/modeling", s_tf=S_Resample(301))
-    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/shifted", s_tf=S_Resample(301))
+    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/shifted", s_tf=S_Resample(301))
+    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
     # cst_tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/cst",
     #                         s_tf=S_Resample(301))
     # TODO: РЕФАКТОРИНГ МЕТОДОВ WORK_MODEL!!!!!
