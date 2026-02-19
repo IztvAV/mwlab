@@ -449,9 +449,9 @@ def main():
         inference_model = work_model.inference(configs.MODEL_CHECKPOINT_PATH)
 
 
-    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/modeling", s_tf=S_Resample(301))
-    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/shifted", s_tf=S_Resample(301))
-    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
+    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
+    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
+    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/19.02.26", s_tf=S_Resample(301))
     # cst_tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/cst",
     #                         s_tf=S_Resample(301))
     # TODO: РЕФАКТОРИНГ МЕТОДОВ WORK_MODEL!!!!!
@@ -464,7 +464,7 @@ def main():
 
     losses = []
 
-    for i in range(len(tds)):
+    for i in range(0, len(tds)):
         w = work_model.orig_filter.f_norm
         orig_fil = tds[i][1]
 
@@ -505,8 +505,8 @@ def main():
         # orig_fil_to_nn_copy.s[:, 1, 0] *= np.array(torch.exp(1j * 0.5 * (w * (b11 + b22))), dtype=np.complex64)
         # orig_fil_to_nn_copy.s[:, 1, 1] *= np.array(torch.exp(1j * (w * b22)), dtype=np.complex64)
         # ntw_de = orig_fil_to_nn_copy
-
-        res = phase_extractor.extract_all(orig_fil_to_nn, w_norm=w, verbose=True)
+        сфдшикф
+        res = phase_extractor.extract_all(orig_fil_to_nn, w_norm=w, verbose=True, plot_edges=False)
         ntw_de = res['ntw_deembedded']
 
         ts = TouchstoneData(ntw_de)
@@ -576,27 +576,41 @@ def main():
 
         inference_model.plot_origin_vs_prediction(orig_fil, pred_fil, title=f"Origin tune: {tds.backend.paths[i].parts[-1]}")
         # fine_tuned_model.plot_origin_vs_prediction(orig_fil, tuned_fil, title=f"Fine tune: {tds.backend.paths[i].parts[-1]}")
-        # optim_matrix, Q_opt, phase_opt = optimize_cm(pred_fil, orig_fil, phase_init=(0, 0, 0, 0))
-        # print(f"Оптимизированные параметры: {optim_matrix.factors}. Добротность: {Q_opt}. Фаза: {phase_opt}")
 
         optim_filter, phase_opt = optimize_cm(pred_fil, orig_fil, phase_init=(a11_final, a22_final, b11_final, b22_final))
         plt.title(tds.backend.paths[i].parts[-1])
-        # print(f"Оптимизированные параметры: {optim_matrix.factors}. Добротность: {pred_fil.Q}. Фаза: {np.degrees(phase_opt)}")
-        optim_filter.coupling_matrix.plot_matrix()
+        print(f"Оптимизированные параметры: {optim_filter.coupling_matrix.factors}. Добротность: {pred_fil.Q}. Фаза: {np.degrees(phase_opt)}")
+        # optim_filter.coupling_matrix.plot_matrix()
 
     # Предсказываем эталонный фильтр
     # orig_fil = work_model.ds_gen.origin_filter
-    # pred_prms = inference_model.predict_x(orig_fil)
+    # w = orig_fil.f_norm
+    # res = phase_extractor.extract_all(orig_fil, w_norm=w, verbose=True)
+    # ntw_de = res['ntw_deembedded']
+    #
+    # pred_prms = inference_model.predict_x(ntw_de)
+    # print(f"Предсказанные параметры: {pred_prms}")
     # pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms)
-    # inference_model.plot_origin_vs_prediction(orig_fil, pred_fil)
-    # optim_matrix = optimize_cm(pred_fil, orig_fil)
-    # pred_fil.coupling_matrix.plot_matrix(title="Predict tuned matrix")
-    # optim_matrix.plot_matrix(title="Optimized tuned matrix")
-    # error_matrix_pred = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, pred_fil.coupling_matrix)
-    # error_matrix_optim = CouplingMatrix.error_matrix(orig_fil.coupling_matrix, optim_matrix)
-    # error_matrix_optim.plot_matrix(title="Optimized tuned matrix errors")
-    # error_matrix_pred.plot_matrix(title="Predict tuned matrix errors")
-    # orig_fil.coupling_matrix.plot_matrix(title="Origin tuned matrix")
+    # a11_final = res['phi1_c'] + pred_prms["a11"]
+    # a22_final = res['phi2_c'] + pred_prms["a22"]
+    # b11_final = pred_prms["b11"] + res['b11_opt']
+    # b22_final = pred_prms["b22"] + res['b22_opt']
+    # print(
+    #     f"Финальный фазовый сдвиг, после корректировки ИИ: a11={a11_final:.6f} рад ({np.degrees(a11_final):.2f}°), a22={a22_final:.6f} рад ({np.degrees(a22_final):.2f}°)"
+    #     f" b11 = {b11_final:.6f} рад ({np.degrees(b11_final):.2f}°), b22 = {b22_final:.6f} рад ({np.degrees(b22_final):.2f}°)")
+    # pred_fil.s[:, 0, 0] *= np.array(torch.exp(-1j * 2 * (a11_final + w * b11_final)), dtype=np.complex64)
+    # pred_fil.s[:, 0, 1] *= np.array(-torch.exp(-1j * (a11_final + a22_final + w * (b11_final + b22_final))),
+    #                                 dtype=np.complex64)
+    # pred_fil.s[:, 1, 0] *= np.array(-torch.exp(-1j * (a11_final + a22_final + w * (b11_final + b22_final))),
+    #                                 dtype=np.complex64)
+    # pred_fil.s[:, 1, 1] *= np.array(torch.exp(-1j * 2 * (a22_final + w * b22_final)), dtype=np.complex64)
+    #
+    # inference_model.plot_origin_vs_prediction(orig_fil, pred_fil,
+    #                                           title=f"Origin tune: Origin Filter")
+    # optim_filter, phase_opt = optimize_cm(pred_fil, orig_fil, phase_init=(a11_final, a22_final, b11_final, b22_final))
+    # plt.title("Optimized: Origin Filter")
+    # print(
+    #     f"Оптимизированные параметры: {optim_filter.coupling_matrix.factors}. Добротность: {pred_fil.Q}. Фаза: {np.degrees(phase_opt)}")
     plt.show()
 
 

@@ -136,6 +136,10 @@ def calibrate(fil: rf.Network) -> bool:
     global phase_extractor, work_model, calibration_res, calibrated, count_calibration
     if not calibrated:
         print("Calibration")
+        s_resample = S_Resample(301)
+        fil = s_resample(fil)
+        fil.s[:, 0, 1] *= -1
+        fil.s[:, 1, 0] *= -1
         w = work_model.orig_filter.f_norm
         calibration_res = phase_extractor.extract_all(fil, w_norm=w)
         calibration_arr.append(calibration_res)
@@ -166,8 +170,6 @@ def phase_extract(fil: rf.Network):
 def prediction_with_optim_correct(fil: rf.Network):
     global inference_model, calibration_res
     w = work_model.orig_filter.f_norm
-    s_resample = S_Resample(301)
-    fil = s_resample(fil)
     # orig_fil_to_nn = copy.deepcopy(fil)
     ntw_de = phase_extract(fil)
 

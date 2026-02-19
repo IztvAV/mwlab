@@ -1,0 +1,40 @@
+version: 1
+meta:
+  author: Ilya Burlakov
+filter:
+  name: E40-CIMUX-CH5
+  f_start_mhz: 3833.5
+  f_stop_mhz: 3915.5
+paths:
+  datasets_data: datasets_data
+  origins_data: origins_data
+  tune_data: tune_data
+  saved_models: saved_models
+dataset:
+  matrix_sampler_delta:
+    self_coupling: 0.1
+    mainline_coupling: 0.05
+    cross_coupling: 0.001
+    parasitic_coupling: 0
+    absolute: true
+  pss_origin:
+    a11: 0
+    a22: 0
+    b11: 0
+    b22: 0
+  pss_sampler_delta:
+    a11: 0.1
+    a22: 0.1
+    b11: 0.1
+    b22: 0.1
+  sampler_type: sobol
+  size:
+    train: 100000
+    infer: 1000
+model:
+  checkpoint: best-epoch=28-train_loss=0.11326-val_loss=0.11087-val_r2=0.98203-val_mse=0.00143-val_mae=0.01066-batch_size=32-train_dataset_size=300000-sampler=SamplerTypes.SAMPLER_SOBOL-cm_shifts=0.1;0.05;0.001-ps_origin=0;0;0;0-ps_shifts=0.1;0.1;0.1;0.1.ckpt
+train:
+  max_epochs: 30
+inference:
+  batch_size: 32
+  device: auto
