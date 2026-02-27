@@ -82,6 +82,7 @@ def train_model(manifest_path: str|os.PathLike|None=None):
         optimizer_cfg={"name": "AdamW", "lr": 0.0009400000000000001, "weight_decay": 1e-5},
         scheduler_cfg={"name": "StepLR", "step_size": 25, "gamma": 0.09},
         loss_fn=CustomLosses("sqrt_mse_with_l1", weight_decay=1, weights=None),
+        # loss_fn=CustomLosses("wing", wing_w=0.1, wing_eps=0.02),
         strategy_type="standard"
     )
 

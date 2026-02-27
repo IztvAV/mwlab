@@ -14,6 +14,43 @@ class CustomLosses(nn.Module):
         self.params = kwargs
         self.r2 = torchmetrics.R2Score()
 
+    def _wing_loss(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+        """
+        Wing Loss (Feng et al.) for regression.
+        Params:
+          - wing_w: float (обычно 10.0)
+          - wing_eps: float (обычно 2.0)
+          - weights: Optional[tensor] (как и в других лоссах)
+          - reduction: "mean" | "sum" (по умолчанию "mean")
+        """
+        w = float(self.params.get("wing_w", 0.2))
+        eps = float(self.params.get("wing_eps", 0.0001))
+        reduction = self.params.get("reduction", "mean")
+
+        # веса поэлементно (совместимо с твоим подходом)
+        if self.params.get("weights") is None:
+            weights = 1.0
+        else:
+            weights = self.params.get("weights").to(device=y_pred.device, dtype=y_pred.dtype)
+
+        diff = torch.abs(y_true - y_pred)
+
+        # C = w - w * log(1 + w/eps)
+        C = w - w * torch.log1p(torch.tensor(w / eps, device=y_pred.device, dtype=y_pred.dtype))
+
+        loss = torch.where(
+            diff < w,
+            w * torch.log1p(diff / eps),
+            diff - C,
+        )
+
+        loss = loss * weights
+
+        if reduction == "sum":
+            return loss.sum()
+        # mean по всем элементам (стандартно)
+        return loss.mean()
+
     def forward(self, y_pred, y_true):
         if self.loss_name == "mse":
             return F.mse_loss(y_pred, y_true)
@@ -144,6 +181,8 @@ class CustomLosses(nn.Module):
             return torch.mean(torch.abs(y_pred_sorted - y_true_sorted))
         elif self.loss_name == "error":
             return torch.abs((y_true - y_pred)/y_true).mean()
+        elif self.loss_name == "wing":
+            return self._wing_loss(y_pred, y_true)
         else:
             raise ValueError(f"Unknown loss name: {self.loss_name}")
 

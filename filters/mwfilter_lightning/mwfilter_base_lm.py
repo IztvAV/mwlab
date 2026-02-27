@@ -10,6 +10,12 @@ from torch.utils.data import Dataset
 from filters.mwfilter_optim.base import FastMN2toSParamCalculation
 from mwlab.lightning.base_lm_with_metrics import MAE_error
 import torch.nn.functional as F
+import re
+from contextlib import contextmanager
+from typing import Optional, Dict, Iterator
+
+import torch
+import torch.nn.functional as F
 
 
 class MWFilterBaseLModule(BaseLModule):
@@ -405,7 +411,7 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         # s_pred_norm = self.scaler_in(s_pred_encoded)
 
         loss = (self.loss_fn(preds, y_t) + 0.1*torch.nn.functional.l1_loss(s_pred_encoded, x)
-                + 0.05 * torch.nn.functional.l1_loss(torch.angle(s_pred), torch.angle(s_in_decoded)))
+                + 0.05 * torch.nn.functional.l1_loss(torch.angle(s_pred), torch.angle(s_in_decoded)) + (0.01 * torch.abs(preds-y_t).max() + 1e-5 * torch.abs(s_pred - s_in_decoded).max())*0)
         return loss
 
     def calc_mirror_loss(self, x: torch.Tensor, y_t: torch.Tensor) -> torch.Tensor:
@@ -521,6 +527,7 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
                 self.loss_fn(preds_for_loss, y_t)
                 + 0.1 * F.l1_loss(s_pred_encoded, x)
                 + 0.05 * F.l1_loss(torch.angle(s_pred), torch.angle(s_in_decoded))
+                + 0.1 *torch.abs(preds_for_loss - y_t).max() + 0.01 * torch.abs(s_pred - s_in_decoded).max()
         )
 
         return loss_mirror
@@ -536,7 +543,7 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
             y = self.scaler_out(y)
 
         loss = self.calc_loss(x, y, preds)
-        mirror_loss = self.calc_mirror_loss(x, y)
+        # mirror_loss = self.calc_mirror_loss(x, y)
         # s_pred, aux = self.sparams_from_preds_batch(preds, self.work_model.codec.x_keys, self.work_model.orig_filter.coupling_matrix.matrix_order,
         #                                                self.work_model.orig_filter.f_norm)
         # # s_pred_db = MWFilter.to_db(s_pred)
@@ -547,7 +554,7 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         # # s_pred_norm = self.scaler_in(s_pred_encoded)
         #
         # loss = self.loss_fn(preds, y) + 0.1*torch.nn.functional.mse_loss(s_pred_encoded, x) + 0.1*torch.nn.functional.l1_loss(torch.angle(s_pred), torch.angle(s_in_decoded))
-        return loss + mirror_loss
+        return loss
 
     # ======================================================================
     #                        validation / test loop
@@ -571,7 +578,10 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         # loss = self.loss_fn(preds, y_t) + 0.1 * torch.nn.functional.mse_loss(s_pred_encoded,
         #                                                                    x) + 0.1 * torch.nn.functional.l1_loss(
         #     torch.angle(s_pred), torch.angle(s_in_decoded))
-        loss = self.calc_loss(x, y_t, preds) + self.calc_mirror_loss(x, y_t)
+        loss = (
+                self.calc_loss(x, y_t, preds)
+                # + self.calc_mirror_loss(x, y_t)
+        )
 
         self.log("val_loss", loss, on_epoch=True, prog_bar=True, batch_size=x.size(0))
 
@@ -583,6 +593,194 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         self.log_dict(metric_dict, on_epoch=True, prog_bar=True, batch_size=x.size(0))
         acc = MAE_error(preds, y_t)
         self.log("val_acc", acc, prog_bar=True, on_epoch=True, batch_size=x.size(0))
+        return loss
+
+
+class EMAModel:
+    def __init__(self, model: torch.nn.Module, decay: float = 0.999, *, device=None, track_buffers: bool = True):
+        if not (0.0 < decay < 1.0):
+            raise ValueError(f"decay must be in (0,1), got {decay}")
+        self.decay = float(decay)
+        self.track_buffers = bool(track_buffers)
+        self._ema_state: Dict[str, torch.Tensor] = {}
+        self._init_from_model(model, device=device)
+
+    @staticmethod
+    def _is_ema_dtype(dtype: torch.dtype) -> bool:
+        # EMA имеет смысл для вещественных/комплексных
+        return dtype.is_floating_point or dtype.is_complex
+
+    def _init_from_model(self, model: torch.nn.Module, device=None) -> None:
+        state = model.state_dict()
+        self._ema_state = {}
+
+        for k, v in state.items():
+            if not isinstance(v, torch.Tensor):
+                continue
+
+            t = v.detach()
+            if device is not None:
+                t = t.to(device=device)
+
+            # Храним ВСЕ тензоры, но EMA будем делать только для float/complex
+            self._ema_state[k] = t.clone()
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module) -> None:
+        state = model.state_dict()
+        d = self.decay
+
+        for k, v in state.items():
+            if not isinstance(v, torch.Tensor):
+                continue
+
+            v_det = v.detach()
+
+            if k not in self._ema_state:
+                self._ema_state[k] = v_det.clone()
+                continue
+
+            ema_v = self._ema_state[k]
+
+            # приводим вход к устройству EMA
+            if v_det.device != ema_v.device:
+                v_det = v_det.to(device=ema_v.device)
+
+            # 1) float/complex -> EMA
+            if self._is_ema_dtype(ema_v.dtype) and self._is_ema_dtype(v_det.dtype):
+                # совместим dtype (например fp16 vs fp32)
+                if v_det.dtype != ema_v.dtype:
+                    v_det = v_det.to(dtype=ema_v.dtype)
+                ema_v.mul_(d).add_(v_det, alpha=(1.0 - d))
+
+            # 2) int/bool/long -> просто копируем последнее значение
+            else:
+                # важно: сохраняем dtype ema_v, но копируем значения
+                if v_det.dtype != ema_v.dtype:
+                    v_det = v_det.to(dtype=ema_v.dtype)
+                ema_v.copy_(v_det)
+
+    @contextmanager
+    def swap_to_ema(self, model: torch.nn.Module, *, strict: bool = False) -> Iterator[None]:
+        backup = {k: v.detach().clone() for k, v in model.state_dict().items() if isinstance(v, torch.Tensor)}
+        model.load_state_dict(self._ema_state, strict=strict)
+        try:
+            yield
+        finally:
+            model.load_state_dict(backup, strict=strict)
+
+    def state_dict(self) -> dict[str, torch.Tensor]:
+        return {k: v.detach().clone() for k, v in self._ema_state.items()}
+
+    def load_state_dict(self, ema_state: dict[str, torch.Tensor]) -> None:
+        self._ema_state = {k: v.detach().clone() for k, v in ema_state.items() if isinstance(v, torch.Tensor)}
+
+    def copy_to(self, model: torch.nn.Module, *, strict: bool = False) -> None:
+        model.load_state_dict(self._ema_state, strict=strict)
+
+
+class MWFilterBaseLModuleEMA(MWFilterBaseLMWithMetrics):
+    def __init__(self, work_model, *args, **kwargs):
+        super().__init__(work_model, *args, **kwargs)
+
+        self.use_ema = True
+        self.ema_decay = 0.999
+        self.ema_track_buffers = True
+        self.use_ema_on_val = True
+
+        # ✅ ключевой флаг: при загрузке автоматически применять EMA
+        self.prefer_ema_weights = True
+
+        self.ema: EMAModel | None = None
+
+    def _ema_target(self) -> torch.nn.Module:
+        # EMA ведём только по нейросети
+        if not hasattr(self, "model") or self.model is None:
+            raise AttributeError("MWFilterBaseLModuleEMA ожидает, что у модуля есть поле self.model (nn.Module).")
+        return self.model
+
+    # ---------- hooks ----------
+    def on_fit_start(self) -> None:
+        if self.use_ema and self.ema is None:
+            self.ema = EMAModel(self.model, decay=float(self.ema_decay), track_buffers=bool(self.ema_track_buffers))
+
+    def on_train_batch_end(self, outputs, batch, batch_idx) -> None:
+        if self.use_ema and self.ema is not None:
+            self.ema.update(self.model)
+
+        # ---------------- checkpoint I/O ----------------
+
+    def on_save_checkpoint(self, checkpoint: dict) -> None:
+        # сохраняем EMA отдельно
+        if self.use_ema and self.ema is not None:
+            checkpoint["ema"] = {
+                "decay": float(self.ema_decay),
+                "track_buffers": bool(self.ema_track_buffers),
+                "state": self.ema.state_dict(),
+            }
+            checkpoint["prefer_ema_weights"] = bool(self.prefer_ema_weights)
+
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        ema_pack = checkpoint.get("ema", None)
+        if ema_pack is None:
+            return
+
+        # создаём EMA объект, если нужно
+        if self.ema is None:
+            self.ema_decay = float(ema_pack.get("decay", self.ema_decay))
+            self.ema_track_buffers = bool(ema_pack.get("track_buffers", self.ema_track_buffers))
+            self.ema = EMAModel(self.model, decay=float(self.ema_decay), track_buffers=bool(self.ema_track_buffers))
+
+        # грузим EMA state
+        self.ema.load_state_dict(ema_pack["state"])
+
+        # ✅ "по умолчанию" применяем EMA веса сразу после загрузки
+        prefer = checkpoint.get("prefer_ema_weights", self.prefer_ema_weights)
+        if bool(prefer):
+            self.ema.copy_to(self.model, strict=False)
+
+    # ---------- validation ----------
+    def validation_step(self, batch, batch_idx):
+        if (not self.use_ema) or (self.ema is None) or (not self.use_ema_on_val):
+            return self._validation_step_impl(batch, batch_idx, prefix="val", log_progbar=True)
+
+        if self.log_raw_and_ema:
+            loss_raw = self._validation_step_impl(batch, batch_idx, prefix="val_raw", log_progbar=False)
+            with self.ema.swap_to_ema(self._ema_target()):
+                loss_ema = self._validation_step_impl(batch, batch_idx, prefix="val_ema", log_progbar=True)
+            self.log("val_loss", loss_ema, on_epoch=True, prog_bar=True)
+            return loss_ema
+
+        with self.ema.swap_to_ema(self._ema_target()):
+            return self._validation_step_impl(batch, batch_idx, prefix="val", log_progbar=True)
+
+    def _validation_step_impl(self, batch, batch_idx, *, prefix: str, log_progbar: bool):
+        x, y, _ = self._split_batch(batch)
+        preds = self(x)
+        y_t = self._prepare_targets(y)
+
+        loss = self.calc_loss(x, y_t, preds)
+
+        self.log(f"{prefix}_loss", loss, on_epoch=True, prog_bar=log_progbar, batch_size=x.size(0))
+
+        preds_flat = preds.view(preds.size(0), -1)
+        y_flat = y_t.view(y_t.size(0), -1)
+
+        metric_dict = self.val_metrics(preds_flat, y_flat)
+
+        fixed = {}
+        for k, v in metric_dict.items():
+            kk = k
+            # если метрика уже с val_ — не удваиваем
+            if prefix == "val" and kk.startswith("val_"):
+                fixed[kk] = v
+            else:
+                fixed[f"{prefix}_{kk}"] = v
+
+        self.log_dict(fixed, on_epoch=True, prog_bar=log_progbar, batch_size=x.size(0))
+
+        acc = MAE_error(preds, y_t)
+        self.log(f"{prefix}_acc", acc, prog_bar=log_progbar, on_epoch=True, batch_size=x.size(0))
         return loss
 
 

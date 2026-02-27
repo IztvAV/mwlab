@@ -399,10 +399,10 @@ def evaluate_datasets(
 
 def main():
     configs = cfg.Configs.init_as_default("default.yml")
-    # lit_model = cm_extract_api.train_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
-    cm_extract_api.load_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
-    lit_model = cm_extract_api.inference_model
-    work_model = cm_extract_api.work_model
+    lit_model = cm_extract_api.train_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
+    # cm_extract_api.load_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
+    # lit_model = cm_extract_api.inference_model
+    # work_model = cm_extract_api.work_model
 
 
     # work_model = common.WorkModel(configs, is_inference=False)
@@ -450,8 +450,8 @@ def main():
 
 
     # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
-    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
-    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/19.02.26", s_tf=S_Resample(301))
+    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
+    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/19.02.26", s_tf=S_Resample(301))
     # cst_tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/cst",
     #                         s_tf=S_Resample(301))
     # TODO: РЕФАКТОРИНГ МЕТОДОВ WORK_MODEL!!!!!
@@ -464,7 +464,7 @@ def main():
 
     losses = []
 
-    for i in range(0, len(tds)):
+    for i in range(0, 5):
         w = work_model.orig_filter.f_norm
         orig_fil = tds[i][1]
 
@@ -505,7 +505,6 @@ def main():
         # orig_fil_to_nn_copy.s[:, 1, 0] *= np.array(torch.exp(1j * 0.5 * (w * (b11 + b22))), dtype=np.complex64)
         # orig_fil_to_nn_copy.s[:, 1, 1] *= np.array(torch.exp(1j * (w * b22)), dtype=np.complex64)
         # ntw_de = orig_fil_to_nn_copy
-        сфдшикф
         res = phase_extractor.extract_all(orig_fil_to_nn, w_norm=w, verbose=True, plot_edges=False)
         ntw_de = res['ntw_deembedded']
 
@@ -581,6 +580,7 @@ def main():
         plt.title(tds.backend.paths[i].parts[-1])
         print(f"Оптимизированные параметры: {optim_filter.coupling_matrix.factors}. Добротность: {pred_fil.Q}. Фаза: {np.degrees(phase_opt)}")
         # optim_filter.coupling_matrix.plot_matrix()
+
 
     # Предсказываем эталонный фильтр
     # orig_fil = work_model.ds_gen.origin_filter

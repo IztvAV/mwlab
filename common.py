@@ -5,7 +5,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from torch import nn
 
 from filters.codecs import MWFilterTouchstoneCodec
-from filters.mwfilter_lightning import MWFilterBaseLMWithMetrics
+from filters.mwfilter_lightning import MWFilterBaseLModuleEMA
 from filters.mwfilter_lightning.callbacks import BaseCallbackSet, SaflySaveCheckpoint, ModelCheckpoint
 from models import CorrectionNet
 from mwlab import TouchstoneDataset, TouchstoneDatasetAnalyzer, TouchstoneLDataModule, TouchstoneCodec
@@ -301,7 +301,7 @@ def train_model(model: nn.Module, work_model, dm: TouchstoneLDataModule,
                 strategy_type:str="standard",
                 optimizer_cfg:dict={"name": "AdamW", "lr": 0.0005370623202982373, "weight_decay": 1e-5},
                 scheduler_cfg:dict={"name": "StepLR", "step_size": 21, "gamma": 0.01}):
-    lit_model = MWFilterBaseLMWithMetrics(
+    lit_model = MWFilterBaseLModuleEMA(
         work_model=work_model,
         model=model,  # Наша нейросетевая модель
         swap_xy=True,
@@ -464,7 +464,7 @@ class WorkModel:
         return lit_model
 
     def inference(self, path_to_ckpt: str):
-        inference_model = MWFilterBaseLMWithMetrics.load_from_checkpoint(
+        inference_model = MWFilterBaseLModuleEMA.load_from_checkpoint(
             work_model=self,
             checkpoint_path=path_to_ckpt,
             model=self.model

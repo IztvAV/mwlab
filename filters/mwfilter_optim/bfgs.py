@@ -997,7 +997,9 @@ def optimize_cm(pred_filter: DatasetMWFilter,
         # амплитуды
         s11a = torch.abs(s11_adj); s21a = torch.abs(s21_adj)
         d_abs = torch.cat([s11a - s11_abs_t, s21a - s21_abs_t], dim=0)
+        d_db = torch.cat([MWFilter.to_db(s11_adj) - MWFilter.to_db(s11_true), MWFilter.to_db(s21_adj) - MWFilter.to_db(s21_true)], dim=0)
         l1_abs   = d_abs.abs().mean()
+        l1_db    = d_db.abs().mean()
         mse_abs  = (d_abs * d_abs).mean()
         rmse_abs = torch.sqrt(mse_abs + 1e-18)
 
@@ -1034,6 +1036,7 @@ def optimize_cm(pred_filter: DatasetMWFilter,
 
         return {
             "L1_abs": float(l1_abs.item()),
+            "L1_dB": float(l1_db.item()),
             "RMSE_abs": float(rmse_abs.item()),
             "L1_dB_w": float(l1_db.item()),
             "RMSE_dB_w": float(rmse_db.item()),
@@ -1113,6 +1116,7 @@ def optimize_cm(pred_filter: DatasetMWFilter,
     )
     print("[Initial] "
           f"L1_abs={init_metrics['L1_abs']:.6f} | RMSE_abs={init_metrics['RMSE_abs']:.6f} | "
+          f"L1_dB={init_metrics['L1_dB']:.6f} | "
           f"L1_dB_w={init_metrics['L1_dB_w']:.6f} | RMSE_dB_w={init_metrics['RMSE_dB_w']:.6f} | "
           f"RMSE_ReIm={init_metrics['RMSE_ReIm']:.6f} | RMSE_phase={init_metrics['RMSE_phase']:.6f} | "
           f"Objective={init_metrics['Objective']:.6f}")
@@ -1144,6 +1148,7 @@ def optimize_cm(pred_filter: DatasetMWFilter,
     )
     print("[Final]   "
           f"L1_abs={final_metrics['L1_abs']:.6f} | RMSE_abs={final_metrics['RMSE_abs']:.6f} | "
+          f"L1_dB={final_metrics['L1_dB']:.6f} | "
           f"L1_dB_w={final_metrics['L1_dB_w']:.6f} | RMSE_dB_w={final_metrics['RMSE_dB_w']:.6f} | "
           f"RMSE_ReIm={final_metrics['RMSE_ReIm']:.6f} | RMSE_phase={final_metrics['RMSE_phase']:.6f} | "
           f"Objective={final_metrics['Objective']:.6f}")
