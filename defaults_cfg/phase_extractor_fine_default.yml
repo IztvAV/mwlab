@@ -1,0 +1,10 @@
+version: 1  # версия формата пакета
+
+meta:
+  author: "Ilya Burlakov"
+
+paths:
+#  manifest: "filters/FilterData/14-ORDER-TEST-FILTER/manifest.yml"
+#  manifest: "filters/FilterData/EAMU4-KuIMUXT2-BPFC2/phase_extractor_fine_manifest.yml"
+  manifest: "filters/FilterData/EAMU4-KuIMUXT2-BPFC4/phase_extractor_fine_manifest.yml"
+#  manifest: "filters/FilterData/E40-CIMUX-CH5/manifest.yml"

@@ -105,7 +105,7 @@ class Configs:
         self.APP_CONFIG: AppConfig = self.load_app_configs(manifest_path)
 
     @classmethod
-    def init_as_default(cls, default_path: str | os.PathLike):
+    def init_from_default(cls, default_path: str | os.PathLike):
         manifest_path = cls._get_manifest_path_from_default(default_path)
         return cls(manifest_path)
 
@@ -119,7 +119,8 @@ class Configs:
         with manifest_path.open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
 
-        manifest_path = str(manifest_path.parent / data["paths"]["manifest"])
+        # manifest_path = str(manifest_path.parent / data["paths"]["manifest"])
+        manifest_path = data["paths"]["manifest"]
         return manifest_path
 
 

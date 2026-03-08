@@ -216,6 +216,12 @@ class MWFilter(rf.Network):
         )
 
     @staticmethod
+    def resultant_length(z, w, eps=1e-12):
+        z_u = z / (z.abs() + eps)
+        m = (w * z_u).sum()
+        return (m.abs() / (w.sum() + eps)).clamp(0, 1)
+
+    @staticmethod
     def response_from_coupling_matrix(M, f0, FBW, Q, frange, NRNlist=[], Rs=1, Rl=1, PSs=None, device='cpu'):
         """Vectorized calculation of filter S-parameters from coupling matrix on GPU/CPU."""
         M = M.to(device) if torch.is_tensor(M) else torch.tensor(M, dtype=torch.complex64, device=device)

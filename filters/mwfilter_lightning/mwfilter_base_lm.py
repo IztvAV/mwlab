@@ -89,7 +89,7 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         print(f"Предсказанные параметры: {pred_prms}")
 
         orig_fil = MWFilter.from_touchstone_dataset_item(({**meta['params'], **orig_prms}, net))
-        pred_fil = self.create_filter_from_prediction(orig_fil, pred_prms, meta)
+        pred_fil = self.create_filter_from_prediction(orig_fil, self.work_model.orig_filter, pred_prms, self.codec)
         return orig_fil, pred_fil
 
     @staticmethod
@@ -399,19 +399,139 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         idx_map = {name: i for i, name in enumerate(order)}
         return S, idx_map
 
-    def calc_loss(self, x, y_t, preds):
-        s_pred, aux = self.sparams_from_preds_batch(preds, self.work_model.codec.x_keys,
-                                                    self.work_model.orig_filter.coupling_matrix.matrix_order,
-                                                    self.work_model.orig_filter.f_norm)
-        # s_pred_db = MWFilter.to_db(s_pred)
+    # def calc_loss(self, x, y_t, preds):
+    #     s_pred, aux = self.sparams_from_preds_batch(preds, self.work_model.codec.x_keys,
+    #                                                 self.work_model.orig_filter.coupling_matrix.matrix_order,
+    #                                                 self.work_model.orig_filter.f_norm)
+    #     # s_pred_db = MWFilter.to_db(s_pred)
+    #
+    #     s_pred_encoded, _ = self.sbatch_to_features(s_pred, order=self.work_model.codec.y_channels)
+    #     s_in_decoded, _ = self.features_to_sbatch(x, order=self.work_model.codec.y_channels)
+    #
+    #     # s_pred_norm = self.scaler_in(s_pred_encoded)
+    #
+    #     loss = (self.loss_fn(preds, y_t) + 0.1*torch.nn.functional.l1_loss(s_pred_encoded, x)
+    #             + 0.05 * torch.nn.functional.l1_loss(torch.angle(s_pred), torch.angle(s_in_decoded)) + (0.01 * torch.abs(preds-y_t).max() + 1e-5 * torch.abs(s_pred - s_in_decoded).max())*0)
+    #     return loss
 
-        s_pred_encoded, _ = self.sbatch_to_features(s_pred, order=self.work_model.codec.y_channels)
+    def wrap_pm_pi(self, phi: torch.Tensor) -> torch.Tensor:
+        twopi = 2 * torch.pi
+        return (phi + torch.pi) % twopi - torch.pi
+
+    def remove_port_phase_shift(self, s_b: torch.Tensor, f_norm: torch.Tensor,
+                                a11: torch.Tensor, b11: torch.Tensor,
+                                a22: torch.Tensor, b22: torch.Tensor,
+                                *, canonicalize: bool = False) -> torch.Tensor:
+        B, F, _, _ = s_b.shape
+
+        # -> (B,F)
+        if f_norm.dim() == 1:
+            f_bf = f_norm.view(1, F).expand(B, F)
+        elif f_norm.dim() == 2 and f_norm.shape[0] == 1:
+            f_bf = f_norm.expand(B, F)
+        else:
+            f_bf = f_norm  # (B,F)
+
+        # ---- Канонизация a по опорной точке ----
+        if canonicalize:
+            # 1) простой канон: a в (-pi, pi]
+            a11 = self.wrap_pm_pi(a11)
+            a22 = self.wrap_pm_pi(a22)
+
+            # 2) дополнительный (опционально): якорим phi в центре сетки (если хотите максимально стабильно)
+            # idx0 = F // 2
+            # f0 = f_bf[:, idx0]  # (B,)
+            # phi1_0 = a11 + b11 * f0
+            # phi2_0 = a22 + b22 * f0
+            # a11 = a11 - torch.round(phi1_0 / (2*torch.pi)) * (2*torch.pi)
+            # a22 = a22 - torch.round(phi2_0 / (2*torch.pi)) * (2*torch.pi)
+
+        # phi1 = a11.view(B, 1) #+ b11.view(B, 1) * f_bf
+        phi1 = b11.view(B, 1) * f_bf
+        # phi2 = a22.view(B, 1) #+ b22.view(B, 1) * f_bf
+        phi2 = b22.view(B, 1) * f_bf
+
+        e1 = torch.exp(1j * phi1)
+        e2 = torch.exp(1j * phi2)
+
+        s_de = s_b.clone()
+        s_de[:, :, 0, :] *= e1.unsqueeze(-1)
+        s_de[:, :, 1, :] *= e2.unsqueeze(-1)
+        s_de[:, :, :, 0] *= e1.unsqueeze(-1)
+        s_de[:, :, :, 1] *= e2.unsqueeze(-1)
+        return s_de
+
+    def calc_loss_for_const_shift(self, x, y_t, preds):
+        x = self.scaler_in.inverse(x)
         s_in_decoded, _ = self.features_to_sbatch(x, order=self.work_model.codec.y_channels)
+        # частотная ось (нормированная)
 
-        # s_pred_norm = self.scaler_in(s_pred_encoded)
+        preds = self.scaler_out.inverse(preds)
+        y_t = self.scaler_out.inverse(y_t)
 
-        loss = (self.loss_fn(preds, y_t) + 0.1*torch.nn.functional.l1_loss(s_pred_encoded, x)
-                + 0.05 * torch.nn.functional.l1_loss(torch.angle(s_pred), torch.angle(s_in_decoded)) + (0.01 * torch.abs(preds-y_t).max() + 1e-5 * torch.abs(s_pred - s_in_decoded).max())*0)
+        # целевое значение всегда приводим к той же шкале, что и модель
+        if self.scaler_out is not None:
+            y_t = self.scaler_out(y_t)
+            preds = self.scaler_out(preds)
+
+        loss = self.loss_fn(preds, y_t)
+        return loss
+
+    def calc_loss_for_freq_dep_shift(self, x, y_t, preds):
+        x = self.scaler_in.inverse(x)
+        s_in_decoded, _ = self.features_to_sbatch(x, order=self.work_model.codec.y_channels)
+        # частотная ось (нормированная)
+        f_norm = self.work_model.orig_filter.f_norm  # (F,)
+        f_norm = f_norm.to(device=s_in_decoded.device, dtype=torch.float32)
+
+        preds = self.scaler_out.inverse(preds)
+        y_t = self.scaler_out.inverse(y_t)
+
+        # распаковка предсказаний
+        a11_p = 0#preds[:, 0]
+        a22_p = 0#preds[:, 1]
+        b11_p = preds[:, 0]
+        b22_p = preds[:, 1]
+
+        # удалить фазовый сдвиг
+        s_de_p = self.remove_port_phase_shift(s_in_decoded, f_norm, a11=a11_p, b11=b11_p, a22=a22_p, b22=b22_p)
+
+        a11_t = 0#y_t[:, 0]
+        a22_t = 0#y_t[:, 1]
+        b11_t = y_t[:, 0]
+        b22_t = y_t[:, 1]
+
+        s_de_t = self.remove_port_phase_shift(s_in_decoded, f_norm, a11=a11_t, b11=b11_t, a22=a22_t, b22=b22_t)
+
+        # целевое значение всегда приводим к той же шкале, что и модель
+        if self.scaler_out is not None:
+            y_t = self.scaler_out(y_t)
+            preds = self.scaler_out(preds)
+
+        s_de_t_feat, _ = self.sbatch_to_features(s_de_t, self.work_model.codec.y_channels)
+        s_de_p_feat, _ = self.sbatch_to_features(s_de_p, self.work_model.codec.y_channels)
+
+        if self.scaler_in is not None:
+            s_de_t_feat = self.scaler_in(s_de_t_feat)
+            s_de_p_feat = self.scaler_in(s_de_p_feat)
+
+        s_de_t_decoded_norm, _ = self.features_to_sbatch(s_de_t_feat, order=self.work_model.codec.y_channels)
+        s_de_p_decoded_norm, _ = self.features_to_sbatch(s_de_p_feat, order=self.work_model.codec.y_channels)
+        eps = 1e-12
+        z1 = s_de_p / (s_de_p.abs() + eps)
+        z2 = s_de_t / (s_de_t.abs() + eps)
+        loss_phase = (1.0 - (z1 * z2.conj()).real).mean()
+
+        loss = self.loss_fn(preds,
+                            y_t)  + 0.1*loss_phase + 0.1*torch.nn.functional.huber_loss(s_de_t_feat, s_de_p_feat)
+        # # loss = (self.loss_fn(preds, y_t) + 0.1*torch.nn.functional.l1_loss(s_pred_encoded, x)
+        # #         + 0.05 * torch.nn.functional.l1_loss(torch.angle(s_pred), torch.angle(s_in_decoded)) + (0.01 * torch.abs(preds-y_t).max() + 1e-5 * torch.abs(s_pred - s_in_decoded).max())*0)
+        # loss = self.loss_fn(preds, y_t)
+        return loss
+
+    def calc_loss(self, x, y_t, preds):
+        loss = self.calc_loss_for_const_shift(x, y_t, preds)
+        # loss = self.calc_loss_for_freq_dep_shift(x, y_t, preds)
         return loss
 
     def calc_mirror_loss(self, x: torch.Tensor, y_t: torch.Tensor) -> torch.Tensor:
@@ -543,17 +663,6 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
             y = self.scaler_out(y)
 
         loss = self.calc_loss(x, y, preds)
-        # mirror_loss = self.calc_mirror_loss(x, y)
-        # s_pred, aux = self.sparams_from_preds_batch(preds, self.work_model.codec.x_keys, self.work_model.orig_filter.coupling_matrix.matrix_order,
-        #                                                self.work_model.orig_filter.f_norm)
-        # # s_pred_db = MWFilter.to_db(s_pred)
-        #
-        # s_pred_encoded, _ = self.sbatch_to_features(s_pred, order=self.work_model.codec.y_channels)
-        # s_in_decoded, _ = self.features_to_sbatch(x, order=self.work_model.codec.y_channels)
-        #
-        # # s_pred_norm = self.scaler_in(s_pred_encoded)
-        #
-        # loss = self.loss_fn(preds, y) + 0.1*torch.nn.functional.mse_loss(s_pred_encoded, x) + 0.1*torch.nn.functional.l1_loss(torch.angle(s_pred), torch.angle(s_in_decoded))
         return loss
 
     # ======================================================================
@@ -564,20 +673,6 @@ class MWFilterBaseLMWithMetrics(BaseLMWithMetrics):
         preds = self(x)
         y_t = self._prepare_targets(y)
 
-        # s_pred, aux = self.sparams_from_preds_batch(preds, self.work_model.codec.x_keys,
-        #                                             self.work_model.orig_filter.coupling_matrix.matrix_order,
-        #                                             self.work_model.orig_filter.f_norm)
-        # # s_pred_db = MWFilter.to_db(s_pred)
-        #
-        # s_pred_encoded, _ = self.sbatch_to_features(s_pred, order=self.work_model.codec.y_channels)
-        # s_in_decoded, _ = self.features_to_sbatch(x, order=self.work_model.codec.y_channels)
-        #
-        # # s_pred_norm = self.scaler_in(s_pred_encoded)
-        #
-        # # loss = self.loss_fn(preds, y_t) + 0.1 * torch.nn.functional.mse_loss(s_pred_norm, x)
-        # loss = self.loss_fn(preds, y_t) + 0.1 * torch.nn.functional.mse_loss(s_pred_encoded,
-        #                                                                    x) + 0.1 * torch.nn.functional.l1_loss(
-        #     torch.angle(s_pred), torch.angle(s_in_decoded))
         loss = (
                 self.calc_loss(x, y_t, preds)
                 # + self.calc_mirror_loss(x, y_t)
@@ -683,6 +778,7 @@ class MWFilterBaseLModuleEMA(MWFilterBaseLMWithMetrics):
     def __init__(self, work_model, *args, **kwargs):
         super().__init__(work_model, *args, **kwargs)
 
+        self.log_raw_and_ema = False
         self.use_ema = True
         self.ema_decay = 0.999
         self.ema_track_buffers = True

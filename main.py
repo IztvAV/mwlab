@@ -14,7 +14,7 @@ import phase
 import skrf as rf
 import pandas as pd
 # from utils import make_network
-from cm_extract_api import inference_model, work_model
+# from cm_extract_api import inference_model, work_model
 from common import WorkModel
 from filters.mwfilter_optim.base import FastMN2toSParamCalculation
 from mwlab import TouchstoneDataset, TouchstoneLDataModule, TouchstoneDatasetAnalyzer, TouchstoneData
@@ -37,7 +37,7 @@ import configs as cfg
 import common
 from mwlab.transforms.s_transforms import S_Crop, S_Resample
 from mwlab.nn.scalers import MinMaxScaler
-
+from phase import PhaseLoadingExtractor
 
 torch.set_float32_matmul_precision("medium")
 
@@ -65,7 +65,7 @@ def online_correct():
             vals.append(v)
         return torch.stack(vals, dim=0)  # [n_links]
 
-    configs = cfg.Configs.init_as_default("default.yml")
+    configs = cfg.Configs.init_from_default("default.yml")
     work_model = common.WorkModel(configs, is_inference=True)
 
     codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
@@ -225,7 +225,7 @@ def fine_tune_model(origin_preds, inference_model: nn.Module, target_input: MWFi
     generate_nearby_dataset: функция, создающая датасет около предсказания
     target_input: вход, вблизи которого хотим дообучить модель
     """
-    configs = cfg.Configs.init_as_default("default.yml")
+    configs = cfg.Configs.init_from_default("default.yml")
     # 🔁 Сгенерировать небольшой датасет около предсказания
     for i in range(iterations):
         print(f"Iteration: {i}")
@@ -397,189 +397,243 @@ def evaluate_datasets(
     return results
 
 
+def load_phase_extractor_coarse(manifest_path: str):
+    configs = cfg.Configs.init_from_default(manifest_path)
+    io_phase_coarse = cm_extract_api.ModelIOSpec(
+        y_channels=['S1_1.real', 'S1_2.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S1_2.imag', 'S2_1.imag',
+                    'S2_2.imag'],
+        x_keys=["b11", "b22"],
+    )
+
+    api_phase_coarse = cm_extract_api.MWFilterAPI(
+        manifest_path=os.path.join(configs.APP_CONFIG.base_dir, "phase_extractor_coarse_manifest.yml"),
+        io=io_phase_coarse,
+        calibration_n=5,
+    )
+    api_phase_coarse.load_model(configs.MODEL_CHECKPOINT_PATH)
+    return configs, io_phase_coarse, api_phase_coarse
+
+
+def load_phase_extractor_fine(manifest_path: str):
+    configs = cfg.Configs.init_from_default(manifest_path)
+    io_phase_coarse = cm_extract_api.ModelIOSpec(
+        y_channels=['S1_1.real', 'S1_1.imag', 'S1_1.deg', 'S1_1.db', 'S2_2.real', 'S2_2.imag', 'S2_2.deg', 'S2_2.db'],
+        # y_channels=['S1_1.deg', 'S1_2.deg', 'S2_1.deg', 'S2_2.deg'],
+        x_keys=["a11", "a22"],
+    )
+
+    api_phase_coarse = cm_extract_api.MWFilterAPI(
+        manifest_path=os.path.join(configs.APP_CONFIG.base_dir, "phase_extractor_fine_manifest.yml"),
+        io=io_phase_coarse,
+        calibration_n=5,
+    )
+    api_phase_coarse.load_model(configs.MODEL_CHECKPOINT_PATH)
+    return configs, io_phase_coarse, api_phase_coarse
+
+
 def main():
-    configs = cfg.Configs.init_as_default("default.yml")
-    lit_model = cm_extract_api.train_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
-    # cm_extract_api.load_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
-    # lit_model = cm_extract_api.inference_model
-    # work_model = cm_extract_api.work_model
+    # 'S1_1.real', 'S1_2.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S1_2.imag', 'S2_1.imag', 'S2_2.imag'
+    # lit_model = cm_extract_api.train_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
 
+    # configs_coarse, io_phase_coarse, api_phase_coarse = load_phase_extractor_coarse("defaults_cfg/phase_extractor_coarse_default.yml")
+    # configs_fine, io_phase_fine, api_phase_fine = load_phase_extractor_fine("defaults_cfg/phase_extractor_fine_default.yml")
 
-    # work_model = common.WorkModel(configs, is_inference=False)
-    # # common.plot_distribution(work_model.ds, num_params=len(work_model.ds_gen.origin_filter.coupling_matrix.links))
-    # # plt.show()
-    #
-    # codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
-    #                                              keys_for_analysis=[f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links]+["Q"] + ["f0"] + ["bw"] + ["a11"] + ["a22"] + ["b11"] + ["b22"])
-    #                                              # keys_for_analysis=[f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links])
-    # # codec.y_channels = ['S1_1.real', 'S1_2.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S1_2.imag', 'S2_1.imag', 'S2_2.imag', 'S1_1.db', 'S1_2.db', 'S2_1.db', 'S2_2.db']
-    # codec = codec
-    #
-    # work_model.setup(
-    #     model_name="resnet_with_correction",
-    #     model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
-    #     dm_codec=codec
+    # configs = cfg.Configs.init_from_default("defaults_cfg/phase_extractor_fine_default.yml")
+    # io_phase_fine = cm_extract_api.ModelIOSpec(
+    #     y_channels=['S1_1.real', 'S1_1.imag', 'S1_1.deg', 'S1_1.db', 'S2_2.real', 'S2_2.imag', 'S2_2.deg', 'S2_2.db'],
+    #     x_keys=["a11", "a22"],
     # )
     #
-    # lit_model = work_model.train(
-    #     optimizer_cfg={"name": "AdamW", "lr": 0.0009400000000000001, "weight_decay": 1e-5},
-    #     scheduler_cfg={"name": "StepLR", "step_size": 25, "gamma": 0.09},
-    #     # optimizer_cfg={"name": "AdamW", "lr": 0.0005371, "weight_decay": 1e-5},
-    #     # scheduler_cfg={"name": "StepLR", "step_size": 30, "gamma": 0.01},
-    #     loss_fn=CustomLosses("sqrt_mse_with_l1", weight_decay=1, weights=None),
-    #     strategy_type="standard"
+    # api_phase_fine = cm_extract_api.MWFilterAPI(
+    #     manifest_path=os.path.join(configs.APP_CONFIG.base_dir, "phase_extractor_fine_manifest.yml"),
+    #     io=io_phase_fine,
+    #     calibration_n=5,
     # )
-
-    # Загружаем лучшую модель
-    # checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=12-val_loss=0.01266-train_loss=0.01224.ckpt",
-    # checkpoint_path="saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=49-train_loss=0.03379-val_loss=0.03352-val_r2=0.84208-val_acc=0.25946-val_mae=0.05526-batch_size=32-dataset_size=100000.ckpt",
-    # "saved_models/ERV-KuIMUXT1-BPFC1/best-epoch=22-train_loss=0.04863-val_loss=0.05762-val_r2=0.82785-val_mse=0.01366-val_mae=0.04395-batch_size=32-base_dataset_size=100000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt"
-    # inference_model = work_model.inference("saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=29-train_loss=0.04166-val_loss=0.04450-val_r2=0.92560-val_mse=0.00588-val_mae=0.03862-batch_size=32-base_dataset_size=1500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    # inference_model = work_model.inference("saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=29-train_loss=0.03546-val_loss=0.03841-val_r2=0.94190-val_mse=0.00459-val_mae=0.03381-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    # inference_model = work_model.inference("saved_models\\EAMU4T1-BPFC2\\best-epoch=34-train_loss=0.02388-val_loss=0.02641-val_r2=0.96637-val_mse=0.00265-val_mae=0.02376-batch_size=32-base_dataset_size=600000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    # inference_model = work_model.inference("saved_models\\EAMU4T1-BPFC2\\best-epoch=25-train_loss=0.02530-val_loss=0.02793-val_r2=0.96251-val_mse=0.00296-val_mae=0.02496-batch_size=32-base_dataset_size=1000000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    # inference_model = work_model.inference("saved_models\\ERV-KuIMUXT1-BPFC1\\best-epoch=78-train_loss=0.01672-val_loss=0.02663-val_r2=0.96754-val_mse=0.00258-val_mae=0.02406-batch_size=32-base_dataset_size=100000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    # inference_model = work_model.inference("saved_models\\ERV-KuIMUXT1-BPFC1\\best-epoch=25-train_loss=0.01518-val_loss=0.01534-val_r2=0.89565-val_mse=0.00116-val_mae=0.01418-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_STD.ckpt")
-    # inference_model = work_model.inference("saved_models/EAMU4-KuIMUXT2-BPFC4/best-epoch=26-train_loss=0.08889-val_loss=0.08248-val_r2=0.99727-val_mse=0.00020-val_mae=0.00647-batch_size=32-base_dataset_size=300000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    # inference_model = work_model.inference("saved_models/EAMU4-KuIMUXT2-BPFC2/best-epoch=27-train_loss=0.08527-val_loss=0.07506-val_r2=0.99731-val_mse=0.00021-val_mae=0.00531-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-
-    if not configs.MODEL_CHECKPOINT_PATH:
-        inference_model = work_model.inference(lit_model.trainer.checkpoint_callback.best_model_path)
-    else:
-        inference_model = work_model.inference(configs.MODEL_CHECKPOINT_PATH)
+    # api_phase_fine.train_model()
 
 
-    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
-    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
+    inference_model_phase_coarse = api_phase_coarse.inference_model
+    inference_model_phase_fine = api_phase_fine.inference_model
+
+    # tds = TouchstoneDataset(f"filters/FilterData/{configs_coarse.FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
+    tds = TouchstoneDataset(f"filters/FilterData/{configs_fine.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
     # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/19.02.26", s_tf=S_Resample(301))
-    # cst_tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/cst",
-    #                         s_tf=S_Resample(301))
+    cst_tds = TouchstoneDataset(f"filters/FilterData/{configs_coarse.FILTER_NAME}/measure/cst",
+                                s_tf=S_Resample(301))
     # TODO: РЕФАКТОРИНГ МЕТОДОВ WORK_MODEL!!!!!
-    phase_extractor = phase.PhaseLoadingExtractor(inference_model, work_model, work_model.orig_filter)
+    phase_extractor = phase.PhaseLoadingExtractor(inference_model_phase_coarse, api_phase_coarse.work_model, api_phase_coarse.work_model.orig_filter)
 
-    codec = cm_extract_api.work_model.codec
+    codec = api_phase_coarse.codec
     loss = nn.L1Loss()
     codec_db = copy.deepcopy(codec)
     codec_db.y_channels = ['S1_1.db', 'S2_1.db', 'S2_2.db']
 
     losses = []
 
-    for i in range(0, 5):
-        w = work_model.orig_filter.f_norm
+    # for i in range(0, 5):
+    #     inference_model_phase_coarse.predict_for(api_phase_fine.work_model.dm, i)
+
+    for i in range(0, len(cst_tds)):
+        w = api_phase_coarse.work_model.orig_filter.f_norm
         orig_fil = tds[i][1]
+        cst_fil = cst_tds[i][1]
+
+        # Тестовое добавление фазового сдвига
+        orig_fil = PhaseLoadingExtractor.add_phase_from_coeffs(orig_fil, a11=0, a22=0, b11=0, b22=0, w=w)
 
         orig_fil_to_nn = copy.deepcopy(orig_fil)
-        orig_fil_to_nn.s[:, 1, 0] *= -1
-        orig_fil_to_nn.s[:, 0, 1] *= -1
+        # orig_fil_to_nn.s[:, 1, 0] *= -1
+        # orig_fil_to_nn.s[:, 0, 1] *= -1
 
+        pred_prms = inference_model_phase_coarse.predict_x(orig_fil_to_nn)
+        pred_prms.update({'a11':0, 'a22':0})
+        net_de = PhaseLoadingExtractor.remove_phase_from_coeffs(orig_fil_to_nn, w, **pred_prms)
+        # print(f"[{i}] Предсказание частотно-зависимой составляющей: {pred_prms}")
+        for _ in range(0, 10):
+            pred_prms = inference_model_phase_coarse.predict_x(net_de)
+            pred_prms.update({'a11': 0, 'a22': 0})
+            net_de = PhaseLoadingExtractor.remove_phase_from_coeffs(orig_fil_to_nn, w, **pred_prms)
+            # print(f"[{i}] Предсказание частотно-зависимой составляющей: {pred_prms}")
 
-        # plt.figure()
-        # gvz = np.gradient(np.angle(orig_fil.s[:, 0, 0]), w)
-        # plt.plot(w, gvz)
-        # # plt.plot(w, min(gvz[0], gvz[-1])*np.ones_like(w))
-        # # plt.title("ГВЗ S11")
-        # plt.title(f"{tds.backend.paths[i].parts[-1]}. Значения на краях: {gvz[0]:.3f}, {gvz[-1]:.3f}")
-        # print(f"For gvz: {gvz[0]:.3f}, {gvz[-1]:.3f}")
+        tuned_prms = inference_model_phase_fine.predict_x(net_de)
+        tuned_prms.update({'b11': 0, 'b22': 0})
+        total_results = {'a11': tuned_prms['a11'], 'a22': tuned_prms['a22']}
+        print(f"[{i}] Предсказание постоянной составляющей: {tuned_prms}")
+        net_de = PhaseLoadingExtractor.remove_phase_from_coeffs(net_de, w, **tuned_prms)
+        for _ in range(0, 10):
+            tuned_prms = inference_model_phase_fine.predict_x(net_de)
+            tuned_prms.update({'b11': 0, 'b22': 0})
+            # total_results['a11'] += tuned_prms['a11']
+            # total_results['a22'] += tuned_prms['a22']
+            net_de = PhaseLoadingExtractor.remove_phase_from_coeffs(net_de, w, **tuned_prms)
+            print(f"[{i}] Предсказание постоянной составляющей: {tuned_prms}")
 
-        # phase_shifts, S_def = phase.fit_phase_edges_curvefit(
-        #     w, orig_fil_to_nn,
-        #     center_points=None,
-        #     plot=False,
-        #     verbose=False
-        # )
-        # orig_fil_to_nn.s = S_def
-        # orig_fil_to_nn_copy = copy.deepcopy(orig_fil_to_nn)
-        # phase_loadings = optimize_phase_loading(
-        #     ntw_orig=orig_fil_to_nn_copy,
-        #     inference_model=inference_model,
-        #     work_model=work_model,
-        #     reference_filter=work_model.orig_filter,
-        #     w_norm=work_model.orig_filter.f_norm
-        # )
-        # print("Оптимальные фазовые параметры:", phase_loadings.x)
-        # b11, b22 = phase_loadings.x
-        # # b11 = 0.054
-        # # b22 = 0.052
-        # orig_fil_to_nn_copy.s[:, 0, 0] *= np.array(torch.exp(1j * (w * b11)), dtype=np.complex64)
-        # orig_fil_to_nn_copy.s[:, 0, 1] *= np.array(torch.exp(1j * 0.5 * (w * (b11 + b22))), dtype=np.complex64)
-        # orig_fil_to_nn_copy.s[:, 1, 0] *= np.array(torch.exp(1j * 0.5 * (w * (b11 + b22))), dtype=np.complex64)
-        # orig_fil_to_nn_copy.s[:, 1, 1] *= np.array(torch.exp(1j * (w * b22)), dtype=np.complex64)
-        # ntw_de = orig_fil_to_nn_copy
-        res = phase_extractor.extract_all(orig_fil_to_nn, w_norm=w, verbose=True, plot_edges=False)
-        ntw_de = res['ntw_deembedded']
+        # tuned_prms['b11'] += pred_prms['b11']
+        # tuned_prms['b22'] += pred_prms['b22']
+        # print(f"Итоговые параметры: {tuned_prms}")
 
-        ts = TouchstoneData(ntw_de)
-        s = codec.encode(ts)[1].unsqueeze(0)
-        s_db = codec_db.encode(ts)[1].unsqueeze(0)
+        # net_de.s[:, 1, 0] *= -1
+        # net_de.s[:, 0, 1] *= -1
 
-        # # # start_time = time.time()
-        pred_prms = inference_model.predict_x(ntw_de)
-        # # stop_time = time.time()
-        # # print(f"Predict time: {stop_time - start_time:.3f} sec")
-        print(f"Предсказанные параметры: {pred_prms}")
-        pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms)
-        # pred_fil.coupling_matrix.plot_matrix()
-        l = loss(s_db, codec_db.encode(TouchstoneData(pred_fil))[1].unsqueeze(0))
-        losses.append(l)
-        print(f"[{i}] Recover S-parameters loss: {l}")
+        plt.figure(figsize=(5, 3))
+        cst_fil.plot_s_re(m=0, n=0, label='S11 Re CST')
+        cst_fil.plot_s_im(m=0, n=0, label='S11 Im CST')
+        net_de.plot_s_re(m=0, n=0, label='S11 Re corr', ls=':')
+        net_de.plot_s_im(m=0, n=0, label='S11 Im corr', ls=':')
 
+        plt.figure(figsize=(5, 3))
+        cst_fil.plot_s_re(m=1, n=0, label='S21 Re CST')
+        cst_fil.plot_s_im(m=1, n=0, label='S21 Im CST')
+        net_de.plot_s_re(m=1, n=0, label='S21 Re corr', ls=':')
+        net_de.plot_s_im(m=1, n=0, label='S21 Im corr', ls=':')
 
-        # plt.figure()
-        # cst_fil.plot_s_re(m=0, n=0, label='S11 Re CST')
-        # cst_fil.plot_s_im(m=0, n=0, label='S11 Im CST')
-        # orig_fil.plot_s_re(m=0, n=0, label='S11 Re origin', ls='--')
-        # ntw_de.plot_s_re(m=0, n=0, label='S11 Re corr', ls=':')
-        # ntw_de.plot_s_im(m=0, n=0, label='S11 Im corr', ls=':')
-        # plt.plot(f_new, np.real(S11_ext), linestyle=':', label='S11 Re extr')
-
-        # plt.figure()
-        # cst_fil.plot_s_deg(m=0, n=0, label='S11 phase CST')
-        # orig_fil.plot_s_deg(m=0, n=0, label='S11 phase origin', ls='--')
-        # ntw_de.plot_s_re(m=0, n=0, label='S11 Re corr', ls=':')
-        # ntw_de.plot_s_im(m=0, n=0, label='S11 Im corr')
-        # plt.plot(f_new, np.degrees(np.angle(S11_ext)), linestyle=':', label='S11 phase extr')
-        # cst_fil.plot_s_im(m=0, n=0, label='S11 Im CST', ls='--')
-
-        # plt.figure()
-        # orig_fil_to_nn_copy.plot_s_re(m=1, n=1, label='S22 Re corr')
-        # pred_fil.plot_s_re(m=1, n=1, label='S22 Re predict', ls=':')
-        # orig_fil_to_nn_copy.plot_s_im(m=1, n=1, label='S22 Im corr')
-        # pred_fil.plot_s_im(m=1, n=1, label='S22 Im predict', ls='--')
-
-        # ps_shifts = [pred_prms["a11"], pred_prms["a22"], pred_prms["b11"], pred_prms["b22"]]
-        a11_final = res['phi1_c'] + pred_prms["a11"]
-        a22_final = res['phi2_c'] + pred_prms["a22"]
-        b11_final = pred_prms["b11"] + res['b11_opt']
-        b22_final = pred_prms["b22"] + res['b22_opt']
-        print(
-            f"Финальный фазовый сдвиг, после корректировки ИИ: a11={a11_final:.6f} рад ({np.degrees(a11_final):.2f}°), a22={a22_final:.6f} рад ({np.degrees(a22_final):.2f}°)"
-            f" b11 = {b11_final:.6f} рад ({np.degrees(b11_final):.2f}°), b22 = {b22_final:.6f} рад ({np.degrees(b22_final):.2f}°)")
-        pred_fil.s[:, 0, 0] *= np.array(torch.exp(-1j * 2 * (a11_final + w * b11_final)), dtype=np.complex64)
-        pred_fil.s[:, 0, 1] *= np.array(-torch.exp(-1j * (a11_final + a22_final + w * (b11_final + b22_final))),
-                                        dtype=np.complex64)
-        pred_fil.s[:, 1, 0] *= np.array(-torch.exp(-1j * (a11_final + a22_final + w * (b11_final + b22_final))),
-                                        dtype=np.complex64)
-        pred_fil.s[:, 1, 1] *= np.array(torch.exp(-1j * 2 * (a22_final + w * b22_final)), dtype=np.complex64)
+        # # plt.figure()
+        # # gvz = np.gradient(np.angle(orig_fil.s[:, 0, 0]), w)
+        # # plt.plot(w, gvz)
+        # # # plt.plot(w, min(gvz[0], gvz[-1])*np.ones_like(w))
+        # # # plt.title("ГВЗ S11")
+        # # plt.title(f"{tds.backend.paths[i].parts[-1]}. Значения на краях: {gvz[0]:.3f}, {gvz[-1]:.3f}")
+        # # print(f"For gvz: {gvz[0]:.3f}, {gvz[-1]:.3f}")
         #
-        # plt.figure(figsize=(4, 3))
-        # orig_fil.plot_s_re(m=0, n=0, label='S11 Re origin')
-        # pred_fil.plot_s_re(m=0, n=0, label='S11 Re predict', ls=':')
-        # orig_fil.plot_s_im(m=0, n=0, label='S11 Im origin')
-        # pred_fil.plot_s_im(m=0, n=0, label='S11 Im predict', ls='--')
-        # plt.title(tds.backend.paths[i].parts[-1])
+        # # phase_shifts, S_def = phase.fit_phase_edges_curvefit(
+        # #     w, orig_fil_to_nn,
+        # #     center_points=None,
+        # #     plot=False,
+        # #     verbose=False
+        # # )
+        # # orig_fil_to_nn.s = S_def
+        # # orig_fil_to_nn_copy = copy.deepcopy(orig_fil_to_nn)
+        # # phase_loadings = optimize_phase_loading(
+        # #     ntw_orig=orig_fil_to_nn_copy,
+        # #     inference_model=inference_model,
+        # #     work_model=work_model,
+        # #     reference_filter=work_model.orig_filter,
+        # #     w_norm=work_model.orig_filter.f_norm
+        # # )
+        # # print("Оптимальные фазовые параметры:", phase_loadings.x)
+        # # b11, b22 = phase_loadings.x
+        # # # b11 = 0.054
+        # # # b22 = 0.052
+        # # orig_fil_to_nn_copy.s[:, 0, 0] *= np.array(torch.exp(1j * (w * b11)), dtype=np.complex64)
+        # # orig_fil_to_nn_copy.s[:, 0, 1] *= np.array(torch.exp(1j * 0.5 * (w * (b11 + b22))), dtype=np.complex64)
+        # # orig_fil_to_nn_copy.s[:, 1, 0] *= np.array(torch.exp(1j * 0.5 * (w * (b11 + b22))), dtype=np.complex64)
+        # # orig_fil_to_nn_copy.s[:, 1, 1] *= np.array(torch.exp(1j * (w * b22)), dtype=np.complex64)
+        # # ntw_de = orig_fil_to_nn_copy
+        # res = phase_extractor.extract_all(orig_fil_to_nn, w_norm=w, verbose=True, plot_edges=False)
+        # ntw_de = res['ntw_deembedded']
         #
-        # plt.figure(figsize=(4, 3))
-        # orig_fil.plot_s_deg(m=0, n=0, label='Phase S11 origin')
-        # pred_fil.plot_s_deg(m=0, n=0, label='Phase S11 predict')
+        # ts = TouchstoneData(ntw_de)
+        # s = codec.encode(ts)[1].unsqueeze(0)
+        # s_db = codec_db.encode(ts)[1].unsqueeze(0)
+        #
+        # # # # start_time = time.time()
+        # pred_prms = inference_model.predict_x(ntw_de)
+        # # # stop_time = time.time()
+        # # # print(f"Predict time: {stop_time - start_time:.3f} sec")
+        # print(f"Предсказанные параметры: {pred_prms}")
+        # pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms)
+        # # pred_fil.coupling_matrix.plot_matrix()
+        # l = loss(s_db, codec_db.encode(TouchstoneData(pred_fil))[1].unsqueeze(0))
+        # losses.append(l)
+        # print(f"[{i}] Recover S-parameters loss: {l}")
+        #
+        #
+        # # plt.figure()
+        # # cst_fil.plot_s_re(m=0, n=0, label='S11 Re CST')
+        # # cst_fil.plot_s_im(m=0, n=0, label='S11 Im CST')
+        # # orig_fil.plot_s_re(m=0, n=0, label='S11 Re origin', ls='--')
+        # # ntw_de.plot_s_re(m=0, n=0, label='S11 Re corr', ls=':')
+        # # ntw_de.plot_s_im(m=0, n=0, label='S11 Im corr', ls=':')
+        # # plt.plot(f_new, np.real(S11_ext), linestyle=':', label='S11 Re extr')
+        #
+        # # plt.figure()
+        # # cst_fil.plot_s_deg(m=0, n=0, label='S11 phase CST')
+        # # orig_fil.plot_s_deg(m=0, n=0, label='S11 phase origin', ls='--')
+        # # ntw_de.plot_s_re(m=0, n=0, label='S11 Re corr', ls=':')
+        # # ntw_de.plot_s_im(m=0, n=0, label='S11 Im corr')
+        # # plt.plot(f_new, np.degrees(np.angle(S11_ext)), linestyle=':', label='S11 phase extr')
+        # # cst_fil.plot_s_im(m=0, n=0, label='S11 Im CST', ls='--')
+        #
+        # # plt.figure()
+        # # orig_fil_to_nn_copy.plot_s_re(m=1, n=1, label='S22 Re corr')
+        # # pred_fil.plot_s_re(m=1, n=1, label='S22 Re predict', ls=':')
+        # # orig_fil_to_nn_copy.plot_s_im(m=1, n=1, label='S22 Im corr')
+        # # pred_fil.plot_s_im(m=1, n=1, label='S22 Im predict', ls='--')
+        #
+        # # ps_shifts = [pred_prms["a11"], pred_prms["a22"], pred_prms["b11"], pred_prms["b22"]]
+        # a11_final = res['phi1_c'] + pred_prms["a11"]
+        # a22_final = res['phi2_c'] + pred_prms["a22"]
+        # b11_final = pred_prms["b11"] + res['b11_opt']
+        # b22_final = pred_prms["b22"] + res['b22_opt']
+        # print(
+        #     f"Финальный фазовый сдвиг, после корректировки ИИ: a11={a11_final:.6f} рад ({np.degrees(a11_final):.2f}°), a22={a22_final:.6f} рад ({np.degrees(a22_final):.2f}°)"
+        #     f" b11 = {b11_final:.6f} рад ({np.degrees(b11_final):.2f}°), b22 = {b22_final:.6f} рад ({np.degrees(b22_final):.2f}°)")
+        # pred_fil.s[:, 0, 0] *= np.array(torch.exp(-1j * 2 * (a11_final + w * b11_final)), dtype=np.complex64)
+        # pred_fil.s[:, 0, 1] *= np.array(-torch.exp(-1j * (a11_final + a22_final + w * (b11_final + b22_final))),
+        #                                 dtype=np.complex64)
+        # pred_fil.s[:, 1, 0] *= np.array(-torch.exp(-1j * (a11_final + a22_final + w * (b11_final + b22_final))),
+        #                                 dtype=np.complex64)
+        # pred_fil.s[:, 1, 1] *= np.array(torch.exp(-1j * 2 * (a22_final + w * b22_final)), dtype=np.complex64)
+        # #
+        # # plt.figure(figsize=(4, 3))
+        # # orig_fil.plot_s_re(m=0, n=0, label='S11 Re origin')
+        # # pred_fil.plot_s_re(m=0, n=0, label='S11 Re predict', ls=':')
+        # # orig_fil.plot_s_im(m=0, n=0, label='S11 Im origin')
+        # # pred_fil.plot_s_im(m=0, n=0, label='S11 Im predict', ls='--')
+        # # plt.title(tds.backend.paths[i].parts[-1])
+        # #
+        # # plt.figure(figsize=(4, 3))
+        # # orig_fil.plot_s_deg(m=0, n=0, label='Phase S11 origin')
+        # # pred_fil.plot_s_deg(m=0, n=0, label='Phase S11 predict')
+        # # plt.title(tds.backend.paths[i].parts[-1])
+        #
+        # inference_model.plot_origin_vs_prediction(orig_fil, pred_fil, title=f"Origin tune: {tds.backend.paths[i].parts[-1]}")
+        # # fine_tuned_model.plot_origin_vs_prediction(orig_fil, tuned_fil, title=f"Fine tune: {tds.backend.paths[i].parts[-1]}")
+        #
+        # optim_filter, phase_opt = optimize_cm(pred_fil, orig_fil, phase_init=(a11_final, a22_final, b11_final, b22_final))
         # plt.title(tds.backend.paths[i].parts[-1])
-
-        inference_model.plot_origin_vs_prediction(orig_fil, pred_fil, title=f"Origin tune: {tds.backend.paths[i].parts[-1]}")
-        # fine_tuned_model.plot_origin_vs_prediction(orig_fil, tuned_fil, title=f"Fine tune: {tds.backend.paths[i].parts[-1]}")
-
-        optim_filter, phase_opt = optimize_cm(pred_fil, orig_fil, phase_init=(a11_final, a22_final, b11_final, b22_final))
-        plt.title(tds.backend.paths[i].parts[-1])
-        print(f"Оптимизированные параметры: {optim_filter.coupling_matrix.factors}. Добротность: {pred_fil.Q}. Фаза: {np.degrees(phase_opt)}")
-        # optim_filter.coupling_matrix.plot_matrix()
+        # print(f"Оптимизированные параметры: {optim_filter.coupling_matrix.factors}. Добротность: {pred_fil.Q}. Фаза: {np.degrees(phase_opt)}")
+        # # optim_filter.coupling_matrix.plot_matrix()
 
 
     # Предсказываем эталонный фильтр

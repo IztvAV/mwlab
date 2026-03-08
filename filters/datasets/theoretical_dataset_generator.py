@@ -79,7 +79,7 @@ class CMTheoreticalDatasetGeneratorSamplers:
         pss_sampler_type.one_param = False
         pss_sampler = Sampler.for_type(
             **samplers_kwargs,
-            type=SamplerTypes.SAMPLER_SOBOL, # Для теста, нужно проверить какую фазу выдаст в этом случае
+            type=samplers_type, # Для теста, нужно проверить какую фазу выдаст в этом случае
             start=phase_shifts_min,
             stop=phase_shifts_max,
             num=len(cms_sampler))
@@ -294,5 +294,17 @@ class CMTheoreticalDatasetGenerator:
             if torch.isnan(params).any() or torch.isinf(params).any():
                 raise ValueError("⚠️ Params contains NaN or Inf")
             self._backend.append(ts)
+            # ps_shifts *= -1
+            # s_params = MWFilter.response_from_coupling_matrix(M=new_matrix, f0=f0,
+            #                                                   FBW=fbw, Q=Q,
+            #                                                   frange=self._origin_filter.f / 1e6, PSs=ps_shifts)
+            #
+            # new_filter = MWFilter(f0=f0, order=self._origin_filter.order, bw=bw,
+            #                       Q=Q, matrix=new_matrix, frequency=self._origin_filter.f,
+            #                       s=s_params, z0=50)
+            # ts_inv = new_filter.to_touchstone_data(ps_shifts=ps_shifts)
+            # # ts.params.update(dict(zip(["a11", "a22", "b11", "b22"], ps_shifts)))
+            # params = torch.tensor(list(ts_inv.params.values()), dtype=torch.float32)
+            # self._backend.append(ts_inv)
         if self._backend_type == 'ram':
             self._backend.dump_pickle(self._full_dataset_path())
