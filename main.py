@@ -435,8 +435,8 @@ def main():
     # 'S1_1.real', 'S1_2.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S1_2.imag', 'S2_1.imag', 'S2_2.imag'
     # lit_model = cm_extract_api.train_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
 
-    # configs_coarse, io_phase_coarse, api_phase_coarse = load_phase_extractor_coarse("defaults_cfg/phase_extractor_coarse_default.yml")
-    # configs_fine, io_phase_fine, api_phase_fine = load_phase_extractor_fine("defaults_cfg/phase_extractor_fine_default.yml")
+    configs_coarse, io_phase_coarse, api_phase_coarse = load_phase_extractor_coarse("defaults_cfg/phase_extractor_coarse_default.yml")
+    configs_fine, io_phase_fine, api_phase_fine = load_phase_extractor_fine("defaults_cfg/phase_extractor_fine_default.yml")
 
     # configs = cfg.Configs.init_from_default("defaults_cfg/phase_extractor_fine_default.yml")
     # io_phase_fine = cm_extract_api.ModelIOSpec(
@@ -481,6 +481,10 @@ def main():
         # Тестовое добавление фазового сдвига
         orig_fil = PhaseLoadingExtractor.add_phase_from_coeffs(orig_fil, a11=0, a22=0, b11=0, b22=0, w=w)
 
+        plt.figure(figsize=(5, 3))
+        orig_fil.plot_s_deg(m=0, n=0, label='S11 phase')
+        plt.title("Смещенная на pi фаза")
+
         orig_fil_to_nn = copy.deepcopy(orig_fil)
         # orig_fil_to_nn.s[:, 1, 0] *= -1
         # orig_fil_to_nn.s[:, 0, 1] *= -1
@@ -520,12 +524,13 @@ def main():
         cst_fil.plot_s_im(m=0, n=0, label='S11 Im CST')
         net_de.plot_s_re(m=0, n=0, label='S11 Re corr', ls=':')
         net_de.plot_s_im(m=0, n=0, label='S11 Im corr', ls=':')
+        plt.title(tds.backend.paths[i].parts[-1])
 
-        plt.figure(figsize=(5, 3))
-        cst_fil.plot_s_re(m=1, n=0, label='S21 Re CST')
-        cst_fil.plot_s_im(m=1, n=0, label='S21 Im CST')
-        net_de.plot_s_re(m=1, n=0, label='S21 Re corr', ls=':')
-        net_de.plot_s_im(m=1, n=0, label='S21 Im corr', ls=':')
+        # plt.figure(figsize=(5, 3))
+        # cst_fil.plot_s_re(m=1, n=0, label='S21 Re CST')
+        # cst_fil.plot_s_im(m=1, n=0, label='S21 Im CST')
+        # net_de.plot_s_re(m=1, n=0, label='S21 Re corr', ls=':')
+        # net_de.plot_s_im(m=1, n=0, label='S21 Im corr', ls=':')
 
         # # plt.figure()
         # # gvz = np.gradient(np.angle(orig_fil.s[:, 0, 0]), w)
