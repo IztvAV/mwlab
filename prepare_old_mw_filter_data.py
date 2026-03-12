@@ -30,7 +30,7 @@ def save_phase_to_s2p_single_comment(a11=0, a22=0, b11=0, b22=0):
     return phase_dict
 
 
-FILTER_NAME = "EAMU4-KuIMUXT2-BPFC2"
+FILTER_NAME = "ERV-KuCMUXT1-BPFC1"
 MANIFEST_PATH = os.path.join("filters", "FilterData", FILTER_NAME)
 
 
@@ -39,10 +39,10 @@ def main():
     parser = argparse.ArgumentParser(description="Генератор .s2p файлов для добавления информации о МС и параметрах фильтра. Корректирует старые данные для использования их в обучении ИИ")
     parser.add_argument("-fr", "--freq_resp", type=str, default=os.path.join(os.getcwd(), "filters", "origins", f"{FILTER_NAME}", f"{FILTER_NAME}.s2p"),
                         help="Путь к .s2p файлу с частотными характеристиками фильтра")
-    parser.add_argument("-m", "--matrix", type=str, default=os.path.join(os.getcwd(), "filters", "origins", f"{FILTER_NAME}", "cst_matrix_with_parasitic_couplings.txt"), help="Путь к файлу .txt с матрицей связи фильтра")
-    parser.add_argument("-f0", "--center_freq", type=str, default="11540", help="Центральная частота фильтра в МГц")
-    parser.add_argument("-bw", "--bandwidth", type=str, default="65", help="Ширина полосы пропускания фильтра в МГц")
-    parser.add_argument("-q", "--quality_factor", type=str, default="6000", help="Значение добротности")
+    parser.add_argument("-m", "--matrix", type=str, default=os.path.join(os.getcwd(), "filters", "origins", f"{FILTER_NAME}", "cst_matrix.txt"), help="Путь к файлу .txt с матрицей связи фильтра")
+    parser.add_argument("-f0", "--center_freq", type=str, default="10720.8", help="Центральная частота фильтра в МГц")
+    parser.add_argument("-bw", "--bandwidth", type=str, default="40", help="Ширина полосы пропускания фильтра в МГц")
+    parser.add_argument("-q", "--quality_factor", type=str, default="6500", help="Значение добротности")
     parser.add_argument("-p", "--path_to_save", type=str, default=os.path.join(os.getcwd(), "filters", "origins", f"{FILTER_NAME}"), help="Путь для сохранения измененного файла")
 
     args = parser.parse_args()

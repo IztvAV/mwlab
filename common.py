@@ -15,6 +15,7 @@ from mwlab.transforms.s_transforms import S_Crop, S_Resample
 
 from filters import CMTheoreticalDatasetGeneratorSamplers, SamplerTypes, MWFilter, CouplingMatrix
 from filters.datasets.theoretical_dataset_generator import CMShifts, PSShift, CMTheoreticalDatasetGenerator
+from filters.datasets.dataset_dublicate_finder import DuplicateDetectionConfig, DuplicateStatsCollector
 import models
 import configs as cfg
 import lightning as L
@@ -352,11 +353,25 @@ class WorkModel:
         print("Создаем сэмплеры")
         self.configs = configs
         self.samplers = create_sampler(self.orig_filter, configs, is_inference=is_inference)
+
+        dup_cfg = DuplicateDetectionConfig(
+            enabled=True,
+            signature_decimals=2,
+            rms_threshold = 3e-4,
+            max_threshold = 1e-4,
+            max_plots=10,
+            save_plots=True,
+            report_subdir="duplicate_report",
+            max_bucket_size=None,
+            store_all_features=True,
+        )
         self.ds_gen = CMTheoreticalDatasetGenerator(
-            path_to_save_dataset=os.path.join(self.configs.ENV_DATASET_PATH, self.samplers.cms.type.name, f"{len(self.samplers.cms)}"),
+            path_to_save_dataset=os.path.join(self.configs.ENV_DATASET_PATH, self.samplers.cms.type.name,
+                                              f"{len(self.samplers.cms)}"),
             backend_type='ram',
             orig_filter=self.orig_filter,
             filename="Dataset",
+            duplicate_config=dup_cfg,
         )
         self.ds_gen.generate(self.samplers)
 

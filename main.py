@@ -399,10 +399,10 @@ def evaluate_datasets(
 
 def main():
     configs = cfg.Configs.init_as_default("default.yml")
-    # lit_model = cm_extract_api.train_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
-    cm_extract_api.load_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
-    lit_model = cm_extract_api.inference_model
-    work_model = cm_extract_api.work_model
+    lit_model = cm_extract_api.train_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
+    # cm_extract_api.load_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
+    # lit_model = cm_extract_api.inference_model
+    # work_model = cm_extract_api.work_model
 
 
     # work_model = common.WorkModel(configs, is_inference=False)

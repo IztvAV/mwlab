@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 from mwlab.io.backends import HDF5Backend, RAMBackend, StorageBackend, FileBackend
 from mwlab.transforms.s_transforms import S_Crop, S_Resample
 from mwlab.transforms import TComposite
+from filters.datasets.dataset_dublicate_finder import DuplicateDetectionConfig, DuplicateStatsCollector
 
 import matplotlib.pyplot as plt
 
@@ -196,28 +197,203 @@ class CMTheoreticalDatasetGeneratorSamplers:
 AVAILABLE_BACKEND_TYPES = ['s2p', 'hdf5', 'ram']
 
 
+# class CMTheoreticalDatasetGenerator:
+#     _BASE_FILENAME = "Dataset"
+#     _FILENAME_SUFFIX = {'s2p': ".s2p", 'hdf5': ".h5", "ram": ".pkl"}
+#     def __init__(self,
+#                  path_to_save_dataset: str,  # Путь к директориям с датасетами
+#                  filename: str,
+#                  orig_filter: MWFilter,
+#                  backend_type: str = 'ram',
+#                  backend_kwargs: dict = {},
+#                  rewrite: bool = False
+#                  ):
+#         self._path_to_save_dataset = path_to_save_dataset
+#         self._backend_type = backend_type
+#         self._filename = filename + self._FILENAME_SUFFIX[self._backend_type]
+#         self._backend = self.create_backend(backend_type, backend_kwargs, rewrite)
+#         self._origin_filter = orig_filter
+#
+#     def _full_dataset_path(self):
+#         return os.path.join(self._path_to_save_dataset, self._filename)
+#
+#     def _check_dataset(self, rewrite) -> bool:
+#         if rewrite: return True
+#         return not os.path.exists(self._full_dataset_path())
+#
+#     def create_backend(self, backend_type: str, backend_kwargs: dict, rewrite) -> StorageBackend:
+#         if not backend_type in AVAILABLE_BACKEND_TYPES:
+#             raise ValueError(f"Unsupported backed: {backend_type}")
+#         self._enable_generate = self._check_dataset(rewrite)
+#         if not self._enable_generate:
+#             print(f"Directory already have dataset files. Load backend from existing")
+#             if backend_type == 's2p':
+#                 backend = FileBackend(self._path_to_save_dataset, **backend_kwargs)
+#             elif backend_type == 'hdf5':
+#                 backend = HDF5Backend(self._full_dataset_path(), **backend_kwargs)
+#             elif backend_type == 'ram':
+#                 backend = RAMBackend.load_pickle(self._full_dataset_path(), **backend_kwargs)
+#         else:
+#             print(f"Write data into directory: {self._path_to_save_dataset}")
+#             if not os.path.exists(self._path_to_save_dataset):
+#                 os.makedirs(self._path_to_save_dataset)
+#             if backend_type == 's2p':
+#                 backend = FileBackend(self._path_to_save_dataset, **backend_kwargs)
+#             elif backend_type == 'hdf5':
+#                 backend = HDF5Backend(self._full_dataset_path(), mode='w', **backend_kwargs)
+#             elif backend_type == 'ram':
+#                 backend = RAMBackend([], **backend_kwargs)
+#         return backend
+#
+#     @property
+#     def backend(self):
+#         return self._backend
+#
+#     @property
+#     def path_to_dataset(self):
+#
+#         if self._backend_type == 'ram' or self._backend_type == 'hdf5':
+#             return self._full_dataset_path()
+#         elif self._backend_type == 's2p':
+#             return self._path_to_save_dataset
+#
+#     @property
+#     def origin_filter(self):
+#         return self._origin_filter
+#
+#     def generate(self, samplers: CMTheoreticalDatasetGeneratorSamplers):
+#         if not self._enable_generate:
+#             return
+#         if len(samplers.pss) != len(samplers.cms):
+#             raise ValueError(f"Размер сэмплера с фазовыми сдвигами (ps_shifts): {len(samplers.pss)}"
+#                              f" должен равняться размеру сэмплера со сдвигами элементов матрицы связи (cm_shifts): "
+#                              f"{len(samplers.cms)}")
+#         size = len(samplers.cms)
+#         for idx in tqdm(range(size), desc=f"Генерация датасета в путь: {self._path_to_save_dataset}"):
+#             cm_factors = samplers.cms[idx]
+#             if torch.isnan(cm_factors).any():
+#                 raise ValueError("⚠️ Input to model contains NaN or Inf")
+#             new_matrix = CouplingMatrix.from_factors(factors=torch.tensor(cm_factors, dtype=torch.float32),
+#                                                      links=self.origin_filter.coupling_matrix.links,
+#                                                      matrix_order=self.origin_filter.coupling_matrix.matrix_order)
+#             if torch.isnan(new_matrix).any() or torch.isinf(new_matrix).any():
+#                 raise ValueError("⚠️ Input to model contains NaN or Inf")
+#             ps_shifts = samplers.pss[idx]
+#             Q = samplers.qs[idx].item()
+#             f0 = samplers.f0[idx].item()
+#             bw = samplers.bw[idx].item()
+#             fbw = bw/f0
+#             # Q = self._origin_filter.Q
+#             s_params = MWFilter.response_from_coupling_matrix(M=new_matrix, f0=f0,
+#                                                               FBW=fbw, Q=Q,
+#                                                               frange=self._origin_filter.f / 1e6, PSs=ps_shifts)
+#
+#             new_filter = MWFilter(f0=f0, order=self._origin_filter.order, bw=bw,
+#                                   Q=Q, matrix=new_matrix, frequency=self._origin_filter.f,
+#                                   s=s_params, z0=50)
+#             ts = new_filter.to_touchstone_data(ps_shifts=ps_shifts)
+#             # ts.params.update(dict(zip(["a11", "a22", "b11", "b22"], ps_shifts)))
+#             params = torch.tensor(list(ts.params.values()), dtype=torch.float32)
+#             if torch.isnan(params).any() or torch.isinf(params).any():
+#                 raise ValueError("⚠️ Params contains NaN or Inf")
+#             self._backend.append(ts)
+#         if self._backend_type == 'ram':
+#             self._backend.dump_pickle(self._full_dataset_path())
+
+
+import numpy as np
+from tqdm import tqdm
+
+def s_to_vector(ts):
+    """
+    Преобразует S-параметры в вектор [Re, Im]
+    """
+    s = ts.s
+    if hasattr(s, "detach"):
+        s = s.detach().cpu().numpy()
+
+    s = np.asarray(s)
+
+    s_flat = s.reshape(-1)
+
+    vec = np.empty(s_flat.size * 2, dtype=np.float32)
+
+    vec[0::2] = s_flat.real
+    vec[1::2] = s_flat.imag
+
+    return vec
+
+
+def find_duplicates(dataset, rms_threshold=1e-2, max_threshold=1e-2, max_plots=10):
+
+    print("Preparing feature vectors...")
+
+    features = [s_to_vector(ts) for ts in dataset]
+
+    N = len(features)
+
+    duplicates = []
+
+    print("Searching duplicates...")
+
+    for i in tqdm(range(N)):
+        xi = features[i]
+
+        for j in range(i + 1, N):
+
+            xj = features[j]
+
+            diff = xi - xj
+
+            rms = np.sqrt(np.mean(diff * diff))
+
+            if rms > rms_threshold:
+                continue
+
+            max_err = np.max(np.abs(diff))
+
+            if max_err > max_threshold:
+                continue
+
+            duplicates.append((i, j, rms, max_err))
+
+    print()
+    print("Total samples:", N)
+    print("Duplicate pairs:", len(duplicates))
+
+    return duplicates
+
+
 class CMTheoreticalDatasetGenerator:
     _BASE_FILENAME = "Dataset"
     _FILENAME_SUFFIX = {'s2p': ".s2p", 'hdf5': ".h5", "ram": ".pkl"}
+
     def __init__(self,
-                 path_to_save_dataset: str,  # Путь к директориям с датасетами
+                 path_to_save_dataset: str,
                  filename: str,
                  orig_filter: MWFilter,
                  backend_type: str = 'ram',
                  backend_kwargs: dict = {},
-                 rewrite: bool = False
-                 ):
+                 rewrite: bool = False,
+                 duplicate_config: DuplicateDetectionConfig or None = None):
         self._path_to_save_dataset = path_to_save_dataset
         self._backend_type = backend_type
         self._filename = filename + self._FILENAME_SUFFIX[self._backend_type]
         self._backend = self.create_backend(backend_type, backend_kwargs, rewrite)
         self._origin_filter = orig_filter
 
+        self._duplicate_config = duplicate_config or DuplicateDetectionConfig()
+        self._dup_stats = DuplicateStatsCollector(
+            base_dir=self._path_to_save_dataset,
+            config=self._duplicate_config,
+        )
+
     def _full_dataset_path(self):
         return os.path.join(self._path_to_save_dataset, self._filename)
 
     def _check_dataset(self, rewrite) -> bool:
-        if rewrite: return True
+        if rewrite:
+            return True
         return not os.path.exists(self._full_dataset_path())
 
     def create_backend(self, backend_type: str, backend_kwargs: dict, rewrite) -> StorageBackend:
@@ -250,7 +426,6 @@ class CMTheoreticalDatasetGenerator:
 
     @property
     def path_to_dataset(self):
-
         if self._backend_type == 'ram' or self._backend_type == 'hdf5':
             return self._full_dataset_path()
         elif self._backend_type == 's2p':
@@ -260,41 +435,97 @@ class CMTheoreticalDatasetGenerator:
     def origin_filter(self):
         return self._origin_filter
 
+    @property
+    def duplicate_stats(self):
+        return self._dup_stats
+
     def generate(self, samplers: CMTheoreticalDatasetGeneratorSamplers):
         if not self._enable_generate:
             return
+
         if len(samplers.pss) != len(samplers.cms):
-            raise ValueError(f"Размер сэмплера с фазовыми сдвигами (ps_shifts): {len(samplers.pss)}"
-                             f" должен равняться размеру сэмплера со сдвигами элементов матрицы связи (cm_shifts): "
-                             f"{len(samplers.cms)}")
+            raise ValueError(
+                f"Размер сэмплера с фазовыми сдвигами (ps_shifts): {len(samplers.pss)}"
+                f" должен равняться размеру сэмплера со сдвигами элементов матрицы связи (cm_shifts): "
+                f"{len(samplers.cms)}"
+            )
+
         size = len(samplers.cms)
+        fils = []
+
         for idx in tqdm(range(size), desc=f"Генерация датасета в путь: {self._path_to_save_dataset}"):
             cm_factors = samplers.cms[idx]
-            if torch.isnan(cm_factors).any():
-                raise ValueError("⚠️ Input to model contains NaN or Inf")
-            new_matrix = CouplingMatrix.from_factors(factors=torch.tensor(cm_factors, dtype=torch.float32),
-                                                     links=self.origin_filter.coupling_matrix.links,
-                                                     matrix_order=self.origin_filter.coupling_matrix.matrix_order)
+            if torch.isnan(cm_factors).any() or torch.isinf(cm_factors).any():
+                raise ValueError("⚠️ Input cm_factors contains NaN or Inf")
+
+            new_matrix = CouplingMatrix.from_factors(
+                factors=torch.tensor(cm_factors, dtype=torch.float32),
+                links=self.origin_filter.coupling_matrix.links,
+                matrix_order=self.origin_filter.coupling_matrix.matrix_order
+            )
+
             if torch.isnan(new_matrix).any() or torch.isinf(new_matrix).any():
-                raise ValueError("⚠️ Input to model contains NaN or Inf")
+                raise ValueError("⚠️ new_matrix contains NaN or Inf")
+
             ps_shifts = samplers.pss[idx]
             Q = samplers.qs[idx].item()
             f0 = samplers.f0[idx].item()
             bw = samplers.bw[idx].item()
-            fbw = bw/f0
-            # Q = self._origin_filter.Q
-            s_params = MWFilter.response_from_coupling_matrix(M=new_matrix, f0=f0,
-                                                              FBW=fbw, Q=Q,
-                                                              frange=self._origin_filter.f / 1e6, PSs=ps_shifts)
+            fbw = bw / f0
 
-            new_filter = MWFilter(f0=f0, order=self._origin_filter.order, bw=bw,
-                                  Q=Q, matrix=new_matrix, frequency=self._origin_filter.f,
-                                  s=s_params, z0=50)
+            s_params = MWFilter.response_from_coupling_matrix(
+                M=new_matrix,
+                f0=f0,
+                FBW=fbw,
+                Q=Q,
+                frange=self._origin_filter.f / 1e6,
+                PSs=ps_shifts
+            )
+
+            new_filter = MWFilter(
+                f0=f0,
+                order=self._origin_filter.order,
+                bw=bw,
+                Q=Q,
+                matrix=new_matrix,
+                frequency=self._origin_filter.f,
+                s=s_params,
+                z0=50
+            )
+            # fils.append(new_filter)
             ts = new_filter.to_touchstone_data(ps_shifts=ps_shifts)
-            # ts.params.update(dict(zip(["a11", "a22", "b11", "b22"], ps_shifts)))
+
             params = torch.tensor(list(ts.params.values()), dtype=torch.float32)
             if torch.isnan(params).any() or torch.isinf(params).any():
                 raise ValueError("⚠️ Params contains NaN or Inf")
+
+            # Сохраняем sample
+
             self._backend.append(ts)
+
+            # Собираем статистику по дубликатам
+            meta = {
+                "f0": float(f0),
+                "bw": float(bw),
+                "Q": float(Q),
+                "ps_shifts": [float(x) for x in np.asarray(ps_shifts).reshape(-1)],
+                "cm_factors": [float(x) for x in np.asarray(cm_factors).reshape(-1)],
+            }
+
+            self._dup_stats.add_sample(
+                idx=idx,
+                ts=new_filter,
+                params=params.detach().cpu().numpy(),
+                meta=meta,
+            )
+
         if self._backend_type == 'ram':
+            # duplicates = find_duplicates(fils)
             self._backend.dump_pickle(self._full_dataset_path())
+
+        self._dup_stats.finalize()
+
+        summary = self._dup_stats.summary()
+        print("\n=== Duplicate statistics ===")
+        for k, v in summary.items():
+            print(f"{k}: {v}")
