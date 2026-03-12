@@ -270,6 +270,8 @@ class CMTheoreticalDatasetGenerator:
         size = len(samplers.cms)
         for idx in tqdm(range(size), desc=f"Генерация датасета в путь: {self._path_to_save_dataset}"):
             cm_factors = samplers.cms[idx]
+            if torch.isnan(cm_factors).any():
+                raise ValueError("⚠️ Input to model contains NaN or Inf")
             new_matrix = CouplingMatrix.from_factors(factors=torch.tensor(cm_factors, dtype=torch.float32),
                                                      links=self.origin_filter.coupling_matrix.links,
                                                      matrix_order=self.origin_filter.coupling_matrix.matrix_order)

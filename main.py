@@ -399,10 +399,10 @@ def evaluate_datasets(
 
 def main():
     configs = cfg.Configs.init_as_default("default.yml")
-    lit_model = cm_extract_api.train_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
-    # cm_extract_api.load_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
-    # lit_model = cm_extract_api.inference_model
-    # work_model = cm_extract_api.work_model
+    # lit_model = cm_extract_api.train_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
+    cm_extract_api.load_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
+    lit_model = cm_extract_api.inference_model
+    work_model = cm_extract_api.work_model
 
 
     # work_model = common.WorkModel(configs, is_inference=False)
@@ -449,8 +449,8 @@ def main():
         inference_model = work_model.inference(configs.MODEL_CHECKPOINT_PATH)
 
 
-    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
-    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
+    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
+    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
     # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/19.02.26", s_tf=S_Resample(301))
     # cst_tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/cst",
     #                         s_tf=S_Resample(301))
@@ -464,7 +464,7 @@ def main():
 
     losses = []
 
-    for i in range(0, 5):
+    for i in range(0, 10):
         w = work_model.orig_filter.f_norm
         orig_fil = tds[i][1]
 

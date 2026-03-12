@@ -72,7 +72,7 @@ class TouchstoneDataset(Dataset):
         ts = self.backend.read(idx)  # TouchstoneData
 
         # ----------- X (скалярные параметры) -----------
-        x = {k: ts.params.get(k, np.nan) for k in (self.x_keys or ts.params)}
+        x = {k: ts.params[k] for k in (self.x_keys or ts.params)}
         if self.x_tf:
             x = self.x_tf(x)
 

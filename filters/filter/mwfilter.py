@@ -52,7 +52,7 @@ class MWFilter(rf.Network):
         for i in range(M.shape[0]):
             for j in range(i, M.shape[1]):
                 val = M[i, j]
-                if val == 0: continue
+                # if val == 0: continue
                 params.update({f"m_{i}_{j}": val})
 
         td = mwlab.TouchstoneData(network=self, params=params, path=path)
