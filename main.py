@@ -38,493 +38,169 @@ import common
 from mwlab.transforms.s_transforms import S_Crop, S_Resample
 from mwlab.nn.scalers import MinMaxScaler
 from phase import PhaseLoadingExtractor
+from omegaconf import OmegaConf
 
 torch.set_float32_matmul_precision("medium")
 
+def build_base_path(filter_name: str):
+    base_path = f"filters/FilterData/{filter_name}/conf"
+    return base_path
 
-def online_correct():
-    def factors_from_preds(preds: dict, links: list, ref_tensor: torch.Tensor):
-        """
-        links: список пар (i, j) или объектов, из которых можно получить i,j
-        preds: dict где есть ключи "m_i_j" (и/или "m_j_i")
-        возвращает factors: torch.Tensor [n_links]
-        """
-        vals = []
-        for (i, j) in links:
-            k1 = f"m_{i}_{j}"
-            k2 = f"m_{j}_{i}"  # на всякий случай
-            if k1 in preds:
-                v = preds[k1]
-            elif k2 in preds:
-                v = preds[k2]
-            else:
-                # если отсутствует — можно 0, но лучше явно падать, чтобы не молча портить матрицу
-                v = torch.zeros((), device=ref_tensor.device, dtype=ref_tensor.dtype)
-            if not torch.is_tensor(v):
-                v = torch.tensor(v, device=ref_tensor.device, dtype=ref_tensor.dtype)
-            vals.append(v)
-        return torch.stack(vals, dim=0)  # [n_links]
-
-    configs = cfg.Configs.init_from_default("default.yml")
-    work_model = common.WorkModel(configs, is_inference=True)
-
-    codec = MWFilterTouchstoneCodec.from_dataset(ds=work_model.ds,
-                                                 keys_for_analysis=[f"m_{r}_{c}" for r, c in
-                                                                    work_model.orig_filter.coupling_matrix.links] + [
-                                                                       "Q"] + ["f0"] + ["bw"] + ["a11"] + ["a22"] + [
-                                                                       "b11"] + ["b22"])
-    codec = codec
-    work_model.setup(
-        model_name="resnet_with_correction",
-        model_cfg={"in_channels": len(codec.y_channels), "out_channels": len(codec.x_keys)},
-        dm_codec=codec
+def build_work_model(*config_paths: str | os.PathLike, is_inference: bool):
+    configs = cfg.Configs(*config_paths)
+    wm = common.WorkModel(configs=configs, is_inference=is_inference)
+    wm.setup(
+        model_name=configs.APP_CONFIG.model.model_name,
+        codec_type=configs.APP_CONFIG.model.codec,
     )
-    # inference_model = work_model_wide.inference(
-    #     "saved_models/EAMU4-KuIMUXT2-BPFC4/best-epoch=29-train_loss=0.23384-val_loss=0.25414-val_r2=0.88339-val_mse=0.00926-val_mae=0.05538-batch_size=32-base_dataset_size=100000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    # sch = torch.optim.lr_scheduler.StepLR(optimizer=optim, step_size=40, gamma=0.1)
+    return wm
+
+def load_model(*config_paths: str | os.PathLike):
+    wm = build_work_model(*config_paths, is_inference=True)
+    inf_model = wm.inference(wm.configs.MODEL_CHECKPOINT_PATH)
+    return wm, inf_model
+
+def load_cm_extractor(filter_name: str):
+    print(f"Загрузка cm_extractor")
+    base_path = build_base_path(filter_name)
+    return load_model(f"{base_path}/base.yml",
+                          f"{base_path}/models/cm_extractor.yml")
+
+def load_phase_freq_dep_extractor(filter_name: str):
+    print(f"Загрузка phase_freq_dep_extractor")
+    base_path = build_base_path(filter_name)
+    return load_model(f"{base_path}/base.yml",
+                          f"{base_path}/models/phase_freq_dep_extractor.yml")
+
+def load_phase_const_extractor(filter_name: str):
+    print(f"Загрузка phase_const_extractor")
+    base_path = build_base_path(filter_name)
+    return load_model(f"{base_path}/base.yml",
+                          f"{base_path}/models/phase_const_extractor.yml")
 
 
-    # Загружаем лучшую модель
-    # checkpoint_path="saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=12-val_loss=0.01266-train_loss=0.01224.ckpt",
-    # checkpoint_path="saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=49-train_loss=0.03379-val_loss=0.03352-val_r2=0.84208-val_acc=0.25946-val_mae=0.05526-batch_size=32-dataset_size=100000.ckpt",
-    # "saved_models/ERV-KuIMUXT1-BPFC1/best-epoch=22-train_loss=0.04863-val_loss=0.05762-val_r2=0.82785-val_mse=0.01366-val_mae=0.04395-batch_size=32-base_dataset_size=100000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt"
-    # inference_model = work_model.inference("saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=29-train_loss=0.04166-val_loss=0.04450-val_r2=0.92560-val_mse=0.00588-val_mae=0.03862-batch_size=32-base_dataset_size=1500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    # inference_model = work_model.inference("saved_models\\SCYA501-KuIMUXT5-BPFC3\\best-epoch=29-train_loss=0.03546-val_loss=0.03841-val_r2=0.94190-val_mse=0.00459-val_mae=0.03381-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    # inference_model = work_model.inference("saved_models\\EAMU4T1-BPFC2\\best-epoch=34-train_loss=0.02388-val_loss=0.02641-val_r2=0.96637-val_mse=0.00265-val_mae=0.02376-batch_size=32-base_dataset_size=600000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    # inference_model = work_model.inference("saved_models\\EAMU4T1-BPFC2\\best-epoch=25-train_loss=0.02530-val_loss=0.02793-val_r2=0.96251-val_mse=0.00296-val_mae=0.02496-batch_size=32-base_dataset_size=1000000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    # inference_model = work_model.inference(
-    #     "saved_models/EAMU4-KuIMUXT2-BPFC2/best-epoch=77-train_loss=0.13232-val_loss=0.28403-val_r2=0.76389-val_mse=0.01879-val_mae=0.06333-batch_size=32-base_dataset_size=100000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    # inference_model = work_model_wide.inference("saved_models/EAMU4-KuIMUXT2-BPFC4/best-epoch=28-train_loss=0.14318-val_loss=0.14503-val_r2=0.97508-val_mse=0.00196-val_mae=0.01912-batch_size=32-base_dataset_size=500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
-    inference_model = work_model.inference(configs.MODEL_CHECKPOINT_PATH)
+def train_model(*config_paths: str | os.PathLike, optimizer_cfg: dict|None=None, scheduler_cfg: dict|None=None, loss_fn: nn.Module|None=None):
+    wm = build_work_model(*config_paths, is_inference=False)
+    optimizer_cfg = optimizer_cfg or {"name": "AdamW", "lr": 9.4e-4, "weight_decay": 1e-5}
+    scheduler_cfg = scheduler_cfg or {"name": "StepLR", "step_size": 25, "gamma": 0.09}
+    loss_fn = loss_fn or CustomLosses("sqrt_mse_with_l1", weight_decay=1, weights=None)
 
-    tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
-    # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
-
-    fast_calc = FastMN2toSParamCalculation(matrix_order=work_model.orig_filter.coupling_matrix.matrix_order,
-                                           wlist=work_model.orig_filter.f_norm,
-                                           Q=work_model.orig_filter.Q,
-                                           fbw=work_model.orig_filter.fbw)
-    # loss = CustomLosses("log_cosh")
-    loss = nn.L1Loss()
-    codec_db = copy.deepcopy(codec)
-    codec_db.y_channels = ['S1_1.db', 'S2_1.db']
-    codec_mag = copy.deepcopy(codec)
-    codec_mag.y_channels = ['S1_1.mag', 'S2_1.mag']
-
-    # corr_model = MatrixCorrectionNet(m_dim=len(work_model.orig_filter.coupling_matrix.factors), s_shape=(3, 301), hidden_dim=512)
-    # corr_model = CorrectionNet(s_shape=(8, 301), m_dim=len(work_model.orig_filter.coupling_matrix.factors), hidden_dim=301)
-    # corr_model.train()
-    inference_model.eval()
-    total_err = 0
-    # inference_model = inference_model.to(device)
-    for param in inference_model.model.parameters():
-        param.requires_grad = False
-
-    for param in inference_model.model._main_model.fc.parameters():
-        param.requires_grad = True
-
-    for param in inference_model.model._correction_model.parameters():
-        param.requires_grad = True
-
-    params = [p for p in inference_model.parameters() if p.requires_grad]
-    # for param in corr_model.parameters():
-    #     params.append(param)
-    # optim = torch.optim.AdamW(params=inference_model.parameters(), lr=1e-5)
-    optim = torch.optim.AdamW(params=params, lr=0.0005370623202982373, weight_decay=1e-5)
-    sch = torch.optim.lr_scheduler.StepLR(optim, step_size=100, gamma=0.09)
-    phase_extractor = phase.PhaseLoadingExtractor(inference_model, work_model, work_model.orig_filter)
-    for i in range(0, 6):
-        # i = random.randint(0, len(tds))
-        start_time = time.time()
-        orig_fil = tds[i][1]
-        w = work_model.orig_filter.f_norm
-        res = phase_extractor.extract_all(orig_fil, w_norm=w, verbose=False)
-        ntw_de = res['ntw_deembedded']
-
-        pred_prms = inference_model.predict_x(ntw_de)
-        # stop_time = time.time()
-        # print(f"Predict time: {stop_time - start_time:.3f} sec")
-        pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms)
-        # optim_matrix = optimize_cm(pred_fil, orig_fil, pred_fil.f_norm, plot=False)
-        inference_model.plot_origin_vs_prediction(orig_fil, pred_fil, title=f'{i} Before correction')
-        keys = pred_prms.keys()
-        m_keys = list(keys)[:-7]
-        ts = TouchstoneData(ntw_de)
-        preds = pred_fil.coupling_matrix.factors.unsqueeze(0)
-        # preds = optim_matrix.factors.unsqueeze(0)
-        s = codec.encode(ts)[1].unsqueeze(0)
-        s_db = codec_db.encode(ts)[1].unsqueeze(0)
-        s_mag = codec_mag.encode(ts)[1].unsqueeze(0)
-        print(f"[{i}] Initial recover S-parameters loss: {loss(s_db, codec_db.encode(TouchstoneData(pred_fil))[1].unsqueeze(0))}")
-        err = 0
-        for j in range(50):
-            # m_factors = corr_model(s, preds)
-            x_pred = inference_model(s)
-            # print("x_pred grad:", x_pred.requires_grad)
-            if inference_model.scaler_out is not None:
-                x_pred = inference_model._apply_inverse(inference_model.scaler_out, x_pred)
-                # print("x_pred inverse grad:", x_pred.requires_grad)
-            preds = dict(zip(keys, x_pred.squeeze(0)))
-            m_factors = factors_from_preds(preds, pred_fil.coupling_matrix.links, x_pred).unsqueeze(0)
-            # print("m_factors grad:", m_factors.requires_grad)
-
-            M = CouplingMatrix.from_factors(m_factors, pred_fil.coupling_matrix.links,
-                                            pred_fil.coupling_matrix.matrix_order)
-            fast_calc.update_Q(preds['Q'])
-            _, s11_pred, s21_pred, s22_pred = fast_calc.RespM2(M, with_s22=True)
-
-            phi11 = preds['a11'] + preds['b22'] * w
-            phi22 = preds['a22'] + preds['b22'] * w
-            s11_corr = s11_pred*torch.exp(1j*phi11)
-            s22_corr = s22_pred*torch.exp(1j*phi22)
-            s21_corr = s21_pred*torch.exp(1j*0.5 * (phi11 + phi22))
-
-            s_corr = torch.stack([
-                s11_corr,
-                s21_corr,  # замените на S12, если у вас именно S1_2.db
-                # MWFilter.to_db(s21_pred),  # либо правильно распакуйте, если RespM2 возвращает все 4
-                # s22_corr,
-            ]).unsqueeze(0)  # [B, 4, L]
-
-            err = (loss(MWFilter.to_db(s_corr), s_db))
-            reg = max(abs(torch.abs(s_corr) - s_mag).flatten())*2
-            # err = max(abs(MWFilter.to_db(s_corr) - s_db).flatten())
-            optim.zero_grad()
-            (err + reg).backward()
-            optim.step()
-            # sch.step(j)
-            # print(f"Error: {err}")
-
-        with torch.no_grad():
-            # m_factors = corr_model(s, preds)
-            x_pred = inference_model(s)
-            if inference_model.scaler_out is not None:
-                x_pred = inference_model._apply_inverse(inference_model.scaler_out, x_pred)
-                # print("x_pred inverse grad:", x_pred.requires_grad)
-            preds = dict(zip(keys, x_pred.squeeze(0)))
-            m_factors = factors_from_preds(preds, pred_fil.coupling_matrix.links, x_pred).unsqueeze(0)
-
-            m_factors = m_factors.squeeze(0)
-            total_pred_prms = dict(zip(m_keys, m_factors))
-            # print(f"Origin parameters: {pred_prms}")
-            # print(f"Tuned parameters: {total_pred_prms}")
-            correct_pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, total_pred_prms)
-            inference_model.plot_origin_vs_prediction(orig_fil, correct_pred_fil, title=f' {i} After correction')
-        # correct_pred_fil.coupling_matrix.plot_matrix()
-        optim_matrix = optimize_cm(correct_pred_fil, orig_fil, phase_init=(pred_prms['a11'], pred_prms['a22'], pred_prms['b11'], pred_prms['b22']))
-        # optim_matrix.plot_matrix()
-        total_err += err.detach().item()
-        stop_time = time.time()
-        print(f"[{i}] Total error: {err.item()}. Tuning time: {stop_time - start_time}")
-    print(f"Mean error: {total_err/len(tds)}")
-
-
-def fine_tune_model(origin_preds, inference_model: nn.Module, target_input: MWFilter, work_model: WorkModel, device='cuda', epochs=10, lr=1e-4, iterations=5):
-    """
-    model: обученная модель
-    generate_nearby_dataset: функция, создающая датасет около предсказания
-    target_input: вход, вблизи которого хотим дообучить модель
-    """
-    configs = cfg.Configs.init_from_default("default.yml")
-    # 🔁 Сгенерировать небольшой датасет около предсказания
-    for i in range(iterations):
-        print(f"Iteration: {i}")
-        pred_prms = inference_model.predict_x(target_input)
-        pred_fil = work_model.create_filter_from_prediction(target_input, work_model.orig_filter, pred_prms)
-
-        sampler_configs = {
-            "pss_origin": PSShift(a11=pred_prms['a11'], a22=pred_prms['a22'], b11=pred_prms['b11'], b22=pred_prms['b22']),
-            "pss_shifts_delta": PSShift(a11=abs(pred_prms['a11']*0.01), a22=abs(pred_prms['a22']*0.01), b11=abs(pred_prms['b11']*0.01), b22=abs(origin_preds['b22']*0.01)),
-            # "cm_shifts_delta": CMShifts(self_coupling=1.8, mainline_coupling=0.3, cross_coupling=9e-2, parasitic_coupling=5e-3),
-            # "cm_shifts_delta": CMShifts(self_coupling=2.0, mainline_coupling=0.3, cross_coupling=5e-2, parasitic_coupling=5e-3),
-            "cm_shifts_delta": configs.APP_CONFIG.dataset.matrix_sampler_delta,
-            "samplers_size": 1000
-        }
-
-        samplers = CMTheoreticalDatasetGeneratorSamplers.create_samplers(pred_fil,
-                                                                         samplers_type=SamplerTypes.SAMPLER_SOBOL(
-                                                                             one_param=False),
-                                                                         **sampler_configs
-                                                                         )
-        ds_gen = CMTheoreticalDatasetGenerator(
-            path_to_save_dataset=os.path.join(configs.ENV_TUNE_DATASET_PATH, samplers.cms.type.name, f"{len(samplers.cms)}"),
-            backend_type='ram',
-            orig_filter=pred_fil,
-            filename="Dataset",
-            rewrite=True
-        )
-        ds_gen.generate(samplers)
-
-        ds = TouchstoneDataset(source=ds_gen.backend, in_memory=True)
-        # common.plot_distribution(ds, num_params=len(ds_gen.origin_filter.coupling_matrix.links))
-        # plt.show()
-        codec = MWFilterTouchstoneCodec.from_dataset(ds=ds,
-                                                     keys_for_analysis=[f"m_{r}_{c}" for r, c in
-                                                                        work_model.orig_filter.coupling_matrix.links] + [
-                                                                           "Q"] + ["f0"] + ["bw"] + ["a11"] + [
-                                                                           "a22"] + [
-                                                                           "b11"] + ["b22"])
-        dm = TouchstoneLDataModule(
-            source=ds_gen.backend,  # Путь к датасету
-            codec=codec,  # Кодек для преобразования TouchstoneData → (x, y)
-            batch_size=configs.BATCH_SIZE,  # Размер батча
-            val_ratio=0.2,  # Доля валидационного набора
-            test_ratio=0.01,  # Доля тестового набора
-            cache_size=0,
-            scaler_in=MinMaxScaler(dim=(0, 2), feature_range=(0, 1)),  # Скейлер для входных данных
-            scaler_out=MinMaxScaler(dim=0, feature_range=(-0.5, 0.5)),  # Скейлер для выходных данных
-            swap_xy=True,
-            num_workers=0,
-            # Параметры базового датасета:
-            base_ds_kwargs={
-                "in_memory": True
-            }
-        )
-        dm.setup("fit")
-
-        # model = common.get_model("resnet_with_correction", in_channels=len(codec.y_channels), out_channels=len(codec.x_keys))
-        # model = common.get_model("simple_opt", in_channels=len(codec.y_channels), out_channels=len(codec.x_keys))
-        inference_model = inference_model.to(device)
-        for param in inference_model.model.parameters():
-            param.required_grad = False
-        inference_model.model._main_model.fc.required_grad = True
-
-        # 🔧 Оптимизатор и функция потерь
-        trainer = L.Trainer(
-            deterministic=True,
-            max_epochs=epochs,  # Максимальное количество эпох обучения
-            accelerator="auto",  # Автоматический выбор устройства (CPU/GPU)
-            log_every_n_steps=100,  # Частота логирования в процессе обучения
-        )
-        # lit_model = common.train_model(
-        #     model,
-        #     work_model,
-        #     dm,
-        #     trainer,
-        #     CustomLosses("sqrt_mse_with_l1", weight_decay=1, weights=None),
-        #     # nn.MSELoss(),
-        #     optimizer_cfg={"name": "AdamW", "lr": 0.0009400000000000001, "weight_decay": 1e-5},
-        #     scheduler_cfg={"name": "StepLR", "step_size": 21, "gamma": 0.09},
-        # )
-        trainer.fit(inference_model, dm)
-        # inference_model.to('cpu')
-    return inference_model
-
-@torch.no_grad()
-def compute_relative_error(
-    model: torch.nn.Module,
-    dataloader: DataLoader,
-    device: torch.device,
-    eps: float = 1e-12,
-) -> float:
-    """
-    Compute mean relative L2 error over a dataset.
-
-    Relative error per sample:
-        ||y_pred - y_true||_2 / (||y_true||_2 + eps)
-
-    Parameters
-    ----------
-    model : torch.nn.Module
-        Trained model.
-    dataloader : DataLoader
-        DataLoader yielding (x, y_true).
-    device : torch.device
-        torch.device("cpu") or torch.device("cuda").
-    eps : float
-        Numerical stability constant.
-
-    Returns
-    -------
-    float
-        Mean relative error over the dataset.
-    """
-    model.eval()
-
-    rel_errors = []
-
-    for x, y_true in dataloader:
-        x = x.to(device)
-        y_true = y_true.to(device)
-
-        y_pred = model(x)
-        y_pred = model._apply_inverse(model.scaler_out, y_pred)
-
-        """
-        Relative L1 error per sample.
-
-        y_pred, y_true: shape (batch_size, n_params)
-        returns: shape (batch_size,)
-        """
-        num = torch.sum(torch.abs(y_pred - y_true), dim=1)
-        den = torch.sum(torch.abs(y_true), dim=1) + eps
-        rel_error = num / den
-
-        # diff_norm = torch.linalg.norm(y_pred - y_true, dim=1)
-        # true_norm = torch.linalg.norm(y_true, dim=1)
-        #
-        # rel_error = diff_norm / (true_norm + eps)
-        rel_errors.append(rel_error)
-
-    rel_errors = torch.cat(rel_errors)
-    return rel_errors.mean().item()
-
-
-def evaluate_datasets(
-    model: torch.nn.Module,
-    loaders: Dict[str, DataLoader],
-    device: torch.device,
-) -> Dict[str, float]:
-    """
-    Compute relative error for multiple datasets.
-
-    loaders = {
-        "train": train_loader,
-        "val":   val_loader,
-        "test":  test_loader
-    }
-    """
-    results = {}
-
-    for split, loader in loaders.items():
-        error = compute_relative_error(
-            model=model,
-            dataloader=loader,
-            device=device,
-        )
-        results[split] = error
-
-    return results
-
-
-def load_phase_extractor_coarse(manifest_path: str):
-    configs = cfg.Configs.init_from_default(manifest_path)
-    io_phase_coarse = cm_extract_api.ModelIOSpec(
-        y_channels=['S1_1.real', 'S1_2.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S1_2.imag', 'S2_1.imag',
-                    'S2_2.imag'],
-        x_keys=["b11", "b22"],
+    lit_model = wm.train(
+        optimizer_cfg=optimizer_cfg,
+        scheduler_cfg=scheduler_cfg,
+        loss_fn=loss_fn,
+        strategy_type=wm.configs.APP_CONFIG.train.strategy_type,
     )
+    return wm, lit_model
 
-    api_phase_coarse = cm_extract_api.MWFilterAPI(
-        manifest_path=os.path.join(configs.APP_CONFIG.base_dir, "phase_extractor_coarse_manifest.yml"),
-        io=io_phase_coarse,
-        calibration_n=5,
-    )
-    api_phase_coarse.load_model(configs.MODEL_CHECKPOINT_PATH)
-    return configs, io_phase_coarse, api_phase_coarse
+def train_cm_extractor(filter_name: str):
+    print(f"Обучение cm_extractor")
+    base_path = build_base_path(filter_name)
+    return train_model(f"{base_path}/base.yml",
+                          f"{base_path}/models/cm_extractor.yml")
 
+def train_phase_freq_dep_extractor(filter_name: str):
+    print(f"Обучение phase_freq_dep_extractor")
+    base_path = build_base_path(filter_name)
+    return train_model(f"{base_path}/base.yml",
+                          f"{base_path}/models/phase_freq_dep_extractor.yml")
 
-def load_phase_extractor_fine(manifest_path: str):
-    configs = cfg.Configs.init_from_default(manifest_path)
-    io_phase_coarse = cm_extract_api.ModelIOSpec(
-        y_channels=['S1_1.real', 'S1_1.imag', 'S1_1.deg', 'S1_1.db', 'S2_2.real', 'S2_2.imag', 'S2_2.deg', 'S2_2.db'],
-        # y_channels=['S1_1.deg', 'S1_2.deg', 'S2_1.deg', 'S2_2.deg'],
-        x_keys=["a11", "a22"],
-    )
+def train_phase_const_extractor(filter_name: str):
+    print(f"Обучение phase_const_extractor")
+    base_path = build_base_path(filter_name)
+    return train_model(f"{base_path}/base.yml",
+                          f"{base_path}/models/phase_const_extractor.yml")
 
-    api_phase_coarse = cm_extract_api.MWFilterAPI(
-        manifest_path=os.path.join(configs.APP_CONFIG.base_dir, "phase_extractor_fine_manifest.yml"),
-        io=io_phase_coarse,
-        calibration_n=5,
-    )
-    api_phase_coarse.load_model(configs.MODEL_CHECKPOINT_PATH)
-    return configs, io_phase_coarse, api_phase_coarse
 
 
 def main():
+    FILTER_NAME = "EAMU4-KuIMUXT2-BPFC4"
     # 'S1_1.real', 'S1_2.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S1_2.imag', 'S2_1.imag', 'S2_2.imag'
     # lit_model = cm_extract_api.train_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
 
-    configs_coarse, io_phase_coarse, api_phase_coarse = load_phase_extractor_coarse("defaults_cfg/phase_extractor_coarse_default.yml")
-    configs_fine, io_phase_fine, api_phase_fine = load_phase_extractor_fine("defaults_cfg/phase_extractor_fine_default.yml")
+    # train_phase_freq_dep_extractor(FILTER_NAME)
+    # train_phase_const_extractor(FILTER_NAME)
 
-    # configs = cfg.Configs.init_from_default("defaults_cfg/phase_extractor_fine_default.yml")
-    # io_phase_fine = cm_extract_api.ModelIOSpec(
-    #     y_channels=['S1_1.real', 'S1_1.imag', 'S1_1.deg', 'S1_1.db', 'S2_2.real', 'S2_2.imag', 'S2_2.deg', 'S2_2.db'],
-    #     x_keys=["a11", "a22"],
-    # )
-    #
-    # api_phase_fine = cm_extract_api.MWFilterAPI(
-    #     manifest_path=os.path.join(configs.APP_CONFIG.base_dir, "phase_extractor_fine_manifest.yml"),
-    #     io=io_phase_fine,
-    #     calibration_n=5,
-    # )
-    # api_phase_fine.train_model()
-
-
-    inference_model_phase_coarse = api_phase_coarse.inference_model
-    inference_model_phase_fine = api_phase_fine.inference_model
+    wm_phase_const, inf_model_const = load_phase_const_extractor(FILTER_NAME)
+    wm_phase_freq_dep, inf_model_freq_dep = load_phase_freq_dep_extractor(FILTER_NAME)
+    wm_cm, inf_cm = load_cm_extractor(FILTER_NAME)
 
     # tds = TouchstoneDataset(f"filters/FilterData/{configs_coarse.FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
-    tds = TouchstoneDataset(f"filters/FilterData/{configs_fine.FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
+    tds = TouchstoneDataset(f"filters/FilterData/{FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
     # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/19.02.26", s_tf=S_Resample(301))
-    cst_tds = TouchstoneDataset(f"filters/FilterData/{configs_coarse.FILTER_NAME}/measure/cst",
+    cst_tds = TouchstoneDataset(f"filters/FilterData/{FILTER_NAME}/measure/cst",
                                 s_tf=S_Resample(301))
     # TODO: РЕФАКТОРИНГ МЕТОДОВ WORK_MODEL!!!!!
-    phase_extractor = phase.PhaseLoadingExtractor(inference_model_phase_coarse, api_phase_coarse.work_model, api_phase_coarse.work_model.orig_filter)
-
-    codec = api_phase_coarse.codec
-    loss = nn.L1Loss()
-    codec_db = copy.deepcopy(codec)
-    codec_db.y_channels = ['S1_1.db', 'S2_1.db', 'S2_2.db']
-
-    losses = []
+    # phase_extractor = phase.PhaseLoadingExtractor(inference_model_phase_coarse, api_phase_coarse.work_model, api_phase_coarse.work_model.orig_filter)
+    #
+    # codec = api_phase_coarse.codec
+    # loss = nn.L1Loss()
+    # codec_db = copy.deepcopy(codec)
+    # codec_db.y_channels = ['S1_1.db', 'S2_1.db', 'S2_2.db']
+    #
+    # losses = []
 
     # for i in range(0, 5):
     #     inference_model_phase_coarse.predict_for(api_phase_fine.work_model.dm, i)
 
     for i in range(0, len(cst_tds)):
-        w = api_phase_coarse.work_model.orig_filter.f_norm
+        w = wm_phase_const.orig_filter.f_norm
         orig_fil = tds[i][1]
         cst_fil = cst_tds[i][1]
 
         # Тестовое добавление фазового сдвига
         orig_fil = PhaseLoadingExtractor.add_phase_from_coeffs(orig_fil, a11=0, a22=0, b11=0, b22=0, w=w)
 
-        plt.figure(figsize=(5, 3))
-        orig_fil.plot_s_deg(m=0, n=0, label='S11 phase')
-        plt.title("Смещенная на pi фаза")
+        # plt.figure(figsize=(5, 3))
+        # orig_fil.plot_s_deg(m=0, n=0, label='S11 phase')
+        # plt.title("Смещенная на pi фаза")
 
         orig_fil_to_nn = copy.deepcopy(orig_fil)
-        # orig_fil_to_nn.s[:, 1, 0] *= -1
-        # orig_fil_to_nn.s[:, 0, 1] *= -1
+        orig_fil_to_nn.s[:, 1, 0] *= -1
+        orig_fil_to_nn.s[:, 0, 1] *= -1
 
-        pred_prms = inference_model_phase_coarse.predict_x(orig_fil_to_nn)
+        pred_prms = inf_model_freq_dep.predict_x(orig_fil_to_nn)
+        total_results = {'a11' : 0, 'a22': 0, 'b11': 0, 'b22': 0}
+        total_results['b11'] += pred_prms['b11']
+        total_results['b22'] += pred_prms['b22']
         pred_prms.update({'a11':0, 'a22':0})
         net_de = PhaseLoadingExtractor.remove_phase_from_coeffs(orig_fil_to_nn, w, **pred_prms)
         # print(f"[{i}] Предсказание частотно-зависимой составляющей: {pred_prms}")
         for _ in range(0, 10):
-            pred_prms = inference_model_phase_coarse.predict_x(net_de)
+            pred_prms = inf_model_freq_dep.predict_x(net_de)
+            total_results['b11'] += pred_prms['b11']
+            total_results['b22'] += pred_prms['b22']
             pred_prms.update({'a11': 0, 'a22': 0})
             net_de = PhaseLoadingExtractor.remove_phase_from_coeffs(orig_fil_to_nn, w, **pred_prms)
             # print(f"[{i}] Предсказание частотно-зависимой составляющей: {pred_prms}")
+        # print(f"[{i}] Предсказание частотно-зависимой составляющей: {total_results}")
 
-        tuned_prms = inference_model_phase_fine.predict_x(net_de)
-        tuned_prms.update({'b11': 0, 'b22': 0})
-        total_results = {'a11': tuned_prms['a11'], 'a22': tuned_prms['a22']}
-        print(f"[{i}] Предсказание постоянной составляющей: {tuned_prms}")
-        net_de = PhaseLoadingExtractor.remove_phase_from_coeffs(net_de, w, **tuned_prms)
+        pred_prms = inf_model_const.predict_x(net_de)
+        pred_prms.update({'b11': 0, 'b22': 0})
+        total_results['a11'] += pred_prms['a11']
+        total_results['a22'] += pred_prms['a22']
+        # print(f"[{i}] Предсказание постоянной составляющей: {pred_prms}")
+        # net_de = PhaseLoadingExtractor.remove_phase_from_coeffs(net_de, w, **pred_prms)
         for _ in range(0, 10):
-            tuned_prms = inference_model_phase_fine.predict_x(net_de)
-            tuned_prms.update({'b11': 0, 'b22': 0})
+            pred_prms = inf_model_const.predict_x(net_de)
+            total_results['a11'] += pred_prms['a11']
+            total_results['a22'] += pred_prms['a22']
+            pred_prms.update({'b11': 0, 'b22': 0})
             # total_results['a11'] += tuned_prms['a11']
             # total_results['a22'] += tuned_prms['a22']
-            net_de = PhaseLoadingExtractor.remove_phase_from_coeffs(net_de, w, **tuned_prms)
-            print(f"[{i}] Предсказание постоянной составляющей: {tuned_prms}")
+            net_de = PhaseLoadingExtractor.remove_phase_from_coeffs(net_de, w, **pred_prms)
+        print(f"[{i}] Предсказание фазовых коэффициентов: {total_results}")
 
         # tuned_prms['b11'] += pred_prms['b11']
         # tuned_prms['b22'] += pred_prms['b22']
         # print(f"Итоговые параметры: {tuned_prms}")
 
-        # net_de.s[:, 1, 0] *= -1
-        # net_de.s[:, 0, 1] *= -1
-
-        plt.figure(figsize=(5, 3))
-        cst_fil.plot_s_re(m=0, n=0, label='S11 Re CST')
-        cst_fil.plot_s_im(m=0, n=0, label='S11 Im CST')
-        net_de.plot_s_re(m=0, n=0, label='S11 Re corr', ls=':')
-        net_de.plot_s_im(m=0, n=0, label='S11 Im corr', ls=':')
-        plt.title(tds.backend.paths[i].parts[-1])
+        # plt.figure(figsize=(5, 3))
+        # cst_fil.plot_s_re(m=0, n=0, label='S11 Re CST')
+        # cst_fil.plot_s_im(m=0, n=0, label='S11 Im CST')
+        # net_de.plot_s_re(m=0, n=0, label='S11 Re corr', ls=':')
+        # net_de.plot_s_im(m=0, n=0, label='S11 Im corr', ls=':')
+        # plt.title(tds.backend.paths[i].parts[-1])
 
         # plt.figure(figsize=(5, 3))
         # cst_fil.plot_s_re(m=1, n=0, label='S21 Re CST')
@@ -572,11 +248,11 @@ def main():
         # s_db = codec_db.encode(ts)[1].unsqueeze(0)
         #
         # # # # start_time = time.time()
-        # pred_prms = inference_model.predict_x(ntw_de)
+        pred_prms = inf_cm.predict_x(net_de)
         # # # stop_time = time.time()
         # # # print(f"Predict time: {stop_time - start_time:.3f} sec")
-        # print(f"Предсказанные параметры: {pred_prms}")
-        # pred_fil = work_model.create_filter_from_prediction(orig_fil, work_model.orig_filter, pred_prms)
+        print(f"Предсказанные параметры: {pred_prms}")
+        pred_fil = wm_cm.create_filter_from_prediction(orig_fil, wm_cm.orig_filter, pred_prms)
         # # pred_fil.coupling_matrix.plot_matrix()
         # l = loss(s_db, codec_db.encode(TouchstoneData(pred_fil))[1].unsqueeze(0))
         # losses.append(l)
@@ -632,7 +308,7 @@ def main():
         # # pred_fil.plot_s_deg(m=0, n=0, label='Phase S11 predict')
         # # plt.title(tds.backend.paths[i].parts[-1])
         #
-        # inference_model.plot_origin_vs_prediction(orig_fil, pred_fil, title=f"Origin tune: {tds.backend.paths[i].parts[-1]}")
+        inf_cm.plot_origin_vs_prediction(orig_fil, pred_fil, title=f"Origin tune: {tds.backend.paths[i].parts[-1]}")
         # # fine_tuned_model.plot_origin_vs_prediction(orig_fil, tuned_fil, title=f"Fine tune: {tds.backend.paths[i].parts[-1]}")
         #
         # optim_filter, phase_opt = optimize_cm(pred_fil, orig_fil, phase_init=(a11_final, a22_final, b11_final, b22_final))

@@ -7,6 +7,7 @@ from torch import nn
 from filters.codecs import MWFilterTouchstoneCodec
 from filters.mwfilter_lightning import MWFilterBaseLMWithMetrics
 from filters.mwfilter_lightning.callbacks import BaseCallbackSet, SaflySaveCheckpoint, ModelCheckpoint
+from filters.mwfilter_lightning.mwfilter_base_lm import MWFilterBaseLMWithMetricsPhaseConst, MWFilterBaseLMWithMetricsPhaseFreqDep
 from models import CorrectionNet
 from mwlab import TouchstoneDataset, TouchstoneDatasetAnalyzer, TouchstoneLDataModule, TouchstoneCodec
 from mwlab.nn import MinMaxScaler
@@ -55,6 +56,8 @@ def create_origin_filter(configs: cfg.Configs, f_unit=None, resample_scale=301):
 
 def create_sampler(orig_filter: MWFilter, configs: cfg.Configs, is_inference: bool, with_one_param: bool=False):
     dataset_size = configs.APP_CONFIG.dataset.size.train if not is_inference else configs.APP_CONFIG.dataset.size.infer
+
+    print(f"Shifts: {configs.APP_CONFIG.dataset.pss_sampler_delta}, {configs.APP_CONFIG.dataset.matrix_sampler_delta}")
 
     sampler_configs = {
         "pss_origin": configs.APP_CONFIG.dataset.pss_origin,
@@ -300,8 +303,18 @@ def train_model(model: nn.Module, work_model, dm: TouchstoneLDataModule,
                 loss_fn,
                 strategy_type:str="standard",
                 optimizer_cfg:dict={"name": "AdamW", "lr": 0.0005370623202982373, "weight_decay": 1e-5},
-                scheduler_cfg:dict={"name": "StepLR", "step_size": 21, "gamma": 0.01}):
-    lit_model = MWFilterBaseLMWithMetrics(
+                scheduler_cfg:dict={"name": "StepLR", "step_size": 21, "gamma": 0.01},):
+    model_type = work_model.model_type
+    if model_type == "cm":
+        model_class = MWFilterBaseLMWithMetricsCM
+    elif model_type == "phase_const":
+        model_class = MWFilterBaseLMWithMetricsPhaseConst
+    elif model_type == "phase_freq_dep":
+        model_class = MWFilterBaseLMWithMetricsPhaseFreqDep
+    else:
+        raise ValueError(f"Unknown model type: {work_model.model_type}")
+
+    lit_model = model_class(
         work_model=work_model,
         model=model,  # Наша нейросетевая модель
         swap_xy=True,
@@ -340,6 +353,44 @@ def check_metrics(trainer: L.Trainer, model: L.LightningModule, dm: TouchstoneLD
     test_metrics = trainer.test(model, dataloaders=dm.test_dataloader())
     return {"train": train_metrics, "val": val_metrics, "test": test_metrics}
 
+def build_phase_const_codec(work_model):
+    codec = MWFilterTouchstoneCodec.from_dataset(
+        ds=work_model.ds,
+        keys_for_analysis=["a11", "a22"],
+    )
+    codec.y_channels = ['S1_1.real', 'S1_1.imag', 'S1_1.deg', 'S1_1.db', 'S2_2.real', 'S2_2.imag', 'S2_2.deg', 'S2_2.db']
+    return codec
+
+def build_phase_freq_dep_codec(work_model):
+    codec = MWFilterTouchstoneCodec.from_dataset(
+        ds=work_model.ds,
+        keys_for_analysis=["b11", "b22"],
+    )
+    codec.y_channels = ['S1_1.real', 'S1_2.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S1_2.imag', 'S2_1.imag', 'S2_2.imag']
+    return codec
+
+def build_cm_codec(work_model):
+    codec = MWFilterTouchstoneCodec.from_dataset(
+        ds=work_model.ds,
+        keys_for_analysis=
+            [f"m_{r}_{c}" for r, c in work_model.orig_filter.coupling_matrix.links]
+            + ["Q", "f0", "bw", "a11", "a22", "b11", "b22"],
+    )
+    codec.y_channels = ['S1_1.real', 'S1_2.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S1_2.imag', 'S2_1.imag', 'S2_2.imag']
+    return codec
+
+CODEC_BUILDERS = {
+    "phase_const": build_phase_const_codec,
+    "phase_freq_dep": build_phase_freq_dep_codec,
+    "cm": build_cm_codec,
+}
+
+def create_codec(codec_name: str, work_model):
+    try:
+        return CODEC_BUILDERS[codec_name](work_model)
+    except KeyError as e:
+        raise ValueError(f"Unknown codec_name: {codec_name}") from e
+
 
 class WorkModel:
     BEST_MODEL_FILENAME_SUFFIX = "-batch_size={batch_size}-train_dataset_size={train_dataset_size}-sampler={sampler_type}-cm_shifts={self_couplings};{mainline_couplings};{cross_couplings}-ps_origin={a11_o};{a22_o};{b11_o};{b22_o}-ps_shifts={a11_s};{a22_s};{b11_s};{b22_s}"
@@ -366,6 +417,7 @@ class WorkModel:
         # self.codec = MWFilterTouchstoneCodec.from_dataset(ds=self.ds,
         #                                          keys_for_analysis=[f"m_{r}_{c}" for r, c in self.orig_filter.coupling_matrix.links])
         self.model_name = None
+        self.model_type = None
         self.meta = None
         self.codec = None
         self.model = None
@@ -411,14 +463,17 @@ class WorkModel:
         )
         return trainer
 
-    def setup(self, model_name: str, model_cfg: dict, dm_codec: MWFilterTouchstoneCodec):
+    def setup(self, model_name: str, codec_type: str):
         self.model_name = model_name
-        self.model = get_model(model_name, **model_cfg)
         # self.model = self.inference("saved_models\\EAMU4-KuIMUXT3-BPFC1\\best-epoch=29-train_loss=0.04166-val_loss=0.04450-val_r2=0.92560-val_mse=0.00588-val_mae=0.03862-batch_size=32-base_dataset_size=1500000-sampler=SamplerTypes.SAMPLER_SOBOL.ckpt")
         # self.model = models.ModelWithCorrectionAndSparameters(
         #     main_model=self.model,
         #     correction_model=CorrectionNet(s_shape=(8, 301), m_dim=len(dm_codec.x_keys))
         # )
+        self.model_type = codec_type
+        dm_codec = create_codec(codec_type, self)
+        model_cfg = {"in_channels": len(dm_codec.y_channels), "out_channels": len(dm_codec.x_keys),}
+        self.model = get_model(model_name, **model_cfg)
         print(dm_codec)
         print("Каналы Y:", dm_codec.y_channels)
         print("Каналы X:", dm_codec.x_keys)

@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 
 import yaml
+from omegaconf import OmegaConf, DictConfig
 
 
 # =========
@@ -66,11 +67,14 @@ class DatasetConfig:
 
 @dataclass
 class TrainConfig:
+    strategy_type: str
     max_epochs: int
 
 
 @dataclass
 class ModelConfig:
+    model_name: str # название модели
+    codec: str # тип кодека
     checkpoint: str  # путь внутри архива/каталога
 
 
@@ -97,59 +101,128 @@ class AppConfig:
 
     base_dir: Path  # добавляем поле, чтобы потом легко получать ENV_* пути
 
+# твои dataclass'ы:
+# MetaConfig, FilterConfig, PathsConfig, MatrixSamplerConfig,
+# PssSampler, DatasetSizeConfig, DatasetConfig,
+# TrainConfig, ModelConfig, InferenceConfig, AppConfig
+
 
 class Configs:
-    def __init__(self, manifest_path: str | os.PathLike):
-        # Дополнительно: путь к чекпоинту модели (если нужно где-то использовать)
+    def __init__(self, *config_paths: str | os.PathLike):
+        """
+        Можно передавать:
+            Configs("base.yml")
+            Configs("base.yml", "datasets/cm.yml", "models/cm.yml")
+        """
+        if not config_paths:
+            raise ValueError("At least one config path must be provided")
+
         self.INFERENCE_DEVICE: str | None = None
-        self.APP_CONFIG: AppConfig = self.load_app_configs(manifest_path)
+
+        self._config_paths = [Path(p).resolve() for p in config_paths]
+        self._merged_cfg: DictConfig = self.load_merged_configs(*self._config_paths)
+        self.APP_CONFIG: AppConfig = self._build_app_config(self._merged_cfg, self._config_paths[0])
 
     @classmethod
-    def init_from_default(cls, default_path: str | os.PathLike):
-        manifest_path = cls._get_manifest_path_from_default(default_path)
-        return cls(manifest_path)
+    def from_files(cls, *config_paths: str | os.PathLike) -> "Configs":
+        return cls(*config_paths)
+
+    @classmethod
+    def init_from_default(cls, default_path: str | os.PathLike) -> "Configs":
+        """
+        Оставляем совместимость со старой схемой.
+        default_path может указывать на yaml, в котором лежит список/путь до нужных конфигов.
+        """
+        config_paths = cls._get_config_paths_from_default(default_path)
+        return cls(*config_paths)
 
     @staticmethod
-    def _get_manifest_path_from_default(manifest_path: os.PathLike | str) -> str | os.PathLike:
-        manifest_path = Path(manifest_path).resolve()
+    def _get_config_paths_from_default(default_path: os.PathLike | str) -> list[str | os.PathLike]:
+        """
+        Вариант 1:
+            default.yml содержит:
+            paths:
+              manifest: manifest.yml
 
-        if not manifest_path.exists():
-            raise FileNotFoundError(f"Manifest file not found: {manifest_path}")
+        Вариант 2:
+            default.yml содержит:
+            configs:
+              - conf/base.yml
+              - conf/datasets/cm_default.yml
+              - conf/models/cm_extract.yml
+        """
+        default_path = Path(default_path).resolve()
 
-        with manifest_path.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+        if not default_path.exists():
+            raise FileNotFoundError(f"Default config file not found: {default_path}")
 
-        # manifest_path = str(manifest_path.parent / data["paths"]["manifest"])
-        manifest_path = data["paths"]["manifest"]
-        return manifest_path
+        cfg = OmegaConf.load(default_path)
+        data = OmegaConf.to_container(cfg, resolve=True)
 
+        # новая схема: список файлов
+        if "configs" in data:
+            result = []
+            for p in data["configs"]:
+                p = Path(p)
+                if not p.is_absolute():
+                    p = (default_path.parent / p).resolve()
+                result.append(p)
+            return result
+
+        # старая схема: один manifest
+        if "paths" in data and "manifest" in data["paths"]:
+            manifest_path = Path(data["paths"]["manifest"])
+            if not manifest_path.is_absolute():
+                manifest_path = (default_path.parent / manifest_path).resolve()
+            return [manifest_path]
+
+        raise ValueError(
+            f"Unsupported default config format in {default_path}. "
+            f"Expected either 'configs' list or 'paths.manifest'."
+        )
 
     @staticmethod
-    def load_app_configs(manifest_path: os.PathLike | str) -> AppConfig:
-        manifest_path = Path(manifest_path).resolve()
+    def load_merged_configs(*config_paths: str | os.PathLike) -> DictConfig:
+        cfgs = []
 
-        if not manifest_path.exists():
-            raise FileNotFoundError(f"Manifest file not found: {manifest_path}")
+        for p in config_paths:
+            path = Path(p).resolve()
+            if not path.exists():
+                raise FileNotFoundError(f"Config file not found: {path}")
+            cfgs.append(OmegaConf.load(path))
 
-        with manifest_path.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+        merged = OmegaConf.merge(*cfgs)
+        return merged
 
-        # version = data.get("version", 1)
-        # if version != 1:
-        #     raise ValueError(f"Unsupported manifest version: {version}")
+    @staticmethod
+    def _build_app_config(cfg: DictConfig, first_config_path: Path) -> AppConfig:
+        """
+        first_config_path нужен для определения base_dir.
+        Обычно это base.yml внутри директории фильтра.
+        """
+        data = OmegaConf.to_container(cfg, resolve=True)
 
-        # Корневая директория фильтра — там же лежит manifest.yml
-        base_dir = manifest_path.parent
+        # базовая директория фильтра:
+        # предполагаем, что первый конфиг лежит в:
+        # FilterData/<filter_name>/conf/base.yml
+        #
+        # Тогда base_dir = FilterData/<filter_name>
+        #
+        # Если у тебя конфиги лежат прямо в корне фильтра, можно поменять логику на .parent
+        if first_config_path.parent.name == "conf":
+            base_dir = first_config_path.parent.parent
+        else:
+            base_dir = first_config_path.parent
 
         meta_cfg = MetaConfig(**data["meta"])
         filter_cfg = FilterConfig(**data["filter"])
         paths_cfg = PathsConfig(**data["paths"])
-        dataset_section = data["dataset"]
 
+        dataset_section = data["dataset"]
         matrix_sampler_cfg = MatrixSamplerConfig(**dataset_section["matrix_sampler_delta"])
         pss_origin_cfg = PssSampler(**dataset_section["pss_origin"])
         pss_sampler_cfg = PssSampler(**dataset_section["pss_sampler_delta"])
-        dataset_size_cfg = DatasetSizeConfig(**dataset_section['size'])
+        dataset_size_cfg = DatasetSizeConfig(**dataset_section["size"])
 
         dataset_cfg = DatasetConfig(
             size=dataset_size_cfg,
@@ -159,12 +232,11 @@ class Configs:
             pss_sampler_delta=pss_sampler_cfg,
         )
 
-        train_cfg = TrainConfig(**data['train'])
+        train_cfg = TrainConfig(**data["train"])
         model_cfg = ModelConfig(**data["model"])
         inference_cfg = InferenceConfig(**data["inference"])
 
         return AppConfig(
-            # version=version,
             meta=meta_cfg,
             filter=filter_cfg,
             paths=paths_cfg,
@@ -174,6 +246,10 @@ class Configs:
             inference=inference_cfg,
             base_dir=base_dir,
         )
+
+    @property
+    def RAW_CONFIG(self) -> DictConfig:
+        return self._merged_cfg
 
     @property
     def F_START_MHZ(self):
@@ -187,10 +263,6 @@ class Configs:
     def BATCH_SIZE(self):
         return self.APP_CONFIG.inference.batch_size
 
-    # @property
-    # def BASE_DATASET_SIZE(self):
-    #     return self.APP_CONFIG.dataset.size
-
     @property
     def TRAIN_DATASET_SIZE(self):
         return self.APP_CONFIG.dataset.size.train
@@ -201,7 +273,7 @@ class Configs:
 
     @property
     def FILTER_NAME(self):
-        return  self.APP_CONFIG.filter.name
+        return self.APP_CONFIG.filter.name
 
     @property
     def ENV_DEFAULT_FILTER_PATH(self):
@@ -225,4 +297,8 @@ class Configs:
 
     @property
     def MODEL_CHECKPOINT_PATH(self):
-        return str(self.APP_CONFIG.base_dir / self.APP_CONFIG.paths.saved_models / self.APP_CONFIG.model.checkpoint)
+        return str(
+            self.APP_CONFIG.base_dir
+            / self.APP_CONFIG.paths.saved_models
+            / self.APP_CONFIG.model.checkpoint
+        )

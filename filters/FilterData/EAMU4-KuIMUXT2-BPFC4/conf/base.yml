@@ -1,0 +1,52 @@
+version: 1
+
+meta:
+  author: "Ilya Burlakov"
+
+filter:
+  name: "EAMU4-KuIMUXT2-BPFC4"
+  f_start_mhz: 12695
+  f_stop_mhz: 12755
+
+paths:
+  datasets_data: "datasets_data"
+  origins_data: "origins_data"
+  tune_data: "tune_data"
+  saved_models: "saved_models"
+
+dataset:
+  sampler_type: "sobol"
+
+  size:
+    train: 100000
+    infer: 1000
+
+  matrix_sampler_delta:
+    self_coupling: 0.3
+    mainline_coupling: 0.05
+    cross_coupling: 0.001
+    parasitic_coupling: 0
+    absolute: true
+
+  pss_origin:
+    a11: 0
+    a22: 0
+    b11: 0
+    b22: 0
+
+  pss_sampler_delta:
+    a11: 0.1
+    a22: 0.1
+    b11: 0.1
+    b22: 0.1
+
+model:
+  model_name: "resnet_with_correction"
+
+train:
+  strategy_type: "standard"  # "standard" or "two stage"
+  max_epochs: 30
+
+inference:
+  batch_size: 32
+  device: "auto"
