@@ -114,7 +114,7 @@ def train_phase_const_extractor(filter_name: str):
 
 
 def main():
-    FILTER_NAME = "EAMU4-KuIMUXT2-BPFC4"
+    FILTER_NAME = "EAMU4-KuIMUXT2-BPFC2"
     # 'S1_1.real', 'S1_2.real', 'S2_1.real', 'S2_2.real', 'S1_1.imag', 'S1_2.imag', 'S2_1.imag', 'S2_2.imag'
     # lit_model = cm_extract_api.train_model(os.path.join(configs.APP_CONFIG.base_dir, "manifest.yml"))
 
@@ -125,8 +125,8 @@ def main():
     wm_phase_freq_dep, inf_model_freq_dep = load_phase_freq_dep_extractor(FILTER_NAME)
     wm_cm, inf_cm = load_cm_extractor(FILTER_NAME)
 
-    # tds = TouchstoneDataset(f"filters/FilterData/{configs_coarse.FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
-    tds = TouchstoneDataset(f"filters/FilterData/{FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
+    tds = TouchstoneDataset(f"filters/FilterData/{FILTER_NAME}/measure/narrowband", s_tf=S_Resample(301))
+    # tds = TouchstoneDataset(f"filters/FilterData/{FILTER_NAME}/measure/24.10.25/non-shifted", s_tf=S_Resample(301))
     # tds = TouchstoneDataset(f"filters/FilterData/{configs.FILTER_NAME}/measure/19.02.26", s_tf=S_Resample(301))
     cst_tds = TouchstoneDataset(f"filters/FilterData/{FILTER_NAME}/measure/cst",
                                 s_tf=S_Resample(301))
@@ -143,10 +143,10 @@ def main():
     # for i in range(0, 5):
     #     inference_model_phase_coarse.predict_for(api_phase_fine.work_model.dm, i)
 
-    for i in range(0, len(cst_tds)):
+    for i in range(0, len(tds)):
         w = wm_phase_const.orig_filter.f_norm
         orig_fil = tds[i][1]
-        cst_fil = cst_tds[i][1]
+        # cst_fil = cst_tds[i][1]
 
         # Тестовое добавление фазового сдвига
         orig_fil = PhaseLoadingExtractor.add_phase_from_coeffs(orig_fil, a11=0, a22=0, b11=0, b22=0, w=w)

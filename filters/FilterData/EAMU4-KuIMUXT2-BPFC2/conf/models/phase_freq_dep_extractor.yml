@@ -1,0 +1,23 @@
+paths:
+  datasets_data: "datasets_data/phase_freq_dep_extractor"
+  saved_models: "saved_models/phase_freq_dep_extractor"
+
+dataset:
+  matrix_sampler_delta:
+    self_coupling: 0.7
+    mainline_coupling: 0.1
+    cross_coupling: 0.005
+    parasitic_coupling: 0
+    absolute: true  # true - absolute values, false - % from origin values
+  pss_sampler_delta:
+    a11: 0.01
+    a22: 0.01
+    b11: 1.57
+    b22: 1.57
+  size:
+    train: 10000
+    infer: 1000
+
+model:
+  codec: "phase_freq_dep"
+  checkpoint: "best-epoch=27-train_loss=0.11260-val_loss=0.10351-val_r2=0.99775-val_mse=0.00018-val_mae=0.01049-batch_size=32-train_dataset_size=10000-sampler=SamplerTypes.SAMPLER_SOBOL-cm_shifts=0.7;0.1;0.005-ps_origin=0;0;0;0-ps_shifts=0.01;0.01;1.57;1.57.ckpt"
